@@ -61,5 +61,18 @@ corner aggressively to test resize handling.
 
 ## Why a custom renderer
 
-See `docs/rendering-plan.md` for the design and the cost/benefit of
-*not* using Rich + prompt_toolkit + patch_stdout.
+The renderer is the foundation — everything else hangs off it. Read
+these in order:
+
+- **[`docs/rendering-superpowers.md`](docs/rendering-superpowers.md)** —
+  what the architecture buys us, the One Rule (only `diff.py` writes
+  to stdout), the anti-patterns to avoid, and how to extend the
+  renderer without breaking it. **Read this first**.
+- [`docs/rendering-plan.md`](docs/rendering-plan.md) — the original
+  five-layer architecture decisions and the cost/benefit of *not*
+  using Rich + prompt_toolkit + patch_stdout.
+- [`docs/concepts.md`](docs/concepts.md) — features enabled by the
+  rendering architecture, organized by capability category, with
+  rough effort estimates.
+- [`CLAUDE.md`](CLAUDE.md) — repo-level notes auto-loaded by Claude
+  Code sessions in this directory.
