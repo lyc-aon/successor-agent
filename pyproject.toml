@@ -13,5 +13,8 @@ dependencies = []
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 
+[project.scripts]
+ronin = "ronin.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
