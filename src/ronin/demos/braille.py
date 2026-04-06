@@ -144,6 +144,28 @@ class RoninDemo(App):
         if not self.arts:
             raise RuntimeError(f"No frames loaded from {assets_dir}")
         self.cycle_s = len(self.arts) * (HOLD_S + TRANS_S)
+        # Animation clock — separate from App.elapsed (which is wall time).
+        # We advance _anim_t only when not paused, so pausing freezes the
+        # animation but the renderer keeps ticking (so resize / fps still
+        # update during a pause).
+        self._paused = False
+        self._anim_t = 0.0
+        self._last_live: float | None = None
+
+    def on_key(self, byte: int) -> None:
+        # Space, p, P → toggle pause. Lets the user select+copy braille
+        # without the morph overwriting cells under the selection.
+        if byte in (0x20, 0x70, 0x50):
+            self._paused = not self._paused
+
+    def _advance_anim(self) -> None:
+        now = self.elapsed
+        if self._last_live is None:
+            self._last_live = now
+            return
+        if not self._paused:
+            self._anim_t += now - self._last_live
+        self._last_live = now
 
     def _current(self, grid: Grid) -> tuple[list[str], str, str, float, tuple[int, int]]:
         """Return (frame_lines, name_a, name_b, t, (cells_w, cells_h))."""
@@ -152,7 +174,7 @@ class RoninDemo(App):
             return ([], self.names[0], self.names[0], 0.0, (0, 0))
 
         n = len(self.arts)
-        ct = self.elapsed % self.cycle_s
+        ct = self._anim_t % self.cycle_s
         seg = HOLD_S + TRANS_S
         idx = int(ct // seg)
         offset = ct - idx * seg
@@ -170,6 +192,7 @@ class RoninDemo(App):
         return (interpolate_frame(a_lines, b_lines, t), name_a, name_b, t, (cells_w, cells_h))
 
     def on_tick(self, grid: Grid) -> None:
+        self._advance_anim()
         rows, cols = grid.rows, grid.cols
         frame_lines, name_a, name_b, t, (cw, ch) = self._current(grid)
         if name_a == name_b:
@@ -177,9 +200,10 @@ class RoninDemo(App):
         else:
             phase = f"morph {name_a} → {name_b}  {int(t * 100):3d}%"
         fps_actual = self.frame / max(1e-6, self.elapsed)
-        left = f" ronin · {phase} "
+        prefix = "PAUSED · " if self._paused else ""
+        left = f" ronin · {prefix}{phase} "
         right = f" {cw}×{ch} art · {cols}×{rows} term · {fps_actual:5.1f} fps "
-        subtitle = "— pos-th30 nusamurai · bayer dot interp · viewport-scaled · q to quit —"
+        subtitle = "— pos-th30 nusamurai · bayer dot interp · viewport-scaled · space=pause q=quit —"
         top, bottom = _paint_chrome(
             grid,
             subtitle=subtitle,

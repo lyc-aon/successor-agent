@@ -22,6 +22,7 @@ restore is guaranteed via __exit__ + atexit fallback.
 from __future__ import annotations
 
 import atexit
+import base64
 import fcntl
 import os
 import signal
@@ -31,12 +32,22 @@ import termios
 import tty
 
 CSI = "\x1b["
+OSC = "\x1b]"
+BEL = "\x07"
+
 ALT_SCREEN_ON = CSI + "?1049h"
 ALT_SCREEN_OFF = CSI + "?1049l"
 HIDE_CURSOR = CSI + "?25l"
 SHOW_CURSOR = CSI + "?25h"
 RESET_SGR = CSI + "0m"
 CLEAR_HOME = CSI + "2J" + CSI + "H"
+
+# Bracketed paste mode (DEC mode 2004) — when on, the terminal wraps
+# pasted content in CSI 200 ~ ... CSI 201 ~ so the input parser can
+# distinguish keystrokes from pastes. Cheap to enable, expensive to
+# retrofit later when the input handler is wrong about it.
+BRACKETED_PASTE_ON = CSI + "?2004h"
+BRACKETED_PASTE_OFF = CSI + "?2004l"
 
 
 class Terminal:
@@ -49,9 +60,16 @@ class Terminal:
                     scrollback is preserved.
     """
 
-    def __init__(self, *, raw: bool = True, alt_screen: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        raw: bool = True,
+        alt_screen: bool = True,
+        bracketed_paste: bool = True,
+    ) -> None:
         self.raw = raw
         self.alt_screen = alt_screen
+        self.bracketed_paste = bracketed_paste
         self.fd = sys.stdout.fileno()
         self._stdin_fd = sys.stdin.fileno()
         self._saved_termios: list | None = None
@@ -94,6 +112,21 @@ class Terminal:
             return True
         return False
 
+    def copy_to_clipboard(self, text: str) -> None:
+        """Programmatically copy text to the system clipboard via OSC 52.
+
+        Supported by Ghostty, kitty, iTerm2, alacritty, modern xterm.
+        Inside tmux, requires `set -g set-clipboard on` (or external mode).
+        Bytes per call are bounded by terminal-specific limits — most
+        accept up to ~100 KB; xterm caps lower. Truncates silently if
+        the terminal rejects the sequence.
+        """
+        if not text:
+            return
+        encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        # OSC 52 ; c (clipboard) ; <base64> BEL
+        self.write(f"{OSC}52;c;{encoded}{BEL}")
+
     # ─── lifecycle ───
 
     def __enter__(self) -> "Terminal":
@@ -108,11 +141,13 @@ class Terminal:
                     tty.setcbreak(self._stdin_fd)
             except termios.error:
                 self._saved_termios = None
-        # Enter alt screen, hide cursor, clear.
+        # Enter alt screen, hide cursor, enable bracketed paste, clear.
         out: list[str] = []
         if self.alt_screen:
             out.append(ALT_SCREEN_ON)
         out.append(HIDE_CURSOR)
+        if self.bracketed_paste:
+            out.append(BRACKETED_PASTE_ON)
         out.append(CLEAR_HOME)
         self.write("".join(out))
         # Install handlers.
@@ -138,6 +173,8 @@ class Terminal:
             return
         self._installed = False
         out: list[str] = [RESET_SGR, SHOW_CURSOR]
+        if self.bracketed_paste:
+            out.append(BRACKETED_PASTE_OFF)
         if self.alt_screen:
             out.append(ALT_SCREEN_OFF)
         try:
