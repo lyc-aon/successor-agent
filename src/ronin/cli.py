@@ -1,11 +1,14 @@
 """Ronin command-line interface.
 
-    ronin                — show help
-    ronin demo           — braille animation
-    ronin show <name>    — render a single static braille frame
-    ronin frames         — list available braille frames
-    ronin doctor         — terminal capabilities and renderer info
-    ronin bench          — renderer benchmark
+The project is "Ronin" but the installed binary is `rn` (the `ronin`
+binary name is heavily contested in the open-source ecosystem).
+
+    rn                — show help
+    rn demo           — braille animation
+    rn show <name>    — render a single static braille frame
+    rn frames         — list available braille frames
+    rn doctor         — terminal capabilities and renderer info
+    rn bench          — renderer benchmark
 """
 
 from __future__ import annotations
@@ -190,14 +193,14 @@ def cmd_bench(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="ronin",
-        description="ronin — agent harness for locally-run mid-grade models",
+        prog="rn",
+        description="rn — Ronin agent harness for locally-run mid-grade models",
     )
     p.add_argument(
         "-V",
         "--version",
         action="version",
-        version=f"ronin {__version__}",
+        version=f"rn (ronin) {__version__}",
     )
 
     sub = p.add_subparsers(dest="cmd", metavar="<command>")

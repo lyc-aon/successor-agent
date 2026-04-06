@@ -14,7 +14,11 @@ dependencies = []
 dev = ["pytest>=8"]
 
 [project.scripts]
-ronin = "ronin.cli:main"
+# Project is "Ronin" but the binary is `rn` to avoid the very crowded
+# `ronin` namespace (Node CLI framework, npm @ronin/cli, ronin-rb,
+# axieinfinity blockchain, hundredrabbits graphics terminal, etc).
+# Convention: ripgrep → rg, fd-find → fd, bat-cat → bat.
+rn = "ronin.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

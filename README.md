@@ -31,14 +31,33 @@ ronin/
     └── demo_ronin.py           # Full-screen braille animation
 ```
 
-## Run the demo
+## Install
+
+The project is named **Ronin** but the installed binary is **`rn`**
+(the `ronin` name is heavily contested in the open-source ecosystem
+— Node CLI framework, npm `@ronin/cli`, ronin-rb, axieinfinity
+blockchain, etc).
 
 ```
-python3 examples/demo_ronin.py
+pip install -e .
 ```
 
-Press **q** or **Ctrl+C** to exit. Drag the terminal corner aggressively
-to test resize handling.
+This registers `rn` in `~/.local/bin` so it's available from anywhere.
+
+## Use
+
+```
+rn               show help
+rn -V            version
+rn demo          braille animation
+rn show <name>   render a single static braille frame
+rn frames        list available frames with dimensions
+rn doctor        terminal capabilities + renderer info
+rn bench         renderer benchmark (no TTY required)
+```
+
+Press **q** or **Ctrl+C** to exit any TUI command. Drag the terminal
+corner aggressively to test resize handling.
 
 ## Why a custom renderer
 
