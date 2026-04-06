@@ -4,6 +4,7 @@ The project is "Ronin" but the installed binary is `rn` (the `ronin`
 binary name is heavily contested in the open-source ecosystem).
 
     rn                — show help
+    rn chat           — chat interface (v0, scripted ronin responses)
     rn demo           — braille animation
     rn show <name>    — render a single static braille frame
     rn frames         — list available braille frames
@@ -49,6 +50,13 @@ def _list_frames() -> list[tuple[str, Path]]:
 
 
 # ─── subcommands ───
+
+
+def cmd_chat(args: argparse.Namespace) -> int:
+    from .demos.chat import RoninChat
+
+    RoninChat().run()
+    return 0
 
 
 def cmd_demo(args: argparse.Namespace) -> int:
@@ -204,6 +212,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sub = p.add_subparsers(dest="cmd", metavar="<command>")
+
+    p_chat = sub.add_parser("chat", help="chat interface (v0, scripted)")
+    p_chat.set_defaults(func=cmd_chat)
 
     p_demo = sub.add_parser("demo", help="braille animation demo")
     p_demo.add_argument("--fps", type=float, default=30.0, help="target FPS (default 30)")

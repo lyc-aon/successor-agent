@@ -36,6 +36,9 @@ class App:
 
     target_fps:   upper bound on redraws per second
     quit_keys:    bytes whose receipt ends the loop (default q, Q, Ctrl+C)
+    terminal:     optional pre-configured Terminal. Subclasses that want
+                  e.g. bracketed_paste=False or alt_screen=False pass one
+                  in here.
     """
 
     def __init__(
@@ -43,10 +46,11 @@ class App:
         *,
         target_fps: float = 30.0,
         quit_keys: bytes = b"qQ\x03",
+        terminal: Terminal | None = None,
     ) -> None:
         self.target_fps = target_fps
         self.quit_keys = quit_keys
-        self.term = Terminal()
+        self.term = terminal if terminal is not None else Terminal()
         self._front: Grid | None = None
         self._back: Grid | None = None
         self._first_frame = True
