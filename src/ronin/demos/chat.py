@@ -244,14 +244,18 @@ class RoninChat(App):
             fill_region(grid, 0, 0, cols, rows, style=Style(bg=INK_DEEP))
             return
 
-        # Layout
+        # Layout — bottom-up:
+        #   row N-1               static footer (ctx bar, 1 row)
+        #   rows N-1-input_h..N-2 input area (input_h rows)
+        #   rows title_h..N-2-input_h  chat scroll area
+        #   row 0                 title (1 row)
         title_h = 1
         input_h = self._input_height(cols)
         footer_static_h = 1
+        static_y = rows - footer_static_h           # last row
+        input_y = static_y - input_h                # input_h rows above the ctx bar
         chat_top = title_h
-        chat_bottom = max(chat_top, rows - footer_static_h - input_h)
-        static_y = chat_bottom
-        input_y = static_y + footer_static_h
+        chat_bottom = max(chat_top, input_y)        # chat occupies up to where input begins
 
         # ─── Background ───
         fill_region(grid, 0, 0, cols, rows, style=Style(bg=INK_DEEP))
@@ -265,13 +269,13 @@ class RoninChat(App):
         # ─── Chat scroll area ───
         self._paint_chat_area(grid, chat_top, chat_bottom, cols)
 
-        # ─── Static footer (context bar) ───
-        if static_y < rows:
-            self._paint_static_footer(grid, static_y, cols)
+        # ─── Input area (above the ctx bar) ───
+        if input_y >= 0 and input_y < rows:
+            self._paint_input(grid, input_y, min(input_h, rows - input_y), cols)
 
-        # ─── Input area ───
-        if input_y < rows:
-            self._paint_input(grid, input_y, rows - input_y, cols)
+        # ─── Static footer (context bar) — at the very bottom ───
+        if 0 <= static_y < rows:
+            self._paint_static_footer(grid, static_y, cols)
 
     # ─── Region painters ───
 
