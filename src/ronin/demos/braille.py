@@ -5,6 +5,12 @@ RoninShow  — render a single static braille frame in the same chrome
 
 Both subclass `App` so they share the renderer's frame loop, double
 buffering, resize handling, and signal-safe terminal restore.
+
+Both also use `BrailleArt` from render.braille — the Pretext-shaped
+prepare/layout primitive — so the source frames are parsed exactly
+once at startup, then re-laid-out on every terminal resize without
+re-parsing. Layout results are cached per target size; resize triggers
+exactly one resample pass per visible frame.
 """
 
 from __future__ import annotations
@@ -12,7 +18,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..render.app import App
-from ..render.braille import interpolate_frame, load_frame
+from ..render.braille import (
+    BrailleArt,
+    fit_dimensions,
+    interpolate_frame,
+    load_frame,
+)
 from ..render.cells import ATTR_BOLD, ATTR_DIM, Grid, Style
 from ..render.paint import fill_region, paint_lines, paint_text
 
@@ -43,9 +54,15 @@ DEFAULT_SEQUENCE: tuple[str, ...] = (
 HOLD_S = 1.4
 TRANS_S = 0.55
 
+# Number of cells reserved for chrome:
+#   - 2 rows above the art (title + subtitle)
+#   - 1 row below the art (status bar)
+CHROME_TOP_ROWS = 2
+CHROME_BOTTOM_ROWS = 1
+
 
 def _paint_chrome(grid: Grid, *, subtitle: str, status_left: str, status_right: str) -> tuple[int, int]:
-    """Paint the title row, subtitle row, and status bar.
+    """Paint title row, subtitle row, and status bar.
 
     Returns (top_avail, bottom_avail) — the y range available for the
     main content (excluding chrome).
@@ -72,15 +89,10 @@ def _paint_chrome(grid: Grid, *, subtitle: str, status_left: str, status_right: 
         rx = max(0, cols - len(status_right))
         paint_text(grid, status_right, rx, sb_y, style=sb_style)
 
-    return (3, max(3, rows - 1))
+    return (CHROME_TOP_ROWS + 1, max(CHROME_TOP_ROWS + 1, rows - CHROME_BOTTOM_ROWS))
 
 
-def _paint_ronin_block(
-    grid: Grid,
-    lines: list[str],
-    top: int,
-    bottom: int,
-) -> None:
+def _paint_ronin_block(grid: Grid, lines: list[str], top: int, bottom: int) -> None:
     """Center a braille block in the [top, bottom) row range."""
     if not lines or bottom <= top:
         return
@@ -93,7 +105,25 @@ def _paint_ronin_block(
     paint_lines(grid, lines, x, y, style=Style(fg=INK_BLOOD, bg=INK_DEEP))
 
 
-# ─── RoninDemo: animated keyframe sequence ───
+def _viewport_target(art: BrailleArt, grid: Grid) -> tuple[int, int]:
+    """Pick the target braille cell size for the current viewport.
+
+    Subtracts chrome rows from the available height before fitting,
+    and asks `fit_dimensions` for the largest aspect-preserving cell-
+    aligned rectangle.
+    """
+    avail_h = grid.rows - CHROME_TOP_ROWS - CHROME_BOTTOM_ROWS
+    avail_w = grid.cols
+    return fit_dimensions(
+        art.dot_h,
+        art.dot_w,
+        avail_cells_h=avail_h,
+        avail_cells_w=avail_w,
+        pad_cells=1,
+    )
+
+
+# ─── RoninDemo: animated keyframe sequence with viewport scaling ───
 
 
 class RoninDemo(App):
@@ -106,42 +136,50 @@ class RoninDemo(App):
     ) -> None:
         super().__init__(target_fps=target_fps)
         self.assets_dir = assets_dir
-        self.frames: list[list[str]] = []
+        self.arts: list[BrailleArt] = []
         self.names: list[str] = []
         for name in sequence:
-            self.frames.append(load_frame(assets_dir / f"{name}-ascii-art.txt"))
+            self.arts.append(BrailleArt(load_frame(assets_dir / f"{name}-ascii-art.txt")))
             self.names.append(name)
-        if not self.frames:
+        if not self.arts:
             raise RuntimeError(f"No frames loaded from {assets_dir}")
-        self.cycle_s = len(self.frames) * (HOLD_S + TRANS_S)
+        self.cycle_s = len(self.arts) * (HOLD_S + TRANS_S)
 
-    def _current(self) -> tuple[list[str], str, str, float]:
-        n = len(self.frames)
+    def _current(self, grid: Grid) -> tuple[list[str], str, str, float, tuple[int, int]]:
+        """Return (frame_lines, name_a, name_b, t, (cells_w, cells_h))."""
+        cells_w, cells_h = _viewport_target(self.arts[0], grid)
+        if cells_w <= 0 or cells_h <= 0:
+            return ([], self.names[0], self.names[0], 0.0, (0, 0))
+
+        n = len(self.arts)
         ct = self.elapsed % self.cycle_s
         seg = HOLD_S + TRANS_S
         idx = int(ct // seg)
         offset = ct - idx * seg
-        a = self.frames[idx]
+
+        a_lines = self.arts[idx].layout(cells_w, cells_h)
         name_a = self.names[idx]
+
         if offset < HOLD_S:
-            return (a, name_a, name_a, 0.0)
+            return (a_lines, name_a, name_a, 0.0, (cells_w, cells_h))
+
         next_idx = (idx + 1) % n
-        b = self.frames[next_idx]
+        b_lines = self.arts[next_idx].layout(cells_w, cells_h)
         name_b = self.names[next_idx]
         t = (offset - HOLD_S) / TRANS_S
-        return (interpolate_frame(a, b, t), name_a, name_b, t)
+        return (interpolate_frame(a_lines, b_lines, t), name_a, name_b, t, (cells_w, cells_h))
 
     def on_tick(self, grid: Grid) -> None:
         rows, cols = grid.rows, grid.cols
-        frame_lines, name_a, name_b, t = self._current()
+        frame_lines, name_a, name_b, t, (cw, ch) = self._current(grid)
         if name_a == name_b:
             phase = f"hold  {name_a}"
         else:
             phase = f"morph {name_a} → {name_b}  {int(t * 100):3d}%"
         fps_actual = self.frame / max(1e-6, self.elapsed)
         left = f" ronin · {phase} "
-        right = f" frame {self.frame}  {fps_actual:5.1f} fps  {cols}×{rows} "
-        subtitle = "— pos-th30 nusamurai · bayer dot interp · q to quit —"
+        right = f" {cw}×{ch} art · {cols}×{rows} term · {fps_actual:5.1f} fps "
+        subtitle = "— pos-th30 nusamurai · bayer dot interp · viewport-scaled · q to quit —"
         top, bottom = _paint_chrome(
             grid,
             subtitle=subtitle,
@@ -151,7 +189,7 @@ class RoninDemo(App):
         _paint_ronin_block(grid, frame_lines, top, bottom)
 
 
-# ─── RoninShow: single static frame ───
+# ─── RoninShow: single static frame, viewport-scaled ───
 
 
 class RoninShow(App):
@@ -159,19 +197,19 @@ class RoninShow(App):
         # Static content — low frame rate is enough.
         super().__init__(target_fps=10.0)
         self.pose_name = name
-        self.art = load_frame(path)
+        self.art = BrailleArt(load_frame(path))
 
     def on_tick(self, grid: Grid) -> None:
         rows, cols = grid.rows, grid.cols
-        h = len(self.art)
-        w = max((len(line) for line in self.art), default=0)
-        subtitle = f"— static · {self.pose_name} · q to quit —"
+        cells_w, cells_h = _viewport_target(self.art, grid)
+        lines = self.art.layout(cells_w, cells_h) if (cells_w > 0 and cells_h > 0) else []
+        subtitle = f"— static · {self.pose_name} · viewport-scaled · q to quit —"
         left = f" ronin · show {self.pose_name} "
-        right = f" {w}×{h} art  ·  {cols}×{rows} term "
+        right = f" {cells_w}×{cells_h} art · {cols}×{rows} term "
         top, bottom = _paint_chrome(
             grid,
             subtitle=subtitle,
             status_left=left,
             status_right=right,
         )
-        _paint_ronin_block(grid, self.art, top, bottom)
+        _paint_ronin_block(grid, lines, top, bottom)
