@@ -77,7 +77,7 @@ from ..render.cells import (
     Grid,
     Style,
 )
-from ..render.paint import fill_region, paint_text
+from ..render.paint import fill_region, paint_box, paint_text
 from ..render.terminal import Terminal
 from ..render.text import PreparedText, ease_out_cubic, hard_wrap, lerp_rgb
 from ..render.theme import (
@@ -210,6 +210,73 @@ class _HitBox:
 WHEEL_SCROLL_LINES = 3
 
 
+# ─── Slash command registry ───
+#
+# Every slash command lives here as a SlashCommand instance. The
+# autocomplete dropdown reads this list to populate suggestions and
+# the _submit handler matches commands by name. Adding a new command
+# is one entry in SLASH_COMMANDS plus a handler call in _submit.
+
+
+@dataclass(frozen=True, slots=True)
+class SlashCommand:
+    """A registered slash command.
+
+    name:        canonical name (without leading slash)
+    aliases:     other names that match (e.g. "q" for "quit")
+    description: short one-line summary for the dropdown
+    args_hint:   short hint shown after the description, e.g.
+                 "[dark|light|forge]" — empty if the command takes no args
+    """
+    name: str
+    aliases: tuple[str, ...] = ()
+    description: str = ""
+    args_hint: str = ""
+
+
+SLASH_COMMANDS: tuple[SlashCommand, ...] = (
+    SlashCommand(
+        name="quit",
+        aliases=("q", "exit"),
+        description="leave the chat",
+    ),
+    SlashCommand(
+        name="theme",
+        description="switch color theme",
+        args_hint="[dark|light|forge|cycle]",
+    ),
+    SlashCommand(
+        name="density",
+        description="adjust layout density",
+        args_hint="[compact|normal|spacious|cycle]",
+    ),
+    SlashCommand(
+        name="mouse",
+        description="toggle mouse reporting",
+        args_hint="[on|off|toggle]",
+    ),
+)
+
+
+def filter_slash_commands(prefix: str) -> list[SlashCommand]:
+    """Return commands whose name or alias starts with `prefix`.
+
+    Sorted alphabetically. An empty prefix returns every command.
+    """
+    p = prefix.lower()
+    out: list[SlashCommand] = []
+    for cmd in SLASH_COMMANDS:
+        if cmd.name.startswith(p):
+            out.append(cmd)
+            continue
+        for alias in cmd.aliases:
+            if alias.startswith(p):
+                out.append(cmd)
+                break
+    out.sort(key=lambda c: c.name)
+    return out
+
+
 # ─── Tunables ───
 
 FADE_IN_S = 0.35
@@ -320,6 +387,13 @@ class RoninChat(App):
         # the start of on_tick and refilled as widgets are painted.
         self._hit_boxes: list[_HitBox] = []
 
+        # ─── Slash command autocomplete state ───
+        # The dropdown is shown whenever the input buffer starts with
+        # '/' and contains no spaces. Selection is the index into the
+        # currently-filtered list. The list itself is computed on demand
+        # via _autocomplete_state() because it's cheap.
+        self._autocomplete_selected: int = 0
+
         # Probe the server immediately so we can show a useful greeting.
         server_up = self.client.health()
         if server_up:
@@ -407,6 +481,16 @@ class RoninChat(App):
                     self._cycle_density()
                 elif hb.action == "scroll_to_bottom":
                     self._scroll_to_bottom()
+                elif hb.action.startswith("slash:"):
+                    # Click on an autocomplete row — jump selection to
+                    # this command and accept it.
+                    name = hb.action[len("slash:"):]
+                    matches, _ = self._autocomplete_state()
+                    for i, cmd in enumerate(matches):
+                        if cmd.name == name:
+                            self._autocomplete_selected = i
+                            break
+                    self._autocomplete_accept()
                 return
 
     def _handle_key_event(self, event: KeyEvent) -> None:
@@ -435,11 +519,19 @@ class RoninChat(App):
             return
 
         # ─── Scroll keys (always available, even mid-stream) ───
+        # When the autocomplete dropdown is open, Up/Down navigate the
+        # dropdown selection instead of scrolling the chat history.
         if event.key == Key.UP:
-            self._scroll_lines(1)
+            if self._autocomplete_active():
+                self._autocomplete_move(-1)
+            else:
+                self._scroll_lines(1)
             return
         if event.key == Key.DOWN:
-            self._scroll_lines(-1)
+            if self._autocomplete_active():
+                self._autocomplete_move(1)
+            else:
+                self._scroll_lines(-1)
             return
         if event.key == Key.PG_UP:
             self._scroll_lines(self._page_size())
@@ -488,14 +580,40 @@ class RoninChat(App):
         if event.key == Key.BACKSPACE:
             if self.input_buffer:
                 self.input_buffer = self.input_buffer[:-1]
+                # Reset autocomplete selection when the buffer changes,
+                # so the next dropdown render starts at the top.
+                self._autocomplete_selected = 0
             return
         if event.key == Key.ENTER:
             if self._in_paste:
                 # Inside a paste, Enter is a literal newline.
                 self.input_buffer += "\n"
                 return
+            # If the autocomplete dropdown is open and the user has
+            # NOT yet typed the full selected command, accept the
+            # selection (replace the buffer). Otherwise submit.
+            matches, sel = self._autocomplete_state()
+            if matches:
+                cmd = matches[sel]
+                expected = f"/{cmd.name}"
+                if self.input_buffer.rstrip() != expected:
+                    self._autocomplete_accept()
+                    return
             if self.input_buffer.strip():
                 self._submit()
+            return
+        if event.key == Key.TAB:
+            # Tab always accepts the current autocomplete selection,
+            # never submits. If no dropdown is open, Tab is a no-op.
+            if self._autocomplete_active():
+                self._autocomplete_accept()
+            return
+        if event.key == Key.ESC:
+            # Esc cancels an in-progress slash command. If the buffer
+            # doesn't start with /, Esc is a no-op (we don't want to
+            # blow away a long message the user is composing).
+            if self.input_buffer.startswith("/"):
+                self._autocomplete_dismiss()
             return
 
         # ─── Character input (printable + UTF-8 + paste chunks) ───
@@ -509,6 +627,8 @@ class RoninChat(App):
             )
             if safe:
                 self.input_buffer += safe
+                # New character → re-filter the autocomplete from the top.
+                self._autocomplete_selected = 0
             return
 
         # Anything else (unknown CSI, F-keys, etc.) silently ignored.
@@ -584,6 +704,59 @@ class RoninChat(App):
             return
         self.term.set_mouse_reporting(False)
         self._mouse_enabled = False
+
+    # ─── Slash command autocomplete ───
+
+    def _autocomplete_state(self) -> tuple[list[SlashCommand], int]:
+        """Return (matches, selected_index) for the current input buffer.
+
+        Returns ([], 0) if autocomplete should NOT be shown:
+          - input buffer doesn't start with '/'
+          - input buffer contains a space (we're past the command name)
+          - no commands match the typed prefix
+        """
+        text = self.input_buffer
+        if not text.startswith("/"):
+            return [], 0
+        rest = text[1:]
+        if " " in rest:
+            return [], 0
+        matches = filter_slash_commands(rest)
+        if not matches:
+            return [], 0
+        sel = max(0, min(self._autocomplete_selected, len(matches) - 1))
+        return matches, sel
+
+    def _autocomplete_active(self) -> bool:
+        return bool(self._autocomplete_state()[0])
+
+    def _autocomplete_move(self, delta: int) -> None:
+        matches, _ = self._autocomplete_state()
+        if not matches:
+            return
+        n = len(matches)
+        self._autocomplete_selected = (self._autocomplete_selected + delta) % n
+
+    def _autocomplete_accept(self) -> None:
+        """Replace the input buffer with the highlighted command name.
+
+        Adds a trailing space if the command takes args (giving the
+        user a place to keep typing) or leaves the buffer at just
+        '/cmd' if it doesn't.
+        """
+        matches, sel = self._autocomplete_state()
+        if not matches:
+            return
+        cmd = matches[sel]
+        self.input_buffer = f"/{cmd.name}"
+        if cmd.args_hint:
+            self.input_buffer += " "
+        self._autocomplete_selected = 0
+
+    def _autocomplete_dismiss(self) -> None:
+        """Cancel the in-progress slash command and reset selection."""
+        self.input_buffer = ""
+        self._autocomplete_selected = 0
 
     def _current_theme(self) -> Theme:
         """The theme to use for THIS frame's render.
@@ -901,6 +1074,13 @@ class RoninChat(App):
         if 0 <= static_y < rows:
             self._paint_static_footer(grid, static_y, cols, theme)
 
+        # ─── Slash command autocomplete dropdown ───
+        # Painted LAST so it overlays the chat area cells just above the
+        # input. The chat content underneath is temporarily hidden while
+        # the dropdown is visible; closing it (Esc / submit / type a
+        # space) restores everything on the next frame's diff.
+        self._paint_autocomplete(grid, theme, input_y)
+
     # ─── Region painters ───
 
     def _paint_chat_area(
@@ -1037,6 +1217,159 @@ class RoninChat(App):
         for line in stream_pt.lines(body_width):
             out.append((line, theme.accent))
         return out
+
+    # ─── Slash command autocomplete dropdown ───
+
+    def _paint_autocomplete(
+        self,
+        grid: Grid,
+        theme: Theme,
+        input_y: int,
+    ) -> None:
+        """Render the slash-command suggestions popover above the input.
+
+        The popover is bordered, left-aligned with the prompt, and
+        sized to fit the longest entry. Each row records a hit box so
+        the row is clickable when mouse mode is on.
+        """
+        matches, sel = self._autocomplete_state()
+        if not matches:
+            return
+
+        rows, cols = grid.rows, grid.cols
+        if cols < 30 or input_y < 4:
+            # Not enough room — skip silently. The keyboard shortcuts
+            # still work; the dropdown just doesn't render.
+            return
+
+        # ─── Compute the column widths and box size ───
+        # Cap the visible matches so the box never exceeds half the
+        # vertical space available above the input.
+        max_visible = max(1, min(len(matches), max(3, input_y - 3)))
+        visible = matches[:max_visible]
+
+        cmd_col_w = max(len(f"/{c.name}") for c in visible)
+        desc_col_w = max(len(c.description) for c in visible) if visible else 0
+        hint_col_w = max(len(c.args_hint) for c in visible) if visible else 0
+
+        # Inner content width: cmd  +  2  +  desc  +  (2 + hint if any)
+        inner_w = cmd_col_w + 2 + desc_col_w
+        if hint_col_w > 0:
+            inner_w += 2 + hint_col_w
+        # Ensure a minimum width for visual heft.
+        inner_w = max(inner_w, 36)
+        # Add 2 cells of horizontal padding inside the border.
+        box_w = inner_w + 4
+        # Don't exceed the available width.
+        box_w = min(box_w, cols - 2)
+
+        # Box height: top border + items + bottom border + hint row.
+        box_h = max_visible + 2
+
+        # Position: left-aligned with the prompt indent, sitting just
+        # above the input area with a 1-cell gap.
+        box_x = max(0, PROMPT_WIDTH)
+        box_y = input_y - box_h - 1
+        if box_y < 1:
+            # Not enough vertical room — clamp.
+            box_y = 1
+            box_h = min(box_h, input_y - box_y - 1)
+            if box_h < 3:
+                return
+
+        # ─── Blank out the rows the dropdown occupies ───
+        # The box's border doesn't cover the full row width, so without
+        # this the chat content underneath would "leak" around the
+        # dropdown's left and right edges. Filling the entire row first
+        # gives the dropdown a clean visual frame.
+        for blank_y in range(box_y, box_y + box_h):
+            if 0 <= blank_y < grid.rows:
+                fill_region(
+                    grid, 0, blank_y, cols, 1,
+                    style=Style(bg=theme.bg),
+                )
+
+        # ─── Draw the box ───
+        border_style = Style(
+            fg=theme.accent_warm,
+            bg=theme.bg_input,
+            attrs=ATTR_BOLD,
+        )
+        fill_style = Style(fg=theme.fg, bg=theme.bg_input)
+        paint_box(
+            grid,
+            box_x,
+            box_y,
+            box_w,
+            box_h,
+            style=border_style,
+            fill_style=fill_style,
+        )
+
+        # ─── Draw the items ───
+        item_x = box_x + 2  # 2 cells of left padding inside the border
+        for i, cmd in enumerate(visible):
+            row_y = box_y + 1 + i
+            if row_y >= box_y + box_h - 1:
+                break  # ran out of vertical room
+
+            is_selected = i == sel
+            row_bg = theme.accent if is_selected else theme.bg_input
+            row_fg = theme.bg if is_selected else theme.fg
+            dim_fg = theme.bg if is_selected else theme.fg_dim
+            subtle_fg = theme.bg if is_selected else theme.fg_subtle
+
+            # Fill the row's background (so the highlight extends across)
+            fill_region(
+                grid,
+                box_x + 1,
+                row_y,
+                box_w - 2,
+                1,
+                style=Style(bg=row_bg),
+            )
+
+            # Command name
+            cmd_text = f"/{cmd.name}"
+            paint_text(
+                grid,
+                cmd_text,
+                item_x,
+                row_y,
+                style=Style(fg=row_fg, bg=row_bg, attrs=ATTR_BOLD),
+            )
+
+            # Description (right of the command, aligned column)
+            desc_x = item_x + cmd_col_w + 2
+            paint_text(
+                grid,
+                cmd.description,
+                desc_x,
+                row_y,
+                style=Style(fg=dim_fg, bg=row_bg),
+            )
+
+            # Args hint (if any) — pushed to the right of the description
+            if cmd.args_hint:
+                hint_x = desc_x + desc_col_w + 2
+                paint_text(
+                    grid,
+                    cmd.args_hint,
+                    hint_x,
+                    row_y,
+                    style=Style(fg=subtle_fg, bg=row_bg, attrs=ATTR_DIM),
+                )
+
+            # Record a hit box for this row so it's clickable.
+            self._hit_boxes.append(
+                _HitBox(
+                    x=box_x + 1,
+                    y=row_y,
+                    w=box_w - 2,
+                    h=1,
+                    action=f"slash:{cmd.name}",
+                )
+            )
 
     # ─── Static footer ───
 

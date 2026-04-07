@@ -132,3 +132,76 @@ def fill_region(
     for row in range(y0, y1):
         for col in range(x0, x1):
             grid.set(row, col, cell)
+
+
+# Box-drawing constants for paint_box. Using rounded corners by default
+# because they look softer in mono fonts. Square is also available.
+BOX_ROUND = ("\u256d", "\u256e", "\u2570", "\u256f", "\u2500", "\u2502")
+BOX_SQUARE = ("\u250c", "\u2510", "\u2514", "\u2518", "\u2500", "\u2502")
+BOX_HEAVY = ("\u250f", "\u2513", "\u2517", "\u251b", "\u2501", "\u2503")
+#                                                       (top-l, top-r,
+#                                                        bot-l, bot-r,
+#                                                        horiz, vert)
+
+
+def paint_box(
+    grid: Grid,
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    *,
+    style: Style = DEFAULT_STYLE,
+    fill_style: Style | None = None,
+    fill_char: str = " ",
+    chars: tuple[str, str, str, str, str, str] = BOX_ROUND,
+) -> None:
+    """Draw a thin-bordered rectangle with line-drawing chars.
+
+    The interior is filled with `fill_char` styled by `fill_style`
+    (defaults to the same style as the border, which gives a clean
+    monochrome popover look). Use a different fill_style to get a
+    border-on-tinted-bg appearance.
+
+    Out-of-bounds coordinates are clipped silently. The minimum
+    drawable size is 2x2.
+    """
+    if w < 2 or h < 2:
+        return
+    fill_style = fill_style if fill_style is not None else style
+    tl, tr, bl, br, hbar, vbar = chars
+
+    # Interior fill (inset 1 cell on every side)
+    fill_region(
+        grid, x + 1, y + 1, w - 2, h - 2,
+        style=fill_style, char=fill_char,
+    )
+
+    # Top border
+    if 0 <= y < grid.rows:
+        if 0 <= x < grid.cols:
+            grid.set(y, x, Cell(tl, style))
+        for cx in range(x + 1, x + w - 1):
+            if 0 <= cx < grid.cols:
+                grid.set(y, cx, Cell(hbar, style))
+        if 0 <= x + w - 1 < grid.cols:
+            grid.set(y, x + w - 1, Cell(tr, style))
+
+    # Bottom border
+    by = y + h - 1
+    if 0 <= by < grid.rows:
+        if 0 <= x < grid.cols:
+            grid.set(by, x, Cell(bl, style))
+        for cx in range(x + 1, x + w - 1):
+            if 0 <= cx < grid.cols:
+                grid.set(by, cx, Cell(hbar, style))
+        if 0 <= x + w - 1 < grid.cols:
+            grid.set(by, x + w - 1, Cell(br, style))
+
+    # Side borders
+    for ry in range(y + 1, y + h - 1):
+        if 0 <= ry < grid.rows:
+            if 0 <= x < grid.cols:
+                grid.set(ry, x, Cell(vbar, style))
+            if 0 <= x + w - 1 < grid.cols:
+                grid.set(ry, x + w - 1, Cell(vbar, style))
