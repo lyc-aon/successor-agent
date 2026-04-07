@@ -77,7 +77,7 @@ src/successor/recorder.py    record/replay session traces
 src/successor/cli.py         argparse subcommand dispatch (`successor` binary)
 src/successor/__main__.py    `python -m successor` entry point
 
-tests/                   pytest suite — 187 tests, hermetic via SUCCESSOR_CONFIG_DIR
+tests/                   pytest suite — 356 tests, hermetic via SUCCESSOR_CONFIG_DIR
   conftest.py            temp_config_dir fixture
   test_loader.py         Registry pattern tests
   test_theme.py          color parsing, variant resolver, blend math, registry
@@ -286,6 +286,16 @@ Esc with unsaved changes shows a warning toast first; second Esc
 discards. From inside the chat, `Ctrl+,` and `/config` open the menu,
 and the cli main loop handles the chat → config → chat re-entry
 seamlessly.
+
+**Delete profile** — capital `D` from the profiles pane opens a
+centered confirmation modal (theme-aware accent_warn border, 200ms
+ease-out fade-in via `lerp_rgb`). Two modes: **delete** unlinks a
+pure user JSON file from disk; **revert** unlinks a user override
+of a built-in, letting the built-in re-emerge in its place. Refusal
+cases all show a warning toast and never open the modal: pure
+built-ins (nothing to remove), the active profile per chat.json
+(would orphan the chat), the last remaining profile (no fallback
+left). Safe-default keys: only `Y` confirms; N/Enter/Esc all cancel.
 
 **The system prompt editor** (`src/successor/wizard/prompt_editor.py`) is
 a real text editor with the full feature set you'd expect:

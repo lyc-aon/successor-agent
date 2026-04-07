@@ -10,7 +10,7 @@ skills/tools scaffolding, setup wizard, three-pane config menu, multi-line
 prompt editor with soft wrap + selection + OSC 52 clipboard, bundled
 emergence intro). The agent loop and tool dispatch are intentionally not
 built yet — they wait until we study the llamacpp tool-call protocol
-deliberately. 339 tests passing, all hermetic.
+deliberately. 356 tests passing, all hermetic.
 
 ## Layout
 
@@ -43,7 +43,7 @@ src/successor/
     tools/read_file.py
     intros/successor/{00..10}-*.txt
 docs/                    # rendering-superpowers, concepts, plan, llamacpp, changelog
-tests/                   # 339 tests, hermetic via SUCCESSOR_CONFIG_DIR
+tests/                   # 356 tests, hermetic via SUCCESSOR_CONFIG_DIR
 ```
 
 ## Install

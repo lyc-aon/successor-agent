@@ -897,6 +897,106 @@ the package was reinstalled.
 
 ---
 
+## Phase 4.9 — delete profile from the config menu (2026-04-06)
+
+The config menu's left pane gained a destructive action. From the
+profiles list, capital `D` opens a centered confirmation modal that
+either deletes the profile's JSON file from disk or — for user
+overrides of a built-in — reverts to the built-in by unlinking the
+override. Built-ins can't be deleted (there's nothing on disk to
+remove), the active profile can't be deleted (it would orphan the
+chat), and the last remaining profile can't be deleted (there must
+always be a fallback). All three refusal cases show a warning toast
+instead of opening the modal.
+
+### What landed
+
+- **`_DeleteConfirm` dataclass + `_delete_confirm` state field** in
+  `src/successor/wizard/config.py`. Two-mode design: `"delete"` for
+  pure user profiles and `"revert"` for user overrides of built-ins.
+  The mode is decided at modal-open time by checking whether a
+  built-in JSON file exists with the same name in
+  `src/successor/builtin/profiles/`.
+- **`_begin_delete_confirm()`** does all the validation up front:
+  refuses last-profile, refuses active-profile, refuses pure built-in,
+  and detects user-override-of-built-in to set `mode="revert"`.
+  Each refusal shows a `_Toast` of kind `"warn"` and returns without
+  opening the modal.
+- **`_perform_delete()`** unlinks the user JSON file, drops dirty
+  markers tied to that profile, reloads `PROFILE_REGISTRY`, rebuilds
+  `_initial_profiles` and `_working_profiles` from scratch, and
+  re-anchors the cursor onto a still-existing row (preferring the
+  same name if revert mode brought back the built-in).
+- **`_handle_delete_confirm_key()`** — Y (case-insensitive) confirms,
+  N/Enter/Esc all cancel. Safe-default key choice: a tired finger
+  on Enter does nothing destructive.
+- **`_paint_delete_confirm_overlay()`** — centered modal with the
+  ROUND box characters, accent_warn border, profile summary line
+  (theme · mode · density · intro), warning glyph + 2-line message,
+  and centered action footer. 200ms ease-out-cubic fade-in via
+  `lerp_rgb` from bg toward the target colors. Title pill in the
+  top border reads "delete profile?" or "revert profile?" depending
+  on mode.
+- **Footer keybind dispatch** updated — when the modal is open the
+  footer reads `Y delete · N/⏎/esc cancel` (or `Y revert · ...`);
+  when on the profiles pane the footer reads
+  `tab focus · ↑↓ profile · ⏎ activate · → settings · D delete · s save · r revert · esc back`.
+- **Modal-takes-input dispatch** — `_handle_key()` checks
+  `_delete_confirm` before `_inline_text_edit` and `_editing_field`
+  so other modals can't be opened on top of the confirmation. Tab,
+  Save, etc. are all swallowed while the modal is open.
+
+### Tests (17 new — 356 total, all passing)
+
+In `tests/test_config_menu.py` under "Delete profile flow":
+
+- `test_delete_capital_d_opens_modal_for_user_profile` — happy path
+- `test_delete_lowercase_d_does_nothing` — only capital D
+- `test_delete_refused_for_builtin_profile` — pure built-in refusal
+- `test_delete_refused_for_active_profile` — active profile refusal
+- `test_delete_refused_when_only_one_profile` — last-profile guard
+- `test_delete_user_override_uses_revert_mode` — override detection
+- `test_delete_modal_y_confirms_and_unlinks_file` — Y deletes file
+- `test_delete_modal_lowercase_y_also_confirms` — case insensitivity
+- `test_delete_modal_n_cancels` — N cancels
+- `test_delete_modal_enter_cancels_safe_default` — safe default
+- `test_delete_modal_esc_cancels` — Esc cancels
+- `test_delete_revert_unlinks_user_file_and_builtin_remains` —
+  end-to-end revert: file gone, built-in reappears, mode != override
+- `test_delete_clears_dirty_for_that_profile` — dirty markers gone
+- `test_delete_modal_blocks_other_input` — Tab/save swallowed
+- `test_delete_cursor_lands_on_valid_row_after_delete` — cursor safety
+- `test_delete_modal_renders_without_crashing` — paint smoke test
+- `test_delete_revert_modal_says_revert` — title varies by mode
+
+### Renderer features the modal exercises
+
+| concepts.md cat | feature | where |
+|---|---|---|
+| Cat 1 (mutable cells) | the same overlay region paints either "delete profile?" or "revert profile?" based on the dataclass `mode` field | `_paint_delete_confirm_overlay` |
+| Cat 2 (smooth animation) | 200ms ease-out-cubic fade-in via `lerp_rgb`, applied to every cell color in the modal | `fade_t` blends |
+| Cat 3 (multi-region UI) | the modal sits on top of the three-pane layout without invalidating the panes — they paint, the modal paints over them, the diff layer commits | `on_tick` paint order |
+| Cat 5 (deterministic) | the modal's exact visual state is a snapshot fixture | `test_delete_modal_renders_without_crashing` |
+| Cat 7 (programmatic UI) | the modal's title, message body, and action verb all derive from `_delete_confirm.mode`, which was set by registry inspection at open-time | `_begin_delete_confirm` → `mode = "revert" if has_builtin else "delete"` |
+
+### Notes
+
+- The two-mode design (`delete` vs `revert`) wasn't in the initial
+  sketch — it emerged when checking the registry semantics. A
+  built-in being shadowed by a user file is the *only* way the
+  loader exposes that override as a "profile in the registry," so
+  the natural answer to "delete this profile" is "remove the
+  override," which lets the built-in reappear.
+- Capital `D` (not lowercase) was chosen so a casual hand on the
+  keyboard can't accidentally arm a destructive action. Lowercase
+  `d` is reserved for future use.
+- The cursor anchoring after delete prefers the SAME name (revert
+  case) and falls back to clamping the original index (pure delete
+  case). This means the visual focus stays put across a revert and
+  only moves the minimum distance across a delete.
+
+---
+
 ## What's next
 
 - **Skill invocation strategy** — pick always-on vs on-demand after
@@ -929,10 +1029,11 @@ the package was reinstalled.
 | 4.5 (config menu) | 33 | 240 |
 | 4.6 (editable text + multiline editor) | 36 | 276 |
 | 4.7 (prompt editor v2: soft wrap + selection + clipboard) | 48 | 324 |
+| 4.9 (delete profile from config menu) | 17 | 356 |
 
 (Counts above are approximate by phase boundary; actual test
 collection may include additional small additions in subsequent
 commits.)
 
-Final: **339 tests, all passing, hermetic via `SUCCESSOR_CONFIG_DIR`,
+Final: **356 tests, all passing, hermetic via `SUCCESSOR_CONFIG_DIR`,
 no fake mocks, no `.skip()` or `.todo()`.**

@@ -979,3 +979,331 @@ def test_profile_to_json_round_trip(temp_config_dir: Path) -> None:
     assert parsed.intro_animation == "successor"
     assert parsed.skills == ("a", "b")
     assert parsed.tools == ("read_file",)
+
+
+# ─── Delete profile flow ───
+
+
+def _drop_user_profile(temp_config_dir: Path, name: str, **overrides: object) -> Path:
+    """Helper — write a minimal user profile JSON to the temp config dir."""
+    payload = {
+        "name": name,
+        "description": "test profile",
+        "theme": "steel",
+        "display_mode": "dark",
+        "density": "normal",
+        "system_prompt": "you are a test profile",
+        "provider": {"type": "llamacpp", "model": "qwopus"},
+        "skills": [],
+        "tools": [],
+        "tool_config": {},
+        "intro_animation": None,
+    }
+    payload.update(overrides)
+    profiles_dir = temp_config_dir / "profiles"
+    profiles_dir.mkdir(parents=True, exist_ok=True)
+    target = profiles_dir / f"{name}.json"
+    target.write_text(json.dumps(payload, indent=2))
+    return target
+
+
+def _select_profile(menu: SuccessorConfig, name: str) -> None:
+    """Helper — move the profile cursor onto the named profile."""
+    for i, p in enumerate(menu._working_profiles):
+        if p.name == name:
+            menu._profile_cursor = i
+            menu._sync_preview()
+            return
+    raise AssertionError(f"profile {name!r} not in menu")
+
+
+def test_delete_capital_d_opens_modal_for_user_profile(temp_config_dir: Path) -> None:
+    """Capital D on a pure user profile arms the delete confirmation modal."""
+    _drop_user_profile(temp_config_dir, "scratch")
+    PROFILE_REGISTRY.reload()
+    THEME_REGISTRY.reload()
+
+    menu = SuccessorConfig()
+    menu._focus = Focus.PROFILES
+    _select_profile(menu, "scratch")
+    menu._handle_key(KeyEvent(char="D"))
+
+    assert menu._delete_confirm is not None
+    assert menu._delete_confirm.profile_name == "scratch"
+    assert menu._delete_confirm.mode == "delete"
+
+
+def test_delete_lowercase_d_does_nothing(temp_config_dir: Path) -> None:
+    """Lowercase d must not arm the modal — only capital D opens delete."""
+    _drop_user_profile(temp_config_dir, "scratch")
+    PROFILE_REGISTRY.reload()
+    menu = SuccessorConfig()
+    menu._focus = Focus.PROFILES
+    _select_profile(menu, "scratch")
+    menu._handle_key(KeyEvent(char="d"))
+    assert menu._delete_confirm is None
+
+
+def test_delete_refused_for_builtin_profile(temp_config_dir: Path) -> None:
+    """Capital D on a pure built-in shows a warn toast and no modal."""
+    PROFILE_REGISTRY.reload()
+    menu = SuccessorConfig()
+    menu._focus = Focus.PROFILES
+    # successor-dev is built-in and NOT active (default is active)
+    _select_profile(menu, "successor-dev")
+    menu._handle_key(KeyEvent(char="D"))
+
+    assert menu._delete_confirm is None
+    assert menu._toast is not None
+    assert menu._toast.kind == "warn"
+    assert "built-in" in menu._toast.text
+
+
+def test_delete_refused_for_active_profile(temp_config_dir: Path) -> None:
+    """Capital D on the active profile (per chat.json) refuses with a toast."""
+    _drop_user_profile(temp_config_dir, "scratch")
+    # Activate scratch so it can't be deleted
+    (temp_config_dir / "chat.json").write_text(json.dumps({
+        "version": 2,
+        "active_profile": "scratch",
+    }))
+    PROFILE_REGISTRY.reload()
+    menu = SuccessorConfig()
+    menu._focus = Focus.PROFILES
+    _select_profile(menu, "scratch")
+    menu._handle_key(KeyEvent(char="D"))
+
+    assert menu._delete_confirm is None
+    assert menu._toast is not None
+    assert menu._toast.kind == "warn"
+    assert "active" in menu._toast.text
+
+
+def test_delete_refused_when_only_one_profile(temp_config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Last-profile guard — refuse to delete the only remaining profile."""
+    PROFILE_REGISTRY.reload()
+    menu = SuccessorConfig()
+    # Force the menu into a one-profile state
+    menu._working_profiles = [menu._working_profiles[0]]
+    menu._initial_profiles = [menu._initial_profiles[0]]
+    menu._profile_cursor = 0
+    menu._focus = Focus.PROFILES
+    menu._handle_key(KeyEvent(char="D"))
+
+    assert menu._delete_confirm is None
+    assert menu._toast is not None
+    assert menu._toast.kind == "warn"
+    assert "last" in menu._toast.text
+
+
+def test_delete_user_override_uses_revert_mode(temp_config_dir: Path) -> None:
+    """Capital D on a user override of a built-in arms the modal in revert mode."""
+    # successor-dev exists as a built-in; dropping a user file with the same
+    # name creates an override.
+    _drop_user_profile(
+        temp_config_dir, "successor-dev",
+        theme="steel", display_mode="light",
+    )
+    PROFILE_REGISTRY.reload()
+    menu = SuccessorConfig()
+    menu._focus = Focus.PROFILES
+    _select_profile(menu, "successor-dev")
+    menu._handle_key(KeyEvent(char="D"))
+
+    assert menu._delete_confirm is not None
+    assert menu._delete_confirm.mode == "revert"
+
+
+def test_delete_modal_y_confirms_and_unlinks_file(temp_config_dir: Path) -> None:
+    """Pressing Y on the modal unlinks the JSON file from disk."""
+    target = _drop_user_profile(temp_config_dir, "scratch")
+    PROFILE_REGISTRY.reload()
+    menu = SuccessorConfig()
+    menu._focus = Focus.PROFILES
+    _select_profile(menu, "scratch")
+    menu._handle_key(KeyEvent(char="D"))
+    assert menu._delete_confirm is not None
+
+    menu._handle_key(KeyEvent(char="y"))
+
+    assert menu._delete_confirm is None
+    assert not target.exists()
+    # Registry no longer has it
+    assert "scratch" not in PROFILE_REGISTRY.names()
+    # Toast confirms the action
+    assert menu._toast is not None
+    assert menu._toast.kind == "ok"
+    assert "deleted" in menu._toast.text
+
+
+def test_delete_modal_lowercase_y_also_confirms(temp_config_dir: Path) -> None:
+    """Y is case-insensitive."""
+    target = _drop_user_profile(temp_config_dir, "scratch")
+    PROFILE_REGISTRY.reload()
+    menu = SuccessorConfig()
+    menu._focus = Focus.PROFILES
+    _select_profile(menu, "scratch")
+    menu._handle_key(KeyEvent(char="D"))
+    menu._handle_key(KeyEvent(char="Y"))
+    assert not target.exists()
+
+
+def test_delete_modal_n_cancels(temp_config_dir: Path) -> None:
+    """N cancels the modal without touching disk."""
+    target = _drop_user_profile(temp_config_dir, "scratch")
+    PROFILE_REGISTRY.reload()
+    menu = SuccessorConfig()
+    menu._focus = Focus.PROFILES
+    _select_profile(menu, "scratch")
+    menu._handle_key(KeyEvent(char="D"))
+    menu._handle_key(KeyEvent(char="n"))
+    assert menu._delete_confirm is None
+    assert target.exists()
+
+
+def test_delete_modal_enter_cancels_safe_default(temp_config_dir: Path) -> None:
+    """Enter cancels — destructive actions never default to confirm."""
+    target = _drop_user_profile(temp_config_dir, "scratch")
+    PROFILE_REGISTRY.reload()
+    menu = SuccessorConfig()
+    menu._focus = Focus.PROFILES
+    _select_profile(menu, "scratch")
+    menu._handle_key(KeyEvent(char="D"))
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+    assert menu._delete_confirm is None
+    assert target.exists()
+
+
+def test_delete_modal_esc_cancels(temp_config_dir: Path) -> None:
+    target = _drop_user_profile(temp_config_dir, "scratch")
+    PROFILE_REGISTRY.reload()
+    menu = SuccessorConfig()
+    menu._focus = Focus.PROFILES
+    _select_profile(menu, "scratch")
+    menu._handle_key(KeyEvent(char="D"))
+    menu._handle_key(KeyEvent(key=Key.ESC))
+    assert menu._delete_confirm is None
+    assert target.exists()
+
+
+def test_delete_revert_unlinks_user_file_and_builtin_remains(temp_config_dir: Path) -> None:
+    """Confirming a revert deletes the user override and the built-in shows again."""
+    user_file = _drop_user_profile(
+        temp_config_dir, "successor-dev",
+        theme="steel", display_mode="light",
+    )
+    PROFILE_REGISTRY.reload()
+    menu = SuccessorConfig()
+    menu._focus = Focus.PROFILES
+    _select_profile(menu, "successor-dev")
+    menu._handle_key(KeyEvent(char="D"))
+    assert menu._delete_confirm.mode == "revert"
+    menu._handle_key(KeyEvent(char="y"))
+
+    # User file gone
+    assert not user_file.exists()
+    # Built-in still in the registry
+    assert "successor-dev" in PROFILE_REGISTRY.names()
+    # The reloaded profile is the BUILT-IN, not the user override —
+    # the built-in successor-dev is dark, the override we dropped was light
+    p = get_profile("successor-dev")
+    assert p is not None
+    assert p.display_mode == "dark"
+    # Toast says reverted, not deleted
+    assert menu._toast is not None
+    assert "reverted" in menu._toast.text
+
+
+def test_delete_clears_dirty_for_that_profile(temp_config_dir: Path) -> None:
+    """If the deleted profile had dirty edits, those dirty markers go too."""
+    _drop_user_profile(temp_config_dir, "scratch")
+    PROFILE_REGISTRY.reload()
+    menu = SuccessorConfig()
+    menu._focus = Focus.PROFILES
+    _select_profile(menu, "scratch")
+    # Toggle a field on scratch to dirty it
+    menu._focus = Focus.SETTINGS
+    menu._settings_cursor = _field_idx("display_mode")
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+    assert menu._is_dirty("scratch", "display_mode")
+
+    menu._focus = Focus.PROFILES
+    menu._handle_key(KeyEvent(char="D"))
+    menu._handle_key(KeyEvent(char="y"))
+
+    assert not menu._is_dirty("scratch")
+    assert not any(p == "scratch" for (p, _) in menu._dirty)
+
+
+def test_delete_modal_blocks_other_input(temp_config_dir: Path) -> None:
+    """While the delete modal is open, other keys (Tab, save, etc) do nothing."""
+    _drop_user_profile(temp_config_dir, "scratch")
+    PROFILE_REGISTRY.reload()
+    menu = SuccessorConfig()
+    menu._focus = Focus.PROFILES
+    _select_profile(menu, "scratch")
+    menu._handle_key(KeyEvent(char="D"))
+    initial_focus = menu._focus
+
+    menu._handle_key(KeyEvent(key=Key.TAB))
+    assert menu._focus == initial_focus  # Tab swallowed
+    menu._handle_key(KeyEvent(char="s"))
+    assert menu._delete_confirm is not None  # save did nothing
+
+
+def test_delete_cursor_lands_on_valid_row_after_delete(temp_config_dir: Path) -> None:
+    """After deletion the profile cursor must point at a still-existing row."""
+    _drop_user_profile(temp_config_dir, "scratch")
+    PROFILE_REGISTRY.reload()
+    menu = SuccessorConfig()
+    menu._focus = Focus.PROFILES
+    _select_profile(menu, "scratch")
+    menu._handle_key(KeyEvent(char="D"))
+    menu._handle_key(KeyEvent(char="y"))
+
+    assert 0 <= menu._profile_cursor < len(menu._working_profiles)
+    # The cursor profile must be a real registered name
+    cursor_name = menu._working_profiles[menu._profile_cursor].name
+    assert cursor_name in PROFILE_REGISTRY.names()
+
+
+def test_delete_modal_renders_without_crashing(temp_config_dir: Path) -> None:
+    """Sanity-check the paint method actually runs against a real grid."""
+    from successor.render.cells import Grid
+
+    _drop_user_profile(temp_config_dir, "scratch")
+    PROFILE_REGISTRY.reload()
+    THEME_REGISTRY.reload()
+    menu = SuccessorConfig()
+    menu._focus = Focus.PROFILES
+    _select_profile(menu, "scratch")
+    menu._handle_key(KeyEvent(char="D"))
+
+    g = Grid(30, 120)
+    menu.on_tick(g)
+
+    # Read out the painted text and look for the modal title
+    from successor.snapshot import render_grid_to_plain
+    plain = render_grid_to_plain(g)
+    assert "delete profile?" in plain
+    assert "scratch" in plain
+
+
+def test_delete_revert_modal_says_revert(temp_config_dir: Path) -> None:
+    """The revert-mode modal title says 'revert' not 'delete'."""
+    from successor.render.cells import Grid
+
+    _drop_user_profile(temp_config_dir, "successor-dev", theme="steel")
+    PROFILE_REGISTRY.reload()
+    THEME_REGISTRY.reload()
+    menu = SuccessorConfig()
+    menu._focus = Focus.PROFILES
+    _select_profile(menu, "successor-dev")
+    menu._handle_key(KeyEvent(char="D"))
+    assert menu._delete_confirm.mode == "revert"
+
+    g = Grid(30, 120)
+    menu.on_tick(g)
+    from successor.snapshot import render_grid_to_plain
+    plain = render_grid_to_plain(g)
+    assert "revert profile?" in plain

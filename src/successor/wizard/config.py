@@ -302,6 +302,25 @@ class _InlineTextEdit:
     kind: FieldKind  # mirror the field kind so the handler doesn't have to look it up
 
 
+# ─── Delete confirmation modal state ───
+
+
+@dataclass
+class _DeleteConfirm:
+    """In-flight 'delete profile?' confirmation modal.
+
+    Two flavors based on `mode`:
+      "delete"  — pure user profile, the JSON file gets unlinked
+                  from disk and the row vanishes from the registry
+      "revert"  — user override of a built-in, the user file gets
+                  unlinked but the built-in re-emerges in its place
+    """
+    profile_idx: int  # index into _working_profiles
+    profile_name: str
+    mode: str  # "delete" | "revert"
+    started_at: float  # for the fade-in animation
+
+
 # ─── The config App ───
 
 
@@ -376,6 +395,9 @@ class SuccessorConfig(App):
 
         # ─── Multi-line prompt editor (MULTILINE fields) ───
         self._prompt_editor: PromptEditor | None = None
+
+        # ─── Delete profile confirmation modal ───
+        self._delete_confirm: _DeleteConfirm | None = None
 
         # ─── Dirty tracking ───
         # Set of (profile_name, field_name) tuples that differ from
@@ -696,6 +718,160 @@ class SuccessorConfig(App):
             kind="info",
         )
 
+    # ─── Delete profile ───
+
+    def _begin_delete_confirm(self) -> None:
+        """Validate the cursor profile is deletable, then arm the modal.
+
+        Refusal cases (each shows a warning toast and does NOT open the
+        modal):
+          - Pure built-in (no user file to remove): nothing to delete
+          - Currently active per chat.json: would orphan the chat
+          - Last remaining profile: would leave nothing to fall back to
+
+        Successful cases open the modal in one of two modes:
+          - "delete": pure user profile, JSON file gets unlinked
+          - "revert": user override of a built-in, file unlinked and
+                      the built-in re-emerges in its place
+        """
+        if not self._working_profiles:
+            return
+        idx = self._profile_cursor
+        profile = self._working_profiles[idx]
+
+        # Last-profile guard — never let the user nuke their only profile
+        if len(self._working_profiles) <= 1:
+            self._toast = _Toast(
+                "can't delete the last profile",
+                self.elapsed, kind="warn",
+            )
+            return
+
+        # Active-profile guard — refuse if this is the live one in chat.json
+        active_now = get_active_profile().name
+        if profile.name == active_now:
+            self._toast = _Toast(
+                f"'{profile.name}' is the active profile — switch first",
+                self.elapsed, kind="warn",
+            )
+            return
+
+        # Determine whether the profile has a user file at all. If only
+        # the built-in source exists, there's nothing to delete from disk.
+        user_path = config_dir() / "profiles" / f"{profile.name}.json"
+        has_user_file = user_path.exists()
+        builtin_path = (
+            Path(__file__).resolve().parent.parent
+            / "builtin" / "profiles" / f"{profile.name}.json"
+        )
+        has_builtin = builtin_path.exists()
+
+        if not has_user_file and has_builtin:
+            self._toast = _Toast(
+                f"'{profile.name}' is built-in — nothing to delete",
+                self.elapsed, kind="warn",
+            )
+            return
+        if not has_user_file and not has_builtin:
+            # Pathological — registry has it but no file backs it.
+            self._toast = _Toast(
+                f"'{profile.name}' has no file on disk",
+                self.elapsed, kind="warn",
+            )
+            return
+
+        mode = "revert" if has_builtin else "delete"
+        self._delete_confirm = _DeleteConfirm(
+            profile_idx=idx,
+            profile_name=profile.name,
+            mode=mode,
+            started_at=self.elapsed,
+        )
+
+    def _perform_delete(self) -> None:
+        """Confirmed — unlink the user file and refresh local state.
+
+        For "revert" mode the built-in re-emerges automatically when we
+        reload the registry, so the row stays in the list but reverts
+        to its built-in form. For "delete" mode the row vanishes.
+        """
+        confirm = self._delete_confirm
+        if confirm is None:
+            return
+        target = config_dir() / "profiles" / f"{confirm.profile_name}.json"
+        try:
+            target.unlink()
+        except OSError as exc:
+            self._toast = _Toast(
+                f"delete failed: {exc}",
+                self.elapsed, kind="warn",
+            )
+            self._delete_confirm = None
+            return
+
+        # Drop any dirty markers tied to this profile — they no longer
+        # apply because the source file has been removed.
+        self._dirty = {
+            (p, f) for (p, f) in self._dirty if p != confirm.profile_name
+        }
+
+        # Reload the registry and rebuild local snapshots from scratch.
+        PROFILE_REGISTRY.reload()
+        self._initial_profiles = [deepcopy(p) for p in all_profiles()]
+        self._working_profiles = [deepcopy(p) for p in all_profiles()]
+        if not self._working_profiles:
+            self._working_profiles = [Profile(name="(no profiles loaded)")]
+            self._initial_profiles = list(self._working_profiles)
+
+        # Snap the cursor onto a still-existing row. If the deleted
+        # profile reappeared (revert mode), prefer it; otherwise clamp.
+        new_idx = 0
+        for i, p in enumerate(self._working_profiles):
+            if p.name == confirm.profile_name:
+                new_idx = i
+                break
+        else:
+            new_idx = min(confirm.profile_idx, len(self._working_profiles) - 1)
+        self._profile_cursor = max(0, new_idx)
+
+        # Update active_idx to match chat.json (it didn't change but we
+        # want the marker dot to land on the right row after the rebuild)
+        active = get_active_profile()
+        for i, p in enumerate(self._working_profiles):
+            if p.name == active.name:
+                self._active_idx = i
+                break
+
+        self._sync_preview()
+
+        verb = "reverted" if confirm.mode == "revert" else "deleted"
+        self._toast = _Toast(
+            f"{verb} '{confirm.profile_name}'",
+            self.elapsed,
+            kind="ok",
+        )
+        self._delete_confirm = None
+
+    def _handle_delete_confirm_key(self, event: KeyEvent) -> None:
+        """Input handling while the delete confirmation modal is open.
+
+        Safe-default key choice: Enter, N, Esc, and Tab all CANCEL.
+        Only Y (case-insensitive) actually deletes — this matches every
+        sane "are you sure?" dialog and means a tired finger on Enter
+        does nothing destructive.
+        """
+        if event.key == Key.ENTER or event.key == Key.ESC:
+            self._delete_confirm = None
+            return
+        if event.is_char and event.char and not event.is_ctrl and not event.is_alt:
+            ch = event.char.lower()
+            if ch == "y":
+                self._perform_delete()
+                return
+            if ch == "n":
+                self._delete_confirm = None
+                return
+
     # ─── Input ───
 
     def on_key(self, byte: int) -> None:
@@ -718,6 +894,11 @@ class SuccessorConfig(App):
                     )
                     self._set_field_on_profile(self._profile_cursor, field, result)
                 self._prompt_editor = None
+            return
+
+        # Delete confirmation modal — blocks every other input
+        if self._delete_confirm is not None:
+            self._handle_delete_confirm_key(event)
             return
 
         # Inline text/number/secret editor — single-row modal
@@ -795,6 +976,12 @@ class SuccessorConfig(App):
             cfg["active_profile"] = self._working_profiles[self._profile_cursor].name
             save_chat_config(cfg)
             self.stop()
+            return
+        # Capital D opens the delete-profile confirmation. Lowercase d
+        # is reserved for future use; we keep the keybind shifted so a
+        # casual hand on the keyboard can't accidentally arm a delete.
+        if event.is_char and event.char == "D" and not event.is_ctrl and not event.is_alt:
+            self._begin_delete_confirm()
             return
 
     def _handle_settings_key(self, event: KeyEvent) -> None:
@@ -1107,6 +1294,12 @@ class SuccessorConfig(App):
                 x=ed_x, y=ed_y, w=ed_w, h=ed_h,
                 theme=chrome_variant,
             )
+
+        # ─── Delete confirmation modal ───
+        # Sits on top of everything except the toast (so the user can
+        # still see the result of their action immediately after).
+        if self._delete_confirm is not None:
+            self._paint_delete_confirm_overlay(grid, chrome_variant, cols, rows)
 
         # ─── Toast (overlays EVERYTHING, even the prompt editor) ───
         self._paint_toast(grid, chrome_variant, cols, rows)
@@ -1551,6 +1744,9 @@ class SuccessorConfig(App):
 
         if self._prompt_editor is not None:
             keybinds = "↑↓←→ navigate · ⏎ newline · ⌫ delete · Ctrl+S save · esc cancel"
+        elif self._delete_confirm is not None:
+            verb = "revert" if self._delete_confirm.mode == "revert" else "delete"
+            keybinds = f"Y {verb} · N/⏎/esc cancel"
         elif self._inline_text_edit is not None:
             edit = self._inline_text_edit
             kind_name = edit.kind.value
@@ -1558,7 +1754,7 @@ class SuccessorConfig(App):
         elif self._editing_field is not None:
             keybinds = "↑↓ pick · ⏎ confirm · esc cancel"
         elif self._focus == Focus.PROFILES:
-            keybinds = "tab focus · ↑↓ profile · ⏎ activate · → settings · s save · r revert · esc back"
+            keybinds = "tab focus · ↑↓ profile · ⏎ activate · → settings · D delete · s save · r revert · esc back"
         else:
             keybinds = "tab focus · ↑↓ field · ⏎ edit · ← profiles · s save · r revert · esc back"
 
@@ -1719,6 +1915,134 @@ class SuccessorConfig(App):
                 grid, f" {cursor_glyph} {opt_text}",
                 box_x + 1, row_y,
                 style=Style(fg=row_fg, bg=row_bg, attrs=ATTR_BOLD),
+            )
+
+    # ─── Delete confirmation overlay ───
+
+    def _paint_delete_confirm_overlay(
+        self,
+        grid: Grid,
+        theme: ThemeVariant,
+        cols: int,
+        rows: int,
+    ) -> None:
+        """Paint the centered 'delete profile?' modal.
+
+        Layout:
+            ╭─ delete profile? ──────────────────╮
+            │                                    │
+            │   forge-dev                        │
+            │   forge · dark · spacious          │
+            │                                    │
+            │   ⚠ this deletes the JSON file     │
+            │     from disk and can't be undone  │
+            │                                    │
+            │       Y delete    N/⏎/esc cancel   │
+            ╰────────────────────────────────────╯
+
+        Theme-aware via accent_warn for the border + the warning glyph.
+        Fades in over 200ms via lerp_rgb so it doesn't punch into the
+        screen — same easing as the toast animation.
+        """
+        confirm = self._delete_confirm
+        if confirm is None:
+            return
+
+        # Fade-in animation: 200ms ease, then hold
+        fade_s = 0.2
+        elapsed = self.elapsed - confirm.started_at
+        fade_t = ease_out_cubic(min(1.0, elapsed / fade_s)) if fade_s > 0 else 1.0
+
+        profile = self._working_profiles[confirm.profile_idx]
+        is_revert = confirm.mode == "revert"
+
+        # Build the lines we need to fit so we can size the box.
+        title = " revert profile? " if is_revert else " delete profile? "
+        sub_lines: list[tuple[str, str]] = []  # (text, role)
+        sub_lines.append(("", "spacer"))
+        sub_lines.append((profile.name, "name"))
+        meta = f"{profile.theme} · {profile.display_mode} · {profile.density}"
+        if profile.intro_animation:
+            meta += f" · {profile.intro_animation}"
+        sub_lines.append((meta, "meta"))
+        sub_lines.append(("", "spacer"))
+        if is_revert:
+            sub_lines.append(("⚠ this removes your override and", "warn1"))
+            sub_lines.append(("  reverts to the built-in version", "warn2"))
+        else:
+            sub_lines.append(("⚠ this deletes the JSON file from", "warn1"))
+            sub_lines.append(("  disk and can't be undone", "warn2"))
+        sub_lines.append(("", "spacer"))
+        action_word = "revert" if is_revert else "delete"
+        action_line = f"Y {action_word}    N/⏎/esc cancel"
+        sub_lines.append((action_line, "actions"))
+
+        # Box dimensions — fit to longest line, +6 padding
+        content_w = max(len(title) - 2, max(len(t) for t, _ in sub_lines))
+        box_w = min(cols - 4, content_w + 6)
+        box_h = len(sub_lines) + 2  # top/bottom border
+
+        if box_w < 20 or box_h + 2 > rows:
+            return
+
+        box_x = (cols - box_w) // 2
+        box_y = max(1, (rows - box_h) // 2)
+
+        # Color blends — accent_warn is the danger color, but we soften
+        # it a touch by lerping toward bg as the modal fades in.
+        border_color = lerp_rgb(theme.bg, theme.accent_warn, fade_t)
+        fill_bg = lerp_rgb(theme.bg, theme.bg_input, fade_t)
+        title_fg = lerp_rgb(theme.bg, theme.bg, fade_t)  # title sits on accent_warn
+        title_bg = border_color
+
+        border_style = Style(fg=border_color, bg=fill_bg, attrs=ATTR_BOLD)
+        fill_style = Style(fg=theme.fg, bg=fill_bg)
+        paint_box(
+            grid, box_x, box_y, box_w, box_h,
+            style=border_style, fill_style=fill_style, chars=BOX_ROUND,
+        )
+
+        # Title pill in the top border, slightly inset
+        title_x = box_x + 3
+        if title_x + len(title) < box_x + box_w - 1:
+            paint_text(
+                grid, title, title_x, box_y,
+                style=Style(fg=title_fg, bg=title_bg, attrs=ATTR_BOLD),
+            )
+
+        # Body lines
+        for i, (text, role) in enumerate(sub_lines):
+            row_y = box_y + 1 + i
+            if row_y >= box_y + box_h - 1:
+                break
+            if not text:
+                continue
+
+            # Indent — name/meta/warn rows are 3 cells in; actions are centered
+            if role == "actions":
+                tx = box_x + (box_w - len(text)) // 2
+            else:
+                tx = box_x + 3
+
+            if role == "name":
+                color = lerp_rgb(theme.bg, theme.fg, fade_t)
+                attrs = ATTR_BOLD
+            elif role == "meta":
+                color = lerp_rgb(theme.bg, theme.fg_dim, fade_t)
+                attrs = ATTR_DIM
+            elif role in ("warn1", "warn2"):
+                color = lerp_rgb(theme.bg, theme.accent_warn, fade_t)
+                attrs = ATTR_BOLD if role == "warn1" else 0
+            elif role == "actions":
+                color = lerp_rgb(theme.bg, theme.fg, fade_t)
+                attrs = ATTR_BOLD
+            else:
+                color = lerp_rgb(theme.bg, theme.fg_dim, fade_t)
+                attrs = 0
+
+            paint_text(
+                grid, text, tx, row_y,
+                style=Style(fg=color, bg=fill_bg, attrs=attrs),
             )
 
     # ─── Helpers ───
