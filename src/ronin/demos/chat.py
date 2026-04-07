@@ -74,9 +74,18 @@ from ..render.app import App
 from ..render.cells import (
     ATTR_BOLD,
     ATTR_DIM,
+    ATTR_ITALIC,
+    ATTR_REVERSE,
+    ATTR_STRIKE,
+    ATTR_UNDERLINE,
     Cell,
     Grid,
     Style,
+)
+from ..render.markdown import (
+    LaidOutLine,
+    LaidOutSpan,
+    PreparedMarkdown,
 )
 from ..render.paint import fill_region, paint_box, paint_text
 from ..render.terminal import Terminal
@@ -442,10 +451,11 @@ Think as carefully as you need. When you have finished thinking, simply give you
 class _Message:
     """A user or ronin message in the conversation buffer.
 
-    body is a PreparedText that includes the role prefix ("you ▸ " or
-    "ronin ▸ ") so wrap caching keys correctly across frames. The
-    prefix changes how the message wraps, so it has to be part of the
-    text the wrapper sees.
+    body is a PreparedMarkdown that parses the content ONCE and then
+    lays out at any width on demand with caching. The prefix
+    ('you ▸ ' / 'ronin ▸ ') is rendered separately at paint time so
+    it can use a different style than the body and so the markdown
+    parser doesn't see prefix characters in its source.
 
     raw_text is the original content (without prefix) — what we send
     to the model in the conversation history.
@@ -456,12 +466,43 @@ class _Message:
     def __init__(self, role: str, content: str, *, synthetic: bool = False) -> None:
         self.role = role  # "user" | "ronin"
         self.raw_text = content
-        prefix = "you ▸ " if role == "user" else "ronin ▸ "
-        self.body = PreparedText(prefix + content)
+        self.body = PreparedMarkdown(content)
         self.created_at = time.monotonic()
         # Synthetic messages (the greeting, error notices) are NOT sent
         # to the model in the conversation history.
         self.synthetic = synthetic
+
+
+# Prefix strings shown at the start of every message.
+_USER_PREFIX = "you ▸ "
+_RONIN_PREFIX = "ronin ▸ "
+_PREFIX_W = len(_USER_PREFIX)  # both prefixes are 6 cells
+
+
+@dataclass(slots=True)
+class _RenderedRow:
+    """A single row ready for the chat painter.
+
+    leading_text:   characters at the very left edge — message prefix on
+                    the first line, blank padding on continuation lines,
+                    or a special leading mark like the blockquote bar.
+    leading_attrs:  attribute bitmask for leading_text (ATTR_BOLD etc.)
+    leading_color_kind: which theme slot to use for leading_text — one
+                    of "fg", "fg_dim", "accent" — resolved at paint time.
+    body_spans:     laid-out markdown spans for the body content
+    base_color:     the message's base body color (resolved at build
+                    time, may be lerped during fade-in)
+    line_tag:       optional row treatment from the markdown layout
+    body_indent:    cells of indent within the body region (after the
+                    leading prefix), used by blockquotes and code blocks
+    """
+    leading_text: str = ""
+    leading_attrs: int = 0
+    leading_color_kind: str = "accent"  # "fg" | "fg_dim" | "accent"
+    body_spans: tuple = ()  # tuple of LaidOutSpan
+    base_color: int = 0
+    line_tag: str = ""
+    body_indent: int = 0
 
 
 # ─── The chat App ───
@@ -1399,12 +1440,133 @@ class RoninChat(App):
         if paint_y < top:
             paint_y = top
 
-        for i, (line, fg) in enumerate(combined):
+        for i, row in enumerate(combined):
             y = paint_y + i
             if y >= bottom:
                 break
-            if line:
-                paint_text(grid, line, body_x, y, style=Style(fg=fg, bg=theme.bg))
+            self._paint_chat_row(grid, body_x, y, body_width, row, theme)
+
+    # ─── Paint a single _RenderedRow ───
+
+    def _paint_chat_row(
+        self,
+        grid: Grid,
+        x: int,
+        y: int,
+        body_width: int,
+        row: _RenderedRow,
+        theme: Theme,
+    ) -> None:
+        """Render one paint-ready row at (x, y) with `body_width` cells.
+
+        Handles row-level treatments (code block bg, blockquote left
+        border, header rule, horizontal rule) and per-span tag color
+        resolution. Empty rows (no leading, no spans) just leave the
+        background fill from `_paint_chat_area`'s clear pass.
+        """
+        # ─── Row-level treatments ───
+        line_bg = theme.bg
+        if row.line_tag in ("code_block", "code_lang"):
+            line_bg = theme.bg_input if row.line_tag == "code_block" else theme.bg_footer
+            # Fill the body region with the tinted bg
+            fill_region(
+                grid, x, y, body_width, 1,
+                style=Style(bg=line_bg),
+            )
+        elif row.line_tag == "header_rule":
+            # Thin separator under h1/h2
+            rule_text = "─" * max(0, body_width - _PREFIX_W)
+            paint_text(
+                grid, rule_text, x + _PREFIX_W, y,
+                style=Style(fg=theme.fg_subtle, bg=theme.bg),
+            )
+            return
+        elif row.line_tag == "hr":
+            # Horizontal rule across the full body width
+            rule_text = "─" * max(0, body_width - _PREFIX_W)
+            paint_text(
+                grid, rule_text, x + _PREFIX_W, y,
+                style=Style(fg=theme.fg_dim, bg=theme.bg, attrs=ATTR_BOLD),
+            )
+            return
+        elif row.line_tag == "blockquote":
+            # Will paint a left bar after we've drawn the leading region
+            pass
+
+        # ─── Leading text (prefix or continuation indent) ───
+        leading_text = row.leading_text
+        if leading_text:
+            leading_color = self._resolve_leading_color(
+                row.leading_color_kind, row.base_color, theme
+            )
+            leading_style = Style(
+                fg=leading_color,
+                bg=line_bg,
+                attrs=row.leading_attrs,
+            )
+            paint_text(grid, leading_text, x, y, style=leading_style)
+            cx = x + len(leading_text)
+        else:
+            cx = x
+
+        # ─── Blockquote left border ───
+        if row.line_tag == "blockquote":
+            paint_text(
+                grid, "▎", cx, y,
+                style=Style(fg=theme.accent_warm, bg=line_bg, attrs=ATTR_BOLD),
+            )
+            cx += 1
+            # Skip an extra space after the bar
+            cx += 1
+
+        # ─── Body indent (for blockquotes inside the body) ───
+        cx += row.body_indent
+
+        # ─── Body spans ───
+        for span in row.body_spans:
+            style = self._resolve_span_style(span, row.base_color, line_bg, theme)
+            paint_text(grid, span.text, cx, y, style=style)
+            cx += sum(1 for _ in span.text)  # rough; assumes width-1 chars
+            # NOTE: for full UTF-8 width support we'd use char_width here,
+            # but markdown content is overwhelmingly width-1 in practice.
+
+    @staticmethod
+    def _resolve_leading_color(kind: str, base_color: int, theme: Theme) -> int:
+        if kind == "fg":
+            return theme.fg
+        if kind == "fg_dim":
+            return theme.fg_dim
+        return base_color  # "accent" or unknown — use the message's base color
+
+    @staticmethod
+    def _resolve_span_style(
+        span: LaidOutSpan,
+        base_color: int,
+        line_bg: int,
+        theme: Theme,
+    ) -> Style:
+        """Resolve a span's semantic tag to a concrete Style.
+
+        Tags:
+            ""             — default body text using base_color
+            "code"         — inline code with bg_input tint
+            "link"         — accent_warm + underline (from attrs)
+            "header"       — accent fg + bold
+            "list_marker"  — accent_warm fg
+            "code_lang"    — fg_dim on bg_footer
+        """
+        attrs = span.attrs
+        if span.tag == "code":
+            return Style(fg=theme.fg, bg=theme.bg_input, attrs=attrs)
+        if span.tag == "link":
+            return Style(fg=theme.accent_warm, bg=line_bg, attrs=attrs)
+        if span.tag == "header":
+            return Style(fg=theme.accent, bg=line_bg, attrs=attrs)
+        if span.tag == "list_marker":
+            return Style(fg=theme.accent_warm, bg=line_bg, attrs=attrs)
+        if span.tag == "code_lang":
+            return Style(fg=theme.fg_dim, bg=line_bg, attrs=attrs)
+        return Style(fg=base_color, bg=line_bg, attrs=attrs)
 
     # ─── Flat-line builders ───
 
@@ -1412,11 +1574,24 @@ class RoninChat(App):
         self,
         body_width: int,
         theme: Theme,
-    ) -> list[tuple[str, int]]:
-        out: list[tuple[str, int]] = []
+    ) -> list[_RenderedRow]:
+        """Flatten the conversation into a list of paint-ready rows.
+
+        Each row holds enough information for the painter to draw it
+        without consulting the message list again. Spans inside rows
+        carry semantic tags (code, link, header, etc.) which the
+        painter resolves to theme colors at paint time.
+        """
+        out: list[_RenderedRow] = []
         now = time.monotonic()
         n = len(self.messages)
         spacing = self._current_density().message_spacing
+        # Markdown content is laid out into a slightly narrower width
+        # than the body width because the prefix takes the leftmost
+        # _PREFIX_W cells. Continuation lines reserve the same indent
+        # to align with the first line's content column.
+        md_width = max(1, body_width - _PREFIX_W)
+
         for i, msg in enumerate(self.messages):
             age = now - msg.created_at
             fade_t = (
@@ -1428,22 +1603,56 @@ class RoninChat(App):
             if msg.synthetic:
                 base_color = theme.fg_dim
             if fade_t < 1.0:
-                fg = lerp_rgb(theme.fg_subtle, base_color, fade_t)
+                base_color = lerp_rgb(theme.fg_subtle, base_color, fade_t)
+
+            prefix = _USER_PREFIX if msg.role == "user" else _RONIN_PREFIX
+            md_lines = msg.body.lines(md_width)
+            if not md_lines:
+                # Empty body — still emit a single row showing the prefix.
+                out.append(
+                    _RenderedRow(
+                        leading_text=prefix,
+                        leading_attrs=ATTR_BOLD,
+                        leading_color_kind="accent",
+                        base_color=base_color,
+                    )
+                )
             else:
-                fg = base_color
-            for line in msg.body.lines(body_width):
-                out.append((line, fg))
+                for line_idx, md_line in enumerate(md_lines):
+                    if line_idx == 0:
+                        leading = prefix
+                    else:
+                        leading = " " * _PREFIX_W
+                    out.append(
+                        _RenderedRow(
+                            leading_text=leading,
+                            leading_attrs=ATTR_BOLD if line_idx == 0 else 0,
+                            leading_color_kind="accent",
+                            body_spans=tuple(md_line.spans),
+                            base_color=base_color,
+                            line_tag=md_line.line_tag,
+                            body_indent=md_line.indent,
+                        )
+                    )
+
             # Density-driven spacer rows between messages.
             if i < n - 1:
                 for _ in range(spacing):
-                    out.append(("", fg))
+                    out.append(_RenderedRow(base_color=base_color))
         return out
 
     def _build_streaming_lines(
         self,
         body_width: int,
         theme: Theme,
-    ) -> list[tuple[str, int]]:
+    ) -> list[_RenderedRow]:
+        """Render the in-flight streaming reply as paint-ready rows.
+
+        While the model is in the thinking phase (no content yet) we
+        show a spinner with the reasoning char count. Once content
+        starts arriving, we parse it as markdown live — every frame
+        re-parses, but the source is short and the parser is cheap.
+        """
         if self._stream is None:
             return []
         now = time.monotonic()
@@ -1451,18 +1660,45 @@ class RoninChat(App):
         spinner = SPINNER_FRAMES[spinner_idx]
 
         content_so_far = "".join(self._stream_content)
-        if not content_so_far:
-            if self._stream_reasoning_chars > 0:
-                text = f"ronin ▸ {spinner} thinking… ({self._stream_reasoning_chars} chars)"
-            else:
-                text = f"ronin ▸ {spinner} thinking…"
-        else:
-            text = f"ronin ▸ {content_so_far}▌"
 
-        stream_pt = PreparedText(text)
-        out: list[tuple[str, int]] = [("", theme.accent)]
-        for line in stream_pt.lines(body_width):
-            out.append((line, theme.accent))
+        out: list[_RenderedRow] = [_RenderedRow(base_color=theme.accent)]
+
+        if not content_so_far:
+            # Thinking phase — single line with spinner + char counter
+            if self._stream_reasoning_chars > 0:
+                text = f"{spinner} thinking… ({self._stream_reasoning_chars} chars)"
+            else:
+                text = f"{spinner} thinking…"
+            out.append(
+                _RenderedRow(
+                    leading_text=_RONIN_PREFIX,
+                    leading_attrs=ATTR_BOLD,
+                    leading_color_kind="accent",
+                    body_spans=(LaidOutSpan(text=text),),
+                    base_color=theme.accent,
+                )
+            )
+            return out
+
+        # Content streaming — render the live text as markdown.
+        # Append a trailing block-cursor to the visible text so the
+        # user can see the typewriter advancing.
+        live_md = PreparedMarkdown(content_so_far + "▌")
+        md_width = max(1, body_width - _PREFIX_W)
+        md_lines = live_md.lines(md_width)
+        for line_idx, md_line in enumerate(md_lines):
+            leading = _RONIN_PREFIX if line_idx == 0 else " " * _PREFIX_W
+            out.append(
+                _RenderedRow(
+                    leading_text=leading,
+                    leading_attrs=ATTR_BOLD if line_idx == 0 else 0,
+                    leading_color_kind="accent",
+                    body_spans=tuple(md_line.spans),
+                    base_color=theme.accent,
+                    line_tag=md_line.line_tag,
+                    body_indent=md_line.indent,
+                )
+            )
         return out
 
     # ─── Slash command autocomplete dropdown ───
