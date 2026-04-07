@@ -307,10 +307,10 @@ def preflight() -> bool:
     return True
 
 
-# ─── The walkthrough script ───
+# ─── The walkthrough scripts ───
 
 
-def run_walkthrough(driver: Driver) -> None:
+def run_walkthrough_setup(driver: Driver) -> None:
     """First-time setup walkthrough.
 
     Drives `successor setup` from cold-boot through the 9-step
@@ -482,26 +482,184 @@ def run_walkthrough(driver: Driver) -> None:
     driver.section(28, "walkthrough complete")
 
 
+def run_walkthrough_chat(driver: Driver) -> None:
+    """Live chat walkthrough against the user's active profile.
+
+    Drives `successor chat` against the active profile (whatever's
+    set in the user's real config — usually llama.cpp pointing at
+    a local model). Shows the empty-state hero panel, types a real
+    user message, lets the model stream its reply, runs a bash
+    tool through the structured card, cycles theme + mode + density
+    to show smooth blends, opens the help overlay, and demonstrates
+    the compaction animation by burning synthetic tokens then
+    triggering /compact.
+
+    Pump durations assume a snappy local model (~50 tok/sec
+    generation, ~5-15 sec reasoning phase per query). If your
+    model is slower, bump the pump durations on sections 6, 11,
+    20, and 23. If faster, you can shrink them.
+    """
+
+    # Section 1: empty-state hero panel
+    # The chat just opened with the user's active profile. Let
+    # the SUCCESSOR portrait + info panel sit so the viewer can
+    # read the panel contents (profile name, provider, model,
+    # context window, tools, theme).
+    driver.section(1, "empty-state hero panel")
+    driver.pump_for(5.0)
+
+    # Section 2: type a short real prompt
+    # Pick something the local qwen model can answer well in a
+    # short paragraph — keeps the streaming reply manageable for
+    # the recording.
+    driver.section(2, "first message — typing")
+    type_string(
+        driver,
+        "Explain how a binary search tree works in two short sentences.",
+    )
+    driver.pump_for(0.5)
+
+    driver.section(3, "first message — submit")
+    press_enter(driver)
+    driver.pump_for(0.3)
+
+    # Section 4: streaming reply — reasoning + content
+    # Qwen3.5 thinking model: ~5-15 sec reasoning, then content
+    # streams at ~50 tok/sec. Pump generously so the full reply
+    # lands. The viewer sees the live thinking spinner with char
+    # counter, then the content typewriter.
+    driver.section(4, "streaming reply — reasoning + content")
+    driver.pump_for(18.0)
+
+    # Section 5: open the slash command palette
+    driver.section(5, "slash command palette — type /")
+    driver.send(b"/")
+    driver.pump_for(2.5)
+
+    driver.section(6, "dismiss palette")
+    press_esc(driver)
+    driver.pump_for(0.4)
+    # Backspace to clear the leading slash from the input
+    driver.send(b"\x7f")
+    driver.pump_for(0.5)
+
+    # Section 7: bash tool execution
+    # /bash ls -la /tmp is universal, predictable, and shows the
+    # tool card with verb classification, parameter parsing, and
+    # output streaming.
+    driver.section(7, "bash tool — type /bash ls -la /tmp")
+    type_string(driver, "/bash ls -la /tmp")
+    driver.pump_for(0.4)
+
+    driver.section(8, "bash tool — submit + watch the card")
+    press_enter(driver)
+    driver.pump_for(4.0)
+
+    # Section 9: theme cycle — show the smooth blend
+    driver.section(9, "theme cycle — Ctrl+T to forge")
+    press_ctrl(driver, "t")
+    driver.pump_for(2.5)
+
+    driver.section(10, "theme cycle — Ctrl+T back to steel")
+    press_ctrl(driver, "t")
+    driver.pump_for(2.0)
+
+    # Section 11: dark/light toggle
+    driver.section(11, "mode toggle — Alt+D to light")
+    press_alt(driver, "d")
+    driver.pump_for(2.5)
+
+    driver.section(12, "mode toggle — Alt+D back to dark")
+    press_alt(driver, "d")
+    driver.pump_for(2.0)
+
+    # Section 13: density cycle
+    driver.section(13, "density cycle — Ctrl+]")
+    press_ctrl(driver, "]")
+    driver.pump_for(1.8)
+
+    driver.section(14, "density cycle — Ctrl+] again")
+    press_ctrl(driver, "]")
+    driver.pump_for(1.8)
+
+    driver.section(15, "density cycle — Ctrl+] back to normal")
+    press_ctrl(driver, "]")
+    driver.pump_for(1.5)
+
+    # Section 16: help overlay
+    driver.section(16, "help overlay — press ?")
+    press_question(driver)
+    driver.pump_for(5.0)
+
+    driver.section(17, "dismiss help overlay")
+    press_space(driver)
+    driver.pump_for(1.0)
+
+    # Section 18: /budget — show the live token count
+    driver.section(18, "/budget — type")
+    type_string(driver, "/budget")
+    driver.pump_for(0.3)
+
+    driver.section(19, "/budget — submit, see token usage")
+    press_enter(driver)
+    driver.pump_for(3.0)
+
+    # Section 20: /burn synthetic tokens to set up compaction
+    driver.section(20, "/burn 5000 — type")
+    type_string(driver, "/burn 5000")
+    driver.pump_for(0.3)
+
+    driver.section(21, "/burn 5000 — submit")
+    press_enter(driver)
+    driver.pump_for(1.5)
+
+    # Section 22: trigger compaction — the harness's signature
+    # visible animation. The 5-phase animation runs over ~5 sec,
+    # then the model summarizes the burned content (~10-15 sec on
+    # a snappy local model). Total ~20 sec.
+    driver.section(22, "/compact — type")
+    type_string(driver, "/compact")
+    driver.pump_for(0.3)
+
+    driver.section(23, "/compact — submit + animation + summary")
+    press_enter(driver)
+    driver.pump_for(22.0)
+
+    driver.section(24, "settled boundary — pulse + summary visible")
+    driver.pump_for(3.0)
+
+    # Section 25: clean exit
+    driver.section(25, "type /quit")
+    type_string(driver, "/quit")
+    driver.pump_for(0.4)
+
+    driver.section(26, "submit /quit → exit")
+    press_enter(driver)
+    driver.pump_for(1.0)
+
+    driver.section(27, "walkthrough complete")
+
+
 # ─── Timeline preview ───
 
 
-def compute_planned_timeline() -> list[tuple[float, str]]:
-    """Statically analyze run_walkthrough() and return the planned
-    cumulative timestamps for each section. Used to print a preview
-    before the recording starts so the user knows the runtime AND
-    the cut points without having to run the demo first.
+def compute_planned_timeline(func) -> list[tuple[float, str]]:
+    """Statically analyze a walkthrough function and return the
+    planned cumulative timestamps for each section. Used to print
+    a preview before the recording starts so the user knows the
+    runtime AND the cut points without having to run the demo first.
 
     Parses the function's source line-by-line for `driver.section(...)`,
-    `driver.pump_for(...)`, `press_*(driver)`, and
-    `type_string(driver, "...")` calls. Each typed string adds
-    TYPE_CHAR_DELAY_S per char. Each press_* call adds zero time
-    (sends a single keystroke instantly). Stays in sync with the
-    actual script because it's reading the actual function source.
+    `driver.pump_for(...)`, and `type_string(driver, "...")` calls.
+    Each typed string adds TYPE_CHAR_DELAY_S per char. Each press_*
+    call adds zero time (single keystroke, instant). Stays in sync
+    with the actual script because it's reading the actual
+    function source.
     """
     import inspect
     import re
 
-    src = inspect.getsource(run_walkthrough)
+    src = inspect.getsource(func)
     timeline: list[tuple[float, str]] = []
     t = 0.0
 
@@ -525,48 +683,96 @@ def compute_planned_timeline() -> list[tuple[float, str]]:
 
 
 def main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="walkthrough_demo",
+        description=(
+            "Scripted walkthrough driver for Successor. Two modes: "
+            "`setup` (drives the setup wizard against a temp config "
+            "dir, no model required) and `chat` (drives a live chat "
+            "against the user's active profile, needs a working model)."
+        ),
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["setup", "chat"],
+        default="setup",
+        help=(
+            "which walkthrough to run. setup = first-time profile "
+            "creation wizard arc (default, no model required). "
+            "chat = live chat against your active profile, showing "
+            "streaming reply, /bash, /budget, /burn, /compact, etc."
+        ),
+    )
+    args = parser.parse_args()
+
     print("=" * 64)
-    print("Successor walkthrough demo — scripted recording driver")
+    print(f"Successor walkthrough demo — mode: {args.mode}")
     print("=" * 64)
     print()
     if not preflight():
         return 1
 
+    # Mode-specific config
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    log_path = LOG_DIR / f"successor-walkthrough-{timestamp}.log"
-    # Temp config dir so the wizard saves its profile here, NOT in
-    # the user's real ~/.config/successor/. Cleaned up at exit.
-    temp_config = Path(tempfile.mkdtemp(
-        prefix=f"successor-walkthrough-{timestamp}-",
-        dir="/tmp",
-    ))
+    log_path = LOG_DIR / f"successor-walkthrough-{args.mode}-{timestamp}.log"
+    temp_config: Path | None = None
+    if args.mode == "setup":
+        # Temp config dir so the wizard saves its profile there, NOT
+        # in the user's real ~/.config/successor/. Cleaned up at exit.
+        temp_config = Path(tempfile.mkdtemp(
+            prefix=f"successor-walkthrough-{timestamp}-",
+            dir="/tmp",
+        ))
+        run_walkthrough = run_walkthrough_setup
+        successor_argv = ["successor", "setup"]
+    else:
+        # Chat mode: use the user's REAL active profile so the live
+        # model is reachable. No temp config dir.
+        run_walkthrough = run_walkthrough_chat
+        successor_argv = ["successor", "chat"]
+
     print()
 
-    # Preview the planned timeline so the user knows what's coming
-    # and roughly how long the recording will be. The numbers below
-    # are computed from the WALKTHROUGH script's pump_for + typing
-    # delays so they stay in sync if you edit the script.
+    # Preview the planned timeline so the user knows what's coming.
+    # Computed by static analysis of the chosen run function so it
+    # stays in sync if you edit pump_for / type_string / sections.
     print("Planned timeline:")
-    timeline = compute_planned_timeline()
+    timeline = compute_planned_timeline(run_walkthrough)
     for ts, label in timeline:
         print(f"  [{ts:6.1f}s]  {label}")
     total = timeline[-1][0] if timeline else 0.0
     print(f"\nTotal runtime: ~{total:.0f} seconds (~{total/60:.1f} min)")
     print()
     print(f"timestamp log: {log_path}")
-    print(f"temp config:   {temp_config}  (cleaned up at exit)")
+    if temp_config is not None:
+        print(f"temp config:   {temp_config}  (cleaned up at exit)")
+    else:
+        print(f"using your real ~/.config/successor/ (active profile)")
     print()
     print("When you press Enter, the script will:")
-    print("  1. Spawn `successor setup` against the temp config dir")
-    print("  2. Run the scripted first-time setup walkthrough")
+    if args.mode == "setup":
+        print("  1. Spawn `successor setup` against the temp config dir")
+        print("  2. Run the scripted first-time setup walkthrough")
+    else:
+        print("  1. Spawn `successor chat` against your active profile")
+        print("  2. Run the scripted live-model walkthrough")
     print("  3. Exit cleanly")
     print()
+    if args.mode == "chat":
+        print("⚠ Chat mode needs a reachable model on your active")
+        print("  profile. If your local llama-server isn't running,")
+        print("  the streaming sections will hit the friendly error")
+        print("  message instead of a real reply.")
+        print()
     print("START YOUR SCREEN RECORDING NOW, then press Enter to begin.")
     try:
         input()
     except (EOFError, KeyboardInterrupt):
         print("aborted")
-        shutil.rmtree(temp_config, ignore_errors=True)
+        if temp_config is not None:
+            shutil.rmtree(temp_config, ignore_errors=True)
         return 0
 
     # Save terminal mode so we can restore it on exit
@@ -581,15 +787,16 @@ def main() -> int:
 
     pid = -1
     try:
-        # Fork into the setup wizard
+        # Fork the child
         pid, fd = pty.fork()
         if pid == 0:
-            # Child: scrub interfering env vars, point at temp config,
-            # then exec successor setup. The temp config dir keeps the
-            # user's real ~/.config/successor/ untouched.
-            os.environ["SUCCESSOR_CONFIG_DIR"] = str(temp_config)
+            # Child: setup mode points at the temp config dir;
+            # chat mode inherits the user's environment so the
+            # active profile is loaded normally.
+            if temp_config is not None:
+                os.environ["SUCCESSOR_CONFIG_DIR"] = str(temp_config)
             try:
-                os.execvp("successor", ["successor", "setup"])
+                os.execvp(successor_argv[0], successor_argv)
             except FileNotFoundError:
                 os.write(2, b"successor binary not found in PATH\n")
                 os._exit(1)
@@ -599,13 +806,18 @@ def main() -> int:
 
         t0 = time.monotonic()
         driver.start(t0, fd, pid)
-        driver.log(f"walkthrough started — log: {log_path}")
+        driver.log(f"walkthrough started — mode: {args.mode}")
+        driver.log(f"log: {log_path}")
         driver.log(f"terminal: {cols} cols × {rows} rows")
-        driver.log(f"temp config: {temp_config}")
+        if temp_config is not None:
+            driver.log(f"temp config: {temp_config}")
+        else:
+            driver.log("using user's real config dir")
 
-        # Run the scripted demo. Section 1 is the SUCCESSOR animation
-        # — there's no separate "boot" section because the animation
-        # IS the boot.
+        # Run the scripted demo. Section 1 is whatever the chosen
+        # walkthrough's first section is — for setup it's the
+        # SUCCESSOR emergence animation, for chat it's the empty-
+        # state hero panel.
         run_walkthrough(driver)
 
         # Drain any remaining output from the child
@@ -635,8 +847,9 @@ def main() -> int:
                 os.waitpid(pid, os.WNOHANG)
             except Exception:
                 pass
-        # Clean up the temp config dir
-        shutil.rmtree(temp_config, ignore_errors=True)
+        # Clean up the temp config dir if we created one
+        if temp_config is not None:
+            shutil.rmtree(temp_config, ignore_errors=True)
 
     print()
     print("=" * 64)
