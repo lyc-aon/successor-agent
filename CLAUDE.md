@@ -93,7 +93,7 @@ src/successor/recorder.py    record/replay session traces
 src/successor/cli.py         argparse subcommand dispatch (`successor` binary)
 src/successor/__main__.py    `python -m successor` entry point
 
-tests/                   pytest suite — 630 tests, hermetic via SUCCESSOR_CONFIG_DIR
+tests/                   pytest suite — 645 tests, hermetic via SUCCESSOR_CONFIG_DIR
   conftest.py            temp_config_dir fixture
   test_loader.py         Registry pattern tests
   test_theme.py          color parsing, variant resolver, blend math, registry

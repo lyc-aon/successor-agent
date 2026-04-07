@@ -277,7 +277,14 @@ def test_compact_ptl_retry_exhausted_raises() -> None:
 
 def test_compact_ptl_retry_drops_oldest_first() -> None:
     """After PTL retry, subsequent prompts should NOT include the
-    earliest rounds (they were dropped to fit)."""
+    earliest rounds (they were dropped to fit).
+
+    With the cache-friendly prompt structure, each round becomes its
+    own user/assistant message in the API prompt (rather than being
+    embedded in one big transcript). After PTL retry drops the oldest
+    3 rounds, the question content should still be missing for the
+    dropped rounds and present for the rest.
+    """
     log = _build_log(15)
     counter = TokenCounter()
     client = _MockClient(streams=[
@@ -286,14 +293,19 @@ def test_compact_ptl_retry_drops_oldest_first() -> None:
     ])
     compact(log, client, counter=counter)
 
-    # The second call's user message contains the transcript. After
-    # dropping the oldest 3 rounds, "question 0" should NOT appear.
-    second_call_user = next(
-        m for m in client.last_messages if m["role"] == "user"
+    # Collect the contents of every user message in the second call.
+    # Each question is "question N with some content" — use the trailing
+    # " with" to disambiguate "question 1" from "question 10".
+    user_contents = "\n".join(
+        m["content"] for m in client.last_messages if m["role"] == "user"
     )
-    assert "question 0" not in second_call_user["content"]
-    # But middle/late ones should
-    assert "question 6" in second_call_user["content"] or "question 5" in second_call_user["content"]
+    # After dropping the oldest 3 rounds, questions 0-2 should be gone
+    assert "question 0 with" not in user_contents
+    assert "question 1 with" not in user_contents
+    assert "question 2 with" not in user_contents
+    # But middle and later questions should still be present
+    assert "question 3 with" in user_contents
+    assert "question 14 with" in user_contents
 
 
 # ─── Attachment re-injection ───

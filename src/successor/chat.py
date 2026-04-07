@@ -707,25 +707,31 @@ class _RenderedRow:
 # ─── Compaction animation ───
 #
 # When /compact fires (or autocompact triggers in the future), the chat
-# enters a 5-phase animation sequence that's the harness's signature
+# enters a 6-phase animation sequence that's the harness's signature
 # visual moment. The phases overlap to create a seamless narrative arc:
 #
-#   T=0       compaction starts → snapshot pre-compact messages
+#   T=0       compaction starts → snapshot pre-compact messages, spawn worker
 #   T=0-300   ANTICIPATION : pre-compact rounds get a subtle glow
-#   T=300-1500 FOLD        : pre-compact rounds fade fg → bg via lerp_rgb,
-#                            ease_out_cubic on alpha
-#   T=1500-1900 MATERIALIZE : the boundary divider draws in left-to-right
-#   T=1900-2500 REVEAL      : the summary message fades in from bg → fg_dim
-#   T=2500-5000 SETTLED     : toast slides in showing stats, fades out at end
+#   T=300-1500 FOLD        : pre-compact rounds fade fg → bg via lerp_rgb
+#   T=1500-?? WAITING      : indefinite — model is generating the summary.
+#                            Spinner + "compacting N rounds" indicator visible.
+#                            The chat painter routes through self.messages
+#                            (post-snapshot) but with everything dimmed.
+#   T=R-R+400 MATERIALIZE  : (R = result_arrived_at) divider draws in
+#                            from center outward
+#   T=R+400-R+1000 REVEAL  : summary message fades in from bg → fg_dim
+#   T=R+1000-R+3500 TOAST  : settled state with subtle pulse
 #
-# Total: 5 seconds. Long enough for the user to see the narrative,
-# short enough to never feel slow.
+# Total: ~3.5 seconds + however long the model takes to summarize.
+# At 256K context that's ~5 minutes of WAITING before materialize starts.
 
 _COMPACT_ANTICIPATION_S = 0.30
 _COMPACT_FOLD_S = 1.20         # 300ms → 1500ms
-_COMPACT_MATERIALIZE_S = 0.40  # 1500ms → 1900ms
-_COMPACT_REVEAL_S = 0.60       # 1900ms → 2500ms
-_COMPACT_TOAST_HOLD_S = 2.50   # 2500ms → 5000ms
+_COMPACT_MATERIALIZE_S = 0.40
+_COMPACT_REVEAL_S = 0.60
+_COMPACT_TOAST_HOLD_S = 2.50
+
+_COMPACT_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
 @dataclass(slots=True)
@@ -736,52 +742,195 @@ class _CompactionAnimation:
     end of the toast hold. The painter checks this on every frame and
     overlays the appropriate per-phase treatment on the chat region.
 
+    Two-stage timing model: phases anticipation/fold play immediately
+    on a fixed schedule. After fold ends, we enter WAITING which has
+    indefinite duration. The worker thread sets `result_arrived_at`
+    when the summary lands, and the materialize/reveal/toast phases
+    play relative to that timestamp.
+
     Fields:
-      started_at:        time.monotonic() when compaction completed
+      started_at:        time.monotonic() when compaction was triggered
       pre_compact_snapshot: the chat's _Message list captured BEFORE
-                         the compaction was applied, used by the FOLD
-                         phase as the visual content to fade out
-      pre_compact_count: how many pre-compact messages will fade —
-                         used to scope the fade-out to just the rounds
-                         that were summarized (not preserved verbatim)
-      boundary:          the BoundaryMarker from the agent.compact()
-                         call, used by the materialize / settle phases
-                         and the toast
-      summary_text:      the summary content the model produced
-      reason:            "manual" | "auto" | "reactive" — for the toast label
+                         the compaction was applied. Used by the FOLD
+                         phase as the visual content to fade out.
+      pre_compact_count: how many messages were in the snapshot
+      boundary:          the BoundaryMarker — None during waiting,
+                         set by the worker callback when ready
+      summary_text:      the summary text — empty during waiting,
+                         set by the worker callback
+      reason:            "manual" | "auto" | "reactive"
+      result_arrived_at: monotonic time when the worker reported
+                         success. None while waiting. Once set, the
+                         materialize/reveal/toast phases run relative
+                         to this anchor (not started_at) so the wait
+                         duration doesn't compress the visible animation.
+      pre_compact_tokens / rounds_summarized: pre-known stats so the
+                         spinner indicator can show "compacting N rounds
+                         (X tokens)" before the boundary lands.
     """
     started_at: float
     pre_compact_snapshot: list  # list of _Message — captured before swap
     pre_compact_count: int
-    boundary: object  # BoundaryMarker (forward reference to avoid circular import)
+    boundary: object | None  # BoundaryMarker, None until result arrives
     summary_text: str
     reason: str = "manual"
+    result_arrived_at: float | None = None
+    pre_compact_tokens: int = 0
+    rounds_summarized: int = 0
 
     def phase_at(self, now: float) -> tuple[str, float]:
-        """Return (phase_name, t) where t is 0-1 progress within the phase."""
+        """Return (phase_name, t) where t is 0-1 progress within the phase.
+
+        For the WAITING phase, t is the wall time elapsed in waiting
+        (in seconds, not normalized) so the painter can drive a
+        spinner from it.
+        """
         elapsed = now - self.started_at
         if elapsed < 0:
             return ("pending", 0.0)
         anticipation_end = _COMPACT_ANTICIPATION_S
         fold_end = anticipation_end + _COMPACT_FOLD_S
-        materialize_end = fold_end + _COMPACT_MATERIALIZE_S
-        reveal_end = materialize_end + _COMPACT_REVEAL_S
-        settled_end = reveal_end + _COMPACT_TOAST_HOLD_S
 
         if elapsed < anticipation_end:
             return ("anticipation", elapsed / _COMPACT_ANTICIPATION_S)
         if elapsed < fold_end:
             return ("fold", (elapsed - anticipation_end) / _COMPACT_FOLD_S)
-        if elapsed < materialize_end:
-            return ("materialize", (elapsed - fold_end) / _COMPACT_MATERIALIZE_S)
-        if elapsed < reveal_end:
-            return ("reveal", (elapsed - materialize_end) / _COMPACT_REVEAL_S)
-        if elapsed < settled_end:
-            return ("toast", (elapsed - reveal_end) / _COMPACT_TOAST_HOLD_S)
+
+        # After fold ends we wait for the worker
+        if self.result_arrived_at is None:
+            wait_elapsed = elapsed - fold_end
+            return ("waiting", wait_elapsed)
+
+        # Result has arrived — phases play relative to result_arrived_at
+        post_arrival = now - self.result_arrived_at
+        materialize_end = _COMPACT_MATERIALIZE_S
+        reveal_end = materialize_end + _COMPACT_REVEAL_S
+        settled_end = reveal_end + _COMPACT_TOAST_HOLD_S
+
+        if post_arrival < materialize_end:
+            return ("materialize", post_arrival / _COMPACT_MATERIALIZE_S)
+        if post_arrival < reveal_end:
+            return ("reveal", (post_arrival - materialize_end) / _COMPACT_REVEAL_S)
+        if post_arrival < settled_end:
+            return ("toast", (post_arrival - reveal_end) / _COMPACT_TOAST_HOLD_S)
         return ("done", 1.0)
 
     def is_done(self, now: float) -> bool:
         return self.phase_at(now)[0] == "done"
+
+    def is_waiting(self, now: float) -> bool:
+        return self.phase_at(now)[0] == "waiting"
+
+    def spinner_frame(self, now: float) -> str:
+        """Return the current spinner glyph (animates at ~10 Hz)."""
+        idx = int(now * 10) % len(_COMPACT_SPINNER_FRAMES)
+        return _COMPACT_SPINNER_FRAMES[idx]
+
+
+# ─── Compaction worker thread ───
+#
+# Wraps a background thread that runs compact() against the live client.
+# Mirrors the ChatStream pattern: create + start, poll for result on
+# every tick, close to abort. The worker is the only thing that calls
+# blocking HTTP from the chat path; everything else stays interactive.
+
+
+@dataclass(slots=True)
+class _CompactionResult:
+    """The output of a compaction worker thread."""
+    new_log: object | None  # MessageLog — None on error
+    boundary: object | None  # BoundaryMarker — None on error
+    error: str | None  # error message, None on success
+
+
+class _CompactionWorker:
+    """Worker thread that runs compact() in the background.
+
+    Construction: pass the agent log, client, counter, and reason.
+    Start the thread with start(). Poll for result with poll() — it
+    returns None until the worker is done, then a _CompactionResult.
+    Abort with close() (sets a stop event; the worker may still
+    block on HTTP for the current request, but the result will be
+    discarded).
+    """
+
+    __slots__ = (
+        "_log", "_client", "_counter", "_reason",
+        "_thread", "_result", "_stop", "_started_at", "_done_at",
+    )
+
+    def __init__(
+        self,
+        *,
+        log,           # agent.MessageLog
+        client,        # CompactionClient
+        counter,       # TokenCounter
+        reason: str = "manual",
+    ) -> None:
+        self._log = log
+        self._client = client
+        self._counter = counter
+        self._reason = reason
+        self._thread: object | None = None  # threading.Thread
+        self._result: _CompactionResult | None = None
+        self._stop = None  # threading.Event — set in start()
+        self._started_at: float = 0.0
+        self._done_at: float = 0.0
+
+    def start(self) -> None:
+        """Spawn the worker thread."""
+        import threading
+        self._stop = threading.Event()
+        self._started_at = time.monotonic()
+        self._thread = threading.Thread(
+            target=self._run, daemon=True,
+            name="successor-compaction-worker",
+        )
+        self._thread.start()
+
+    def poll(self) -> _CompactionResult | None:
+        """Return the result if the worker is done, else None.
+        Non-blocking — safe to call from on_tick every frame."""
+        return self._result
+
+    def is_running(self) -> bool:
+        return self._thread is not None and self._result is None
+
+    def elapsed(self) -> float:
+        end = self._done_at if self._done_at else time.monotonic()
+        return end - self._started_at if self._started_at else 0.0
+
+    def close(self) -> None:
+        """Signal the worker to stop ASAP. The HTTP call may still
+        complete; we just discard the result."""
+        if self._stop is not None:
+            self._stop.set()
+
+    def _run(self) -> None:
+        from .agent.compact import CompactionError, compact
+        try:
+            new_log, boundary = compact(
+                self._log, self._client,
+                counter=self._counter,
+                reason=self._reason,
+            )
+            if self._stop is not None and self._stop.is_set():
+                # Aborted while we were running. Don't store the result.
+                return
+            self._result = _CompactionResult(
+                new_log=new_log, boundary=boundary, error=None,
+            )
+        except (CompactionError, ValueError) as exc:
+            self._result = _CompactionResult(
+                new_log=None, boundary=None, error=str(exc),
+            )
+        except Exception as exc:
+            self._result = _CompactionResult(
+                new_log=None, boundary=None,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        finally:
+            self._done_at = time.monotonic()
 
 
 # ─── The chat App ───
@@ -992,11 +1141,17 @@ class SuccessorChat(App):
         self._pending_action: str | None = None
 
         # Compaction animation state — None when no animation is in
-        # progress. Set by /compact (and future autocompact) when
-        # compaction completes; the chat painter checks it on every
-        # frame to drive the 5-phase animation. Cleared in on_tick when
-        # the animation reaches "done".
+        # progress. Armed by /compact when the worker spawns; the chat
+        # painter checks it on every frame to drive the 6-phase
+        # animation. Cleared in on_tick when the animation reaches "done".
         self._compaction_anim: _CompactionAnimation | None = None
+
+        # Compaction worker thread — None when no compaction is running.
+        # Set by /compact alongside _compaction_anim. on_tick polls it
+        # every frame; when the worker reports a result, the chat
+        # applies the new log and the animation transitions from
+        # WAITING → MATERIALIZE.
+        self._compaction_worker: _CompactionWorker | None = None
 
         # Cached TokenCounter for the agent log adapter — lazy-init
         # on first /budget or /compact so we don't pay the construction
@@ -1253,6 +1408,17 @@ class SuccessorChat(App):
             # Ctrl+G to abort an in-flight stream (interrupt)
             if event.char == "g" and self._stream is not None:
                 self._stream.close()
+                return
+            # Ctrl+G to abort an in-flight compaction
+            if event.char == "g" and self._compaction_worker is not None:
+                self._compaction_worker.close()
+                self._compaction_worker = None
+                self._compaction_anim = None
+                self.messages.append(_Message(
+                    "successor",
+                    "compaction cancelled.",
+                    synthetic=True,
+                ))
                 return
 
         # ─── Streaming guard ───
@@ -2458,14 +2624,30 @@ class SuccessorChat(App):
     # ─── /compact ───
 
     def _handle_compact_cmd(self) -> None:
-        """Manually fire compaction against the live client.
+        """Trigger compaction asynchronously.
 
-        Builds an agent.MessageLog from the current chat history,
-        runs compact() against the live client, then writes the
-        result back to self.messages and starts the compaction
-        animation. The animation is the harness's signature visual
-        moment — see `_CompactionAnimation` for the phase sequence.
+        Snapshots the chat state, spawns a worker thread that runs
+        agent.compact() in the background, and arms the animation
+        immediately. The animation enters the WAITING phase after
+        fold completes and stays there until the worker reports a
+        result, at which point it transitions to MATERIALIZE.
+
+        The chat REMAINS INTERACTIVE during the entire compaction
+        — frame ticks continue, the spinner animates, the user can
+        cancel with Ctrl+G. This is the difference between this
+        handler and the previous synchronous version that froze the
+        UI for the entire ~5+ minute duration of compaction at large
+        contexts.
         """
+        if self._compaction_worker is not None:
+            self.messages.append(_Message(
+                "successor",
+                "compaction already in progress — wait for it to finish "
+                "or press Ctrl+G to cancel.",
+                synthetic=True,
+            ))
+            return
+
         counter = self._agent_token_counter()
         log = self._to_agent_log()
         if log.round_count < 4:
@@ -2476,46 +2658,90 @@ class SuccessorChat(App):
                 synthetic=True,
             ))
             return
+
+        # Pre-compute token count + rounds-to-summarize so the spinner
+        # can show "compacting N rounds (X tokens)" right away.
         pre_tokens = counter.count_log(log)
-        # NB: we don't append a "compacting…" status message because
-        # the animation IS the status indicator. The pre-compact rounds
-        # visibly fade out during the fold phase.
+        from .agent.compact import DEFAULT_KEEP_RECENT_ROUNDS
+        keep_n = min(DEFAULT_KEEP_RECENT_ROUNDS, max(1, log.round_count // 2))
+        rounds_to_summarize = log.round_count - keep_n
 
         # Snapshot the messages BEFORE running compaction so the fold
-        # phase can paint them dimming out.
+        # phase can paint them dimming out. The chat retains its
+        # current view during anticipation+fold; after fold, the
+        # waiting phase shows the spinner.
         snapshot = list(self.messages)
         snapshot_count = len(snapshot)
 
-        try:
-            new_log, boundary = agent_compact(
-                log, self.client,
-                counter=counter,
-                reason="manual",
-            )
-        except (CompactionError, ValueError) as exc:
-            self.messages.append(_Message(
-                "successor",
-                f"compaction failed: {exc}",
-                synthetic=True,
-            ))
-            return
-
-        # Apply the new log + arm the animation. The painter will
-        # overlay the snapshot during the fold phase, then transition
-        # to the new state for materialize/reveal/toast. The chat
-        # painter detects the active animation and pins the scroll
-        # to keep the boundary visible during materialize/reveal/toast
-        # phases (see _paint_chat_area's animation override).
-        self._from_agent_log(new_log, boundary_meta=boundary)
+        # Arm the animation IMMEDIATELY — phases begin now. The
+        # waiting phase activates automatically when fold ends if the
+        # worker hasn't returned yet.
         self._compaction_anim = _CompactionAnimation(
             started_at=time.monotonic(),
             pre_compact_snapshot=snapshot,
             pre_compact_count=snapshot_count,
-            boundary=boundary,
-            summary_text=boundary.summary_text,
+            boundary=None,  # filled in by _poll_compaction_worker
+            summary_text="",
+            reason="manual",
+            pre_compact_tokens=pre_tokens,
+            rounds_summarized=rounds_to_summarize,
+        )
+
+        # Spawn the worker. It runs compact() against the live client
+        # in a daemon thread; on_tick polls it every frame.
+        self._compaction_worker = _CompactionWorker(
+            log=log,
+            client=self.client,
+            counter=counter,
             reason="manual",
         )
+        self._compaction_worker.start()
         self._scroll_to_bottom()
+
+    def _poll_compaction_worker(self) -> None:
+        """Check whether the compaction worker has finished and apply
+        the result. Called from on_tick on every frame.
+
+        Three possible states:
+          - No worker → return
+          - Worker still running → return
+          - Worker done with result → apply + transition animation
+          - Worker done with error → clear animation, surface error
+        """
+        worker = self._compaction_worker
+        if worker is None:
+            return
+        result = worker.poll()
+        if result is None:
+            return  # still running
+
+        # Worker finished
+        self._compaction_worker = None
+
+        if result.error is not None:
+            # Failure — drop the animation and report
+            self._compaction_anim = None
+            self.messages.append(_Message(
+                "successor",
+                f"compaction failed: {result.error}",
+                synthetic=True,
+            ))
+            return
+
+        # Success — apply the new log + transition animation to materialize
+        if self._compaction_anim is None:
+            # The animation was somehow cleared (e.g. cancel) — apply
+            # the log silently and skip the visible transition
+            self._from_agent_log(result.new_log, boundary_meta=result.boundary)
+            return
+
+        self._from_agent_log(result.new_log, boundary_meta=result.boundary)
+        # Update the animation in place — the dataclass is mutable
+        # because of slots=True (not frozen). The materialize phase
+        # is computed relative to result_arrived_at.
+        self._compaction_anim.boundary = result.boundary
+        self._compaction_anim.summary_text = result.boundary.summary_text
+        self._compaction_anim.result_arrived_at = time.monotonic()
 
     def _pump_stream(self) -> None:
         """Drain any pending stream events and update accumulators."""
@@ -2576,6 +2802,10 @@ class SuccessorChat(App):
 
         # Drain any pending llama.cpp stream events.
         self._pump_stream()
+
+        # Poll the compaction worker. If it's done, apply the result
+        # and transition the animation from waiting → materialize.
+        self._poll_compaction_worker()
 
         # Resolve the active theme variant for THIS frame. Combines the
         # (theme, display_mode) state into one ThemeVariant. If either
@@ -2834,6 +3064,101 @@ class SuccessorChat(App):
             if y >= bottom:
                 break
             self._paint_chat_row(grid, body_x, y, body_width, row, theme)
+
+        # ─── Compaction WAITING overlay ───
+        # During the indefinite wait between fold and materialize,
+        # paint a centered spinner + status indicator. The chat area
+        # is fully dimmed (snapshot rendered with fade_alpha=0) so
+        # the spinner stands alone as the visual focus.
+        if self._compaction_anim is not None:
+            now = time.monotonic()
+            phase, phase_t = self._compaction_anim.phase_at(now)
+            if phase == "waiting":
+                self._paint_compaction_waiting_overlay(
+                    grid, top, bottom, body_x, body_width, theme,
+                    elapsed_s=phase_t,
+                )
+
+    def _paint_compaction_waiting_overlay(
+        self,
+        grid: Grid,
+        top: int,
+        bottom: int,
+        body_x: int,
+        body_width: int,
+        theme: ThemeVariant,
+        *,
+        elapsed_s: float,
+    ) -> None:
+        """Paint the spinner + status indicator during the WAITING phase.
+
+        Layout (centered in the chat region):
+            ┌─────────────────────────────────────────┐
+            │  ⠋ compacting 165 rounds (40,052 → ?)   │
+            │     elapsed: 00:42                      │
+            │                                         │
+            │     Ctrl+G to cancel                    │
+            └─────────────────────────────────────────┘
+
+        The spinner animates at ~10 Hz via _compaction_anim.spinner_frame.
+        """
+        anim = self._compaction_anim
+        if anim is None:
+            return
+
+        chat_h = bottom - top
+        if chat_h < 6 or body_width < 30:
+            return
+
+        # Center vertically
+        box_w = min(body_width - 4, 60)
+        box_h = 5
+        center_y = top + chat_h // 2 - box_h // 2
+        center_x = body_x + (body_width - box_w) // 2
+
+        # Background fill — darker bg to draw the eye
+        fill_region(
+            grid, center_x, center_y, box_w, box_h,
+            style=Style(bg=theme.bg_input),
+        )
+
+        # Border (subtle) using accent_warm
+        border_style = Style(fg=theme.accent_warm, bg=theme.bg_input, attrs=ATTR_BOLD)
+        paint_box(
+            grid, center_x, center_y, box_w, box_h,
+            style=border_style,
+            fill_style=Style(fg=theme.fg, bg=theme.bg_input),
+        )
+
+        # Spinner + status line
+        spinner = anim.spinner_frame(time.monotonic())
+        rounds_text = f"{anim.rounds_summarized} rounds"
+        if anim.pre_compact_tokens > 0:
+            tokens_text = f" · {anim.pre_compact_tokens:,} tokens"
+        else:
+            tokens_text = ""
+        status = f" {spinner}  compacting {rounds_text}{tokens_text} "
+        # Truncate to fit
+        if len(status) > box_w - 2:
+            status = status[:box_w - 2]
+        sx = center_x + (box_w - len(status)) // 2
+        sy = center_y + 1
+        paint_text(
+            grid, status, sx, sy,
+            style=Style(fg=theme.accent_warm, bg=theme.bg_input, attrs=ATTR_BOLD),
+        )
+
+        # Elapsed time + cancel hint
+        m, s = divmod(int(elapsed_s), 60)
+        elapsed_text = f" elapsed: {m:02d}:{s:02d}  ·  Ctrl+G to cancel "
+        if len(elapsed_text) > box_w - 2:
+            elapsed_text = elapsed_text[:box_w - 2]
+        ex = center_x + (box_w - len(elapsed_text)) // 2
+        ey = center_y + 3
+        paint_text(
+            grid, elapsed_text, ex, ey,
+            style=Style(fg=theme.fg_dim, bg=theme.bg_input, attrs=ATTR_DIM),
+        )
 
     # ─── Paint a single _RenderedRow ───
 
@@ -3162,12 +3487,15 @@ class SuccessorChat(App):
                 # Animation finished — clear it and fall through to
                 # normal painting of self.messages
                 self._compaction_anim = None
-            elif phase in ("anticipation", "fold"):
-                # Paint the snapshot. During fold, apply progressive
-                # fade. During anticipation, no fade yet — just give
-                # the rounds a subtle glow via accent_warm tint.
+            elif phase in ("anticipation", "fold", "waiting"):
+                # All three render the snapshot. During fold, apply
+                # progressive fade. During waiting, hold at fully faded
+                # (the spinner overlay handles the visual focus).
+                # During anticipation, no fade — just the warm glow.
                 if phase == "fold":
                     fade_alpha = 1.0 - ease_out_cubic(phase_t)
+                elif phase == "waiting":
+                    fade_alpha = 0.0  # snapshot fully invisible
                 else:
                     fade_alpha = 1.0
                 return self._build_rows_from_messages(
@@ -3178,8 +3506,8 @@ class SuccessorChat(App):
                 )
             else:
                 # materialize / reveal / toast — paint the post-compact
-                # state but override the boundary row's materialize_t
-                # and the summary row's fade_alpha
+                # state with overrides on boundary materialize_t and
+                # summary fade_alpha
                 return self._build_rows_from_messages(
                     self.messages, body_width, theme,
                     anim_phase=phase, anim_t=phase_t,

@@ -1789,6 +1789,209 @@ topic accurately:
 
 ---
 
+## Phase 5.3 — async + KV-cache-friendly compaction (2026-04-07)
+
+The compaction subsystem becomes ACTUALLY USABLE at large context.
+Two independent fixes that together take compaction from "freezes
+the chat for ~19 minutes at 256K context" to "5-6 minute background
+operation with a live spinner that the user can cancel."
+
+### The problem
+
+The user found that `/compact` at 256K context completely froze
+the CLI. Profiling revealed two compounding issues:
+
+1. **`compact()` was synchronous in the chat path.** `_handle_compact_cmd`
+   blocked in `_submit()` waiting for the model's summary. No
+   `on_tick` ran during that time → frozen UI.
+
+2. **The summarization prompt was KV-cache-hostile.** It used a
+   fresh system prompt + a single user message containing the
+   serialized transcript. From llama.cpp's perspective, this
+   prompt diverged from the chat's normal sends at token 0, so
+   the cached prefix was useless and llama had to re-eval the
+   entire 256K prompt from scratch. At 307 tok/s prompt eval that's
+   ~14 minutes BEFORE the model even started generating the summary.
+
+   For comparison, normal chat at 200K is fast because each turn's
+   prompt is a CONTINUATION of the cached prefix — only the new user
+   message gets evaluated.
+
+### Fix 1: KV-cache-friendly summarization prompt
+
+`agent/compact.py:_build_summary_prompt` was rewritten to send the
+chat's existing message structure (system prompt + all rounds)
+followed by a single user instruction message:
+
+```
+[chat_system_prompt][user1][asst1]...[userN][asstN][synthetic_user: "now summarize..."]
+                                                    ^ divergence point — only this is fresh
+```
+
+llama.cpp can now reuse its KV cache for everything except the
+trailing instruction message. At 256K context:
+
+  - Old approach: ~14 minutes prompt eval (cache miss on 256K tokens)
+  - New approach: ~1 second prompt eval (full cache reuse)
+  - Generation: still takes the full ~5 minutes for a 16K-token
+    summary (this is unavoidable model work)
+
+The model sees the entire conversation including the rounds we'll
+keep verbatim. The instruction tells it to focus its summary on the
+older portion. Some redundancy with kept rounds is harmless because
+the kept rounds are preserved in the post-compact log anyway.
+
+PTL retry path was updated too — drops oldest rounds from the FULL
+log on each retry instead of just the rounds-to-summarize.
+
+### Fix 2: Async _CompactionWorker thread
+
+`SuccessorChat` gained a `_CompactionWorker` class (mirrors the
+`ChatStream` pattern) that runs `compact()` in a daemon thread with
+a result attribute. `_handle_compact_cmd` now:
+
+1. Snapshots `self.messages`
+2. Pre-computes `pre_compact_tokens` and `rounds_to_summarize` for
+   the spinner indicator
+3. Arms the animation IMMEDIATELY
+4. Spawns the worker
+5. Returns in <1 second
+
+`on_tick` calls a new `_poll_compaction_worker()` on every frame.
+When the worker reports success, the chat applies the new log via
+`_from_agent_log()` and sets `_compaction_anim.result_arrived_at`,
+which triggers the materialize → reveal → toast transition.
+
+The chat REMAINS INTERACTIVE during the entire 5-6 minute wait —
+frame ticks continue, the spinner animates, and Ctrl+G cancels.
+
+### Fix 3: WAITING phase + spinner overlay
+
+`_CompactionAnimation` was extended with a sixth phase:
+
+```
+T=0       compaction triggered → snapshot + spawn worker
+T=0-300   ANTICIPATION  rounds glow toward accent_warm
+T=300-1500 FOLD         rounds fade fg → bg via lerp_rgb
+T=1500-?? WAITING       indefinite — model is generating
+                        Spinner + "compacting N rounds (X tokens)"
+                        Ctrl+G to cancel
+T=R-R+400 MATERIALIZE   (R = result_arrived_at) divider draws in
+T=R+400-R+1000 REVEAL   summary fades in below the divider
+T=R+1000-R+3500 TOAST   settled state with subtle pulse
+```
+
+The phase machine now uses `result_arrived_at` as the anchor for
+post-fold phases instead of a fixed offset from `started_at`. This
+lets the wait time be arbitrarily long without compressing the
+visible animation.
+
+A new `_paint_compaction_waiting_overlay` method paints a centered
+status box during the waiting phase:
+
+```
+╭──────────────────────────────────────────────────────────╮
+│        ⠇  compacting 735 rounds · 204,821 tokens         │
+│                                                          │
+│           elapsed: 00:23  ·  Ctrl+G to cancel            │
+╰──────────────────────────────────────────────────────────╯
+```
+
+Spinner animates at ~10 Hz via `_compaction_anim.spinner_frame()`.
+The chat content behind it is fully faded out (`fade_alpha=0`)
+during the waiting phase so the spinner overlay is the visual focus.
+
+### Cancel UX
+
+Ctrl+G during compaction:
+1. Calls `_compaction_worker.close()` (sets the worker's stop event)
+2. Clears `_compaction_worker` and `_compaction_anim`
+3. Appends "compaction cancelled" synthetic message
+4. Worker thread continues until its HTTP request completes (we
+   can't yank an in-flight urllib request) but the result is
+   discarded because the stop event was set
+
+Mirrors the existing Ctrl+G abort for in-flight chat streams.
+
+### Tests (7 new — 645 total, all passing)
+
+In `test_compaction_animation.py`:
+- `test_phase_at_waiting_when_no_result_yet` — waiting is indefinite
+- `test_phase_at_waiting_transitions_to_materialize_on_result` —
+  setting result_arrived_at unsticks the animation
+- `test_spinner_frame_animates` — frames cycle at 10 Hz
+- `test_waiting_overlay_shows_spinner_and_status` — visual snapshot
+  of the centered overlay with rounds + tokens + elapsed + cancel
+- `test_worker_runs_in_background` — start() returns instantly,
+  poll() returns the result when done
+- `test_worker_close_aborts_pending_result` — close() before completion
+  discards the result
+- `test_handle_compact_cmd_is_non_blocking` — `/compact` via _submit
+  returns in <0.2s even with a slow mock client
+
+In `test_agent_compact.py` one existing test was updated to check
+the new prompt structure (each round becomes its own user/assistant
+message in the API prompt, not a single embedded transcript).
+
+### Live E2E results at 200K context
+
+```
+STEP 1: /burn 200000  → 1457 messages
+STEP 2: insert key fact at start of chat
+STEP 3: /compact via _submit
+        _submit() returned in 0.848s  ← was: ~19 minutes (freeze)
+        Worker spawned, animation armed
+STEP 4: tick loop (simulating frame loop at 16 fps)
+        T+0.2s   anticipation phase
+        T+0.3s   fold phase
+        T+1.5s   WAITING phase begins (spinner visible)
+        T+354.4s WAITING ends (result arrived)
+        T+354.4s materialize phase
+        T+354.8s reveal phase
+        T+355.4s toast phase
+        ────────────────────────
+        Total: 357.9s wall time
+        Frame rate during wait: 16 ticks/s
+        Chat REMAINED INTERACTIVE the entire time
+```
+
+### What's NOT yet built
+
+- **Cache pre-warming for the post-compact state**. After compaction,
+  the next user message has a different prefix from what's in the KV
+  cache (the cache holds the full chat + instruction; the new send
+  starts with [sys][boundary][summary]). The next message pays a
+  ~40-second cache miss to evaluate the post-compact prefix. We
+  could fire a background warm-up request after compaction to
+  populate the cache before the next user message arrives. Deferred
+  to phase 5.4.
+
+- **Recall fidelity at extreme burn ratios**. When the source content
+  is 700+ near-identical synthetic burn rounds, Qwen's distill has
+  trouble preserving unique facts in the summary. The earlier test
+  with REAL conversation content (the "Lycaon" name test) had 100%
+  recall. This is a model fidelity quirk, not a code issue, and
+  it's much less of an issue with real conversational content
+  where each round is distinct.
+
+### Why this is the right architecture
+
+The cache-friendly principle is simple: **every prompt llama.cpp
+sees should be a continuation of the previous prompt, not a new
+one**. The chat naturally satisfies this for normal turns. The
+compaction was the one place we violated it, and that's where the
+freeze happened. Fixing it required changing the prompt structure
+but no other architectural changes — the post-compact state shape
+stays identical, the renderer stays identical, the agent loop's
+trigger logic stays identical.
+
+The async worker is also straightforward — same pattern as the
+existing `ChatStream`, and it's the only thing standing between
+"interactive at 200K context" and "frozen for 6 minutes." Worth
+every line.
+
+---
+
 ## What's next
 
 - **Skill invocation strategy** — pick always-on vs on-demand after
@@ -1825,10 +2028,12 @@ topic accurately:
 | 5.0 (bash-masking subsystem: parser + risk + exec + render + chat) | 131 | 487 |
 | 5.1 (agent loop + compaction + burn rig) | 115 | 602 |
 | 5.2 (visible compaction animation + context fill bar) | 28 | 630 |
+| 5.2.1 (200K context fps regression fix) | 8 | 638 |
+| 5.3 (async + KV-cache-friendly compaction + waiting overlay) | 7 | 645 |
 
 (Counts above are approximate by phase boundary; actual test
 collection may include additional small additions in subsequent
 commits.)
 
-Final: **630 tests, all passing, hermetic via `SUCCESSOR_CONFIG_DIR`,
+Final: **645 tests, all passing, hermetic via `SUCCESSOR_CONFIG_DIR`,
 no fake mocks, no `.skip()` or `.todo()`.**

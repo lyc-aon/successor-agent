@@ -14,6 +14,7 @@ animation.started_at) so phase boundaries are exact.
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -36,19 +37,50 @@ from successor.snapshot import render_grid_to_plain
 # ─── Phase machine ───
 
 
-def _make_anim(now: float | None = None) -> _CompactionAnimation:
+def _make_anim(
+    now: float | None = None,
+    *,
+    result_arrived_at: float | None = None,
+) -> _CompactionAnimation:
+    """Build a test animation. By default the result is "arrived
+    immediately at started_at" so the materialize/reveal/done phases
+    play on the old fixed schedule for backward-compat with existing
+    tests. Pass result_arrived_at=None to leave the animation in the
+    waiting phase."""
+    n = now or time.monotonic()
     boundary = BoundaryMarker(
-        happened_at=now or time.monotonic(),
+        happened_at=n,
         pre_compact_tokens=10000, post_compact_tokens=500,
         rounds_summarized=20, summary_text="x", reason="manual",
     )
+    # By default the result already arrived at started_at + fold_end
+    # so the post-fold phases play on a fixed schedule (matches the
+    # old animation timing).
+    if result_arrived_at is None:
+        from successor.chat import _COMPACT_ANTICIPATION_S, _COMPACT_FOLD_S
+        result_arrived_at = n + _COMPACT_ANTICIPATION_S + _COMPACT_FOLD_S
     return _CompactionAnimation(
-        started_at=now or time.monotonic(),
+        started_at=n,
         pre_compact_snapshot=[],
         pre_compact_count=0,
         boundary=boundary,
         summary_text="x",
         reason="manual",
+        result_arrived_at=result_arrived_at,
+    )
+
+
+def _make_waiting_anim(now: float | None = None) -> _CompactionAnimation:
+    """Build a test animation in the waiting phase (no result yet)."""
+    n = now or time.monotonic()
+    return _CompactionAnimation(
+        started_at=n,
+        pre_compact_snapshot=[],
+        pre_compact_count=0,
+        boundary=None,
+        summary_text="",
+        reason="manual",
+        result_arrived_at=None,
     )
 
 
@@ -101,6 +133,47 @@ def test_phase_at_pending_clamps() -> None:
     anim = _make_anim(now=100.0)
     phase, t = anim.phase_at(99.0)
     assert phase == "pending"
+
+
+def test_phase_at_waiting_when_no_result_yet() -> None:
+    """After fold completes, if result_arrived_at is None, the
+    phase should be 'waiting' indefinitely."""
+    anim = _make_waiting_anim(now=100.0)
+    fold_end = 100.0 + _COMPACT_ANTICIPATION_S + _COMPACT_FOLD_S
+    # Just past fold end
+    phase, t = anim.phase_at(fold_end + 0.5)
+    assert phase == "waiting"
+    assert t == pytest.approx(0.5, abs=0.01)
+    # Way past fold end — still waiting
+    phase, t = anim.phase_at(fold_end + 60.0)
+    assert phase == "waiting"
+    assert t == pytest.approx(60.0, abs=0.01)
+
+
+def test_phase_at_waiting_transitions_to_materialize_on_result() -> None:
+    """Setting result_arrived_at transitions out of waiting."""
+    anim = _make_waiting_anim(now=100.0)
+    fold_end = 100.0 + _COMPACT_ANTICIPATION_S + _COMPACT_FOLD_S
+    # In waiting at fold_end + 5s
+    waiting_at = fold_end + 5.0
+    phase, t = anim.phase_at(waiting_at)
+    assert phase == "waiting"
+    # Set result_arrived_at to "now" (fold_end + 5)
+    # Mutate the dataclass (slots=True, not frozen)
+    object.__setattr__(anim, "result_arrived_at", waiting_at)
+    # Materialize should start
+    phase, t = anim.phase_at(waiting_at + 0.1)
+    assert phase == "materialize"
+    assert t == pytest.approx(0.25, abs=0.05)
+
+
+def test_spinner_frame_animates() -> None:
+    anim = _make_waiting_anim(now=0.0)
+    frames = set()
+    for tenth_sec in range(20):  # 2 seconds of frames at 10 Hz
+        frames.add(anim.spinner_frame(tenth_sec * 0.1))
+    # Should cycle through several distinct frames
+    assert len(frames) >= 5
 
 
 # ─── paint_horizontal_divider primitive ───
@@ -180,13 +253,21 @@ def _build_chat_with_anim(
         _Message("successor", "", is_boundary=True, boundary_meta=boundary),
         _Message("successor", "test summary", is_summary=True, boundary_meta=boundary),
     ]
+    # The result_arrived_at anchor places materialize/reveal/toast on
+    # the same fixed schedule as the old timing model, so existing
+    # elapsed-based tests work without changes. Set it to fold_end
+    # so phases play immediately after fold completes.
+    from successor.chat import _COMPACT_ANTICIPATION_S, _COMPACT_FOLD_S
+    started = time.monotonic() - elapsed
+    fold_end = started + _COMPACT_ANTICIPATION_S + _COMPACT_FOLD_S
     anim = _CompactionAnimation(
-        started_at=time.monotonic() - elapsed,
+        started_at=started,
         pre_compact_snapshot=snapshot,
         pre_compact_count=len(snapshot),
         boundary=boundary,
         summary_text="test summary",
         reason="manual",
+        result_arrived_at=fold_end,  # immediate transition after fold
     )
     chat._compaction_anim = anim
     return chat, anim
@@ -309,6 +390,176 @@ def test_post_anim_boundary_still_renders(temp_config_dir: Path) -> None:
 
 
 # ─── Boundary marker rendering (post-animation steady state) ───
+
+
+def test_waiting_overlay_shows_spinner_and_status(temp_config_dir: Path) -> None:
+    """During the WAITING phase, the chat should show a centered
+    spinner + 'compacting N rounds' status indicator."""
+    chat = SuccessorChat()
+    chat.messages = []
+    snapshot = []
+    for i in range(4):
+        snapshot.append(_Message("user", f"q{i}"))
+        snapshot.append(_Message("successor", f"a{i}"))
+
+    # Arm the animation in waiting state — no result yet
+    from successor.chat import (
+        _COMPACT_ANTICIPATION_S, _COMPACT_FOLD_S,
+    )
+    started = time.monotonic() - (_COMPACT_ANTICIPATION_S + _COMPACT_FOLD_S + 1.0)
+    chat._compaction_anim = _CompactionAnimation(
+        started_at=started,
+        pre_compact_snapshot=snapshot,
+        pre_compact_count=len(snapshot),
+        boundary=None,  # not arrived yet
+        summary_text="",
+        reason="manual",
+        result_arrived_at=None,  # still waiting
+        pre_compact_tokens=12345,
+        rounds_summarized=42,
+    )
+    g = Grid(30, 100)
+    chat.on_tick(g)
+    plain = render_grid_to_plain(g)
+    assert "compacting" in plain
+    assert "42 rounds" in plain
+    assert "12,345 tokens" in plain
+    assert "elapsed" in plain
+    assert "Ctrl+G" in plain
+
+
+# ─── Worker thread integration ───
+
+
+class _MockCompactClient:
+    """Fake CompactionClient that simulates a slow compact response."""
+    def __init__(self, summary_text: str = "mock summary text", delay_s: float = 0.0):
+        self.summary_text = summary_text
+        self.delay_s = delay_s
+        self.base_url = "http://mock"
+
+    def stream_chat(self, messages, *, max_tokens=None, temperature=None,
+                    timeout=None, extra=None):
+        from successor.providers.llama import (
+            ContentChunk, StreamEnded, StreamStarted,
+        )
+        if self.delay_s:
+            time.sleep(self.delay_s)
+        return _MockStream(events=[
+            StreamStarted(),
+            ContentChunk(text=self.summary_text),
+            StreamEnded(finish_reason="stop", usage=None, timings=None),
+        ])
+
+
+@dataclass
+class _MockStream:
+    events: list = field(default_factory=list)
+    _drained: bool = False
+
+    def drain(self):
+        if self._drained:
+            return []
+        self._drained = True
+        return list(self.events)
+
+    def close(self):
+        pass
+
+
+def test_worker_runs_in_background(temp_config_dir: Path) -> None:
+    """The worker thread should not block the main thread."""
+    from successor.chat import _CompactionWorker
+    from successor.agent import MessageLog, LogMessage, TokenCounter
+
+    client = _MockCompactClient(delay_s=0.1)
+    counter = TokenCounter()
+    log = MessageLog(system_prompt="sys")
+    for i in range(10):
+        log.begin_round()
+        log.append_to_current_round(LogMessage(role="user", content=f"q{i}"))
+        log.append_to_current_round(LogMessage(role="assistant", content=f"a{i}"))
+
+    worker = _CompactionWorker(log=log, client=client, counter=counter)
+    t0 = time.monotonic()
+    worker.start()
+    # Worker is async — start() returns immediately
+    elapsed = time.monotonic() - t0
+    assert elapsed < 0.05, f"start() took {elapsed:.3f}s, should be near zero"
+
+    # Poll until done
+    deadline = time.monotonic() + 5.0
+    while worker.is_running() and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    result = worker.poll()
+    assert result is not None
+    assert result.error is None
+    assert result.boundary is not None
+    assert "mock summary" in result.boundary.summary_text
+
+
+def test_worker_close_aborts_pending_result(temp_config_dir: Path) -> None:
+    """close() before completion discards the result."""
+    from successor.chat import _CompactionWorker
+    from successor.agent import MessageLog, LogMessage, TokenCounter
+
+    client = _MockCompactClient(delay_s=0.5)  # slow enough to abort
+    counter = TokenCounter()
+    log = MessageLog(system_prompt="sys")
+    for i in range(10):
+        log.begin_round()
+        log.append_to_current_round(LogMessage(role="user", content=f"q{i}"))
+        log.append_to_current_round(LogMessage(role="assistant", content=f"a{i}"))
+
+    worker = _CompactionWorker(log=log, client=client, counter=counter)
+    worker.start()
+    time.sleep(0.05)  # let it start running
+    worker.close()
+    # Wait a bit for the worker's HTTP call to complete
+    time.sleep(0.6)
+    # Result should NOT have been recorded (close() set the stop flag
+    # before the worker stored its result)
+    result = worker.poll()
+    assert result is None
+
+
+def test_handle_compact_cmd_is_non_blocking(temp_config_dir: Path) -> None:
+    """/compact should return immediately, not wait for the worker."""
+    from successor.agent import TokenCounter
+    chat = SuccessorChat()
+    chat.client = _MockCompactClient(delay_s=0.3)
+    # Inject a heuristic-only counter so the test doesn't hit the
+    # mock client's bogus /tokenize URL
+    chat._cached_token_counter = TokenCounter()
+    chat.messages = []
+    # Need at least 4 rounds for compaction not to refuse
+    for i in range(6):
+        chat.messages.append(_Message("user", f"q{i}"))
+        chat.messages.append(_Message("successor", f"a{i}"))
+
+    chat.input_buffer = "/compact"
+    t0 = time.monotonic()
+    chat._submit()
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < 0.2, f"/compact took {elapsed:.3f}s, should be near zero"
+    # Animation armed
+    assert chat._compaction_anim is not None
+    # Worker spawned
+    assert chat._compaction_worker is not None
+
+    # Wait for worker to complete
+    deadline = time.monotonic() + 5.0
+    while chat._compaction_worker is not None and time.monotonic() < deadline:
+        chat._poll_compaction_worker()
+        time.sleep(0.05)
+
+    # After polling, the worker should be cleared and the animation
+    # should have a result_arrived_at
+    assert chat._compaction_worker is None
+    assert chat._compaction_anim is not None
+    assert chat._compaction_anim.result_arrived_at is not None
 
 
 def test_boundary_message_in_chat_renders_divider(temp_config_dir: Path) -> None:
