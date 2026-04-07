@@ -202,7 +202,13 @@ class TokenCounter:
         """POST to /tokenize and return the count, or None on failure."""
         if self.endpoint is None:
             return None
-        url = self.endpoint.base_url.rstrip("/") + "/tokenize"
+        # llama.cpp's /tokenize lives at the server root, NOT under /v1.
+        # Strip a trailing /v1 if the user configured base_url that way
+        # so we don't end up POSTing to /v1/tokenize (404).
+        root = self.endpoint.base_url.rstrip("/")
+        if root.endswith("/v1"):
+            root = root[:-3]
+        url = root + "/tokenize"
         body = json.dumps({"content": text}).encode("utf-8")
         req = urllib.request.Request(
             url,

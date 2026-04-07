@@ -36,9 +36,18 @@ from .llama import ChatStream
 class OpenAICompatClient:
     """Configured OpenAI-compatible endpoint factory.
 
-    base_url is the server root (NOT including /v1). Auth is optional —
-    pass an api_key for hosted servers, leave it None for local servers
-    that don't require it.
+    base_url accepts both conventions:
+      - with `/v1` already included (the OpenAI SDK / LiteLLM / LM Studio /
+        Ollama convention) e.g. `https://openrouter.ai/api/v1`
+      - without `/v1` (llama.cpp convention) e.g. `http://localhost:1234`
+
+    The client detects which form was passed and only appends `/v1` when
+    it's missing. This makes the harness work with the most common
+    hosted endpoints out of the box without users having to remember
+    which form a given provider expects.
+
+    Auth is optional — pass an api_key for hosted servers, leave it
+    None for local servers that don't require it.
 
     Conforms structurally to `providers.base.ChatProvider`.
     """
@@ -63,6 +72,17 @@ class OpenAICompatClient:
         self.default_temperature = default_temperature
         self.default_timeout = default_timeout
         self.connect_timeout = connect_timeout
+
+    def _api_root(self) -> str:
+        """Return the base URL with `/v1` ensured exactly once.
+
+        Handles both `https://openrouter.ai/api/v1` (already includes
+        /v1) and `http://localhost:1234` (does not). Avoids producing
+        the dreaded `…/v1/v1/chat/completions` 404.
+        """
+        if self.base_url.endswith("/v1") or "/v1/" in self.base_url:
+            return self.base_url
+        return f"{self.base_url}/v1"
 
     def stream_chat(
         self,
@@ -96,7 +116,7 @@ class OpenAICompatClient:
         if extra:
             body.update(extra)
 
-        url = f"{self.base_url}/v1/chat/completions"
+        url = f"{self._api_root()}/chat/completions"
 
         # ChatStream doesn't currently take an Authorization header;
         # for OpenAI-compat servers we extend it via a subclass that
@@ -126,7 +146,7 @@ class OpenAICompatClient:
         Most OpenAI-compat servers expose this endpoint and require no
         auth for it (some require auth — passes the api_key if set).
         """
-        url = f"{self.base_url}/v1/models"
+        url = f"{self._api_root()}/models"
         headers = {}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"

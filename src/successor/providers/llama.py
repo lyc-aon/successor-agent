@@ -457,6 +457,18 @@ class LlamaCppClient:
         self.default_timeout = default_timeout
         self.connect_timeout = connect_timeout
 
+    def _api_root(self) -> str:
+        """Return the base URL with `/v1` ensured exactly once.
+
+        Handles both `http://localhost:8080` (llama.cpp default, no
+        version path) and `http://localhost:8080/v1` (some setups
+        prefix it for parity with hosted services). Avoids producing
+        the dreaded `…/v1/v1/chat/completions` 404.
+        """
+        if self.base_url.endswith("/v1") or "/v1/" in self.base_url:
+            return self.base_url
+        return f"{self.base_url}/v1"
+
     def stream_chat(
         self,
         messages: Iterable[dict],
@@ -517,7 +529,7 @@ class LlamaCppClient:
         if extra:
             body.update(extra)
 
-        url = f"{self.base_url}/v1/chat/completions"
+        url = f"{self._api_root()}/chat/completions"
         return ChatStream(
             url=url,
             body=body,

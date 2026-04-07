@@ -3674,12 +3674,16 @@ class SuccessorChat(App):
     def _format_stream_error(self, raw: str) -> str:
         """Translate a raw StreamError message into a friendlier hint.
 
-        The most common failure mode for new users is "the chat opens
-        but my first message gets [stream failed: connection failed:
-        <urlopen error [Errno 111] Connection refused>]". That tells
-        the user nothing actionable, so detect connection-refused /
-        DNS / unreachable cases and surface the llama.cpp quickstart
-        instead. Other errors fall through with the raw message.
+        The most common failure modes for new users:
+          - "[stream failed: connection failed: <urlopen error [Errno 111]
+             Connection refused>]" — local server not running
+          - "[stream failed: HTTP 401: Unauthorized]" — bad / missing api_key
+          - "[stream failed: HTTP 402: Payment Required]" — out of credits
+          - "[stream failed: HTTP 429: Too Many Requests]" — rate limited
+
+        Each of these gets translated into an actionable hint that names
+        the active profile's base_url and explains what the user should do.
+        Other errors fall through with the raw message.
         """
         provider_cfg = self.profile.provider or {}
         base_url = provider_cfg.get("base_url", "http://localhost:8080")
@@ -3697,16 +3701,41 @@ class SuccessorChat(App):
         is_unreachable = "network is unreachable" in lower
         if is_conn_refused or is_dns or is_unreachable:
             return (
-                f"[no llama.cpp server at {base_url}]\n"
+                f"[no server at {base_url}]\n"
                 f"\n"
                 f"successor expects an OpenAI-compatible HTTP endpoint at\n"
-                f"the URL above. The standard llama.cpp quickstart is:\n"
+                f"the URL above. For local llama.cpp, the standard\n"
+                f"quickstart is:\n"
                 f"\n"
                 f"  llama-server -m <your-model.gguf> --host 0.0.0.0 --port 8080\n"
                 f"\n"
-                f"Once the server is up, retry your message. To point at a\n"
-                f"different endpoint open /config and edit the active\n"
-                f"profile's provider.base_url field."
+                f"For a hosted endpoint (OpenRouter, OpenAI, Groq, etc.),\n"
+                f"open /config and check the active profile's\n"
+                f"provider.base_url and provider.api_key fields."
+            )
+        if "http 401" in lower or "unauthorized" in lower:
+            return (
+                f"[unauthorized — {base_url}]\n"
+                f"\n"
+                f"The server rejected the request as unauthorized. Either\n"
+                f"the api_key is missing, malformed, or revoked. Open\n"
+                f"/config and check the active profile's provider.api_key\n"
+                f"field."
+            )
+        if "http 402" in lower or "payment required" in lower:
+            return (
+                f"[out of credits — {base_url}]\n"
+                f"\n"
+                f"The provider says the account is out of credits or owes\n"
+                f"a balance. Top up at the provider dashboard, then retry."
+            )
+        if "http 429" in lower or "too many requests" in lower:
+            return (
+                f"[rate limited by {base_url}]\n"
+                f"\n"
+                f"The provider is throttling requests. Wait a moment and\n"
+                f"retry, or switch to a different model / paid tier in\n"
+                f"the active profile via /config."
             )
         return f"[stream failed: {raw}]"
 

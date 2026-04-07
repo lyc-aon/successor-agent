@@ -19,7 +19,7 @@ def test_friendly_error_for_connection_refused(temp_config_dir: Path) -> None:
     msg = chat._format_stream_error(
         "connection failed: <urlopen error [Errno 111] Connection refused>"
     )
-    assert "no llama.cpp server" in msg
+    assert "no server at" in msg
     assert "http://localhost:8080" in msg
     assert "llama-server" in msg
     assert "/config" in msg
@@ -30,7 +30,7 @@ def test_friendly_error_for_dns_failure(temp_config_dir: Path) -> None:
     msg = chat._format_stream_error(
         "connection failed: <urlopen error [Errno -2] Name or service not known>"
     )
-    assert "no llama.cpp server" in msg
+    assert "no server at" in msg
     assert "llama-server" in msg
 
 
@@ -45,11 +45,38 @@ def test_friendly_error_uses_active_profile_base_url(temp_config_dir: Path) -> N
 
 
 def test_other_errors_pass_through(temp_config_dir: Path) -> None:
-    """A non-connection error (e.g. HTTP 400) is reported as-is —
-    we only special-case the noisy/unhelpful socket failures."""
+    """A non-special-cased error (e.g. HTTP 400) is reported as-is."""
     chat = SuccessorChat()
     msg = chat._format_stream_error("HTTP 400: Bad Request")
     assert msg == "[stream failed: HTTP 400: Bad Request]"
+
+
+def test_friendly_error_for_unauthorized(temp_config_dir: Path) -> None:
+    """HTTP 401 should produce an api_key hint, not a raw stack trace."""
+    chat = SuccessorChat()
+    msg = chat._format_stream_error("HTTP 401: Unauthorized")
+    assert "unauthorized" in msg.lower()
+    assert "api_key" in msg
+    assert "/config" in msg
+
+
+def test_friendly_error_for_payment_required(temp_config_dir: Path) -> None:
+    """HTTP 402 (out of credits) should mention topping up."""
+    chat = SuccessorChat()
+    msg = chat._format_stream_error("HTTP 402: Payment Required")
+    assert "credits" in msg.lower()
+    assert "top up" in msg.lower()
+
+
+def test_friendly_error_for_rate_limit(temp_config_dir: Path) -> None:
+    """HTTP 429 (rate limited by hosted provider) should suggest waiting
+    or switching tier, not surface the raw error."""
+    chat = SuccessorChat()
+    chat.profile.provider["base_url"] = "https://openrouter.ai/api/v1"
+    msg = chat._format_stream_error("HTTP 429: Too Many Requests")
+    assert "rate limited" in msg.lower()
+    assert "openrouter.ai" in msg
+    assert "/config" in msg
 
 
 def test_stream_error_event_renders_friendly_message(temp_config_dir: Path) -> None:
@@ -75,7 +102,7 @@ def test_stream_error_event_renders_friendly_message(temp_config_dir: Path) -> N
     error_msgs = [m for m in chat.messages if m.role == "successor"]
     assert error_msgs, "expected an assistant error message"
     body = error_msgs[-1].raw_text
-    assert "no llama.cpp server" in body
+    assert "no server at" in body
     assert "llama-server" in body
     # The raw urllib error should NOT bleed through.
     assert "Errno" not in body
