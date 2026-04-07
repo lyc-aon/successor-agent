@@ -49,6 +49,17 @@ CLEAR_HOME = CSI + "2J" + CSI + "H"
 BRACKETED_PASTE_ON = CSI + "?2004h"
 BRACKETED_PASTE_OFF = CSI + "?2004l"
 
+# Mouse reporting:
+#   ?1000  base X11 mouse reporting (button press + release)
+#   ?1006  SGR extended mouse format (modern, supports columns > 223)
+#
+# Both must be enabled together for SGR mouse to work. Disabling them
+# is the inverse. While these are on, the terminal forwards mouse events
+# to the application instead of using its own selection layer — users
+# need to hold Shift to drag-select.
+MOUSE_ON = CSI + "?1000h" + CSI + "?1006h"
+MOUSE_OFF = CSI + "?1006l" + CSI + "?1000l"
+
 
 class Terminal:
     """A bounded TTY session.
@@ -66,10 +77,12 @@ class Terminal:
         raw: bool = True,
         alt_screen: bool = True,
         bracketed_paste: bool = True,
+        mouse_reporting: bool = False,
     ) -> None:
         self.raw = raw
         self.alt_screen = alt_screen
         self.bracketed_paste = bracketed_paste
+        self.mouse_reporting = mouse_reporting
         self.fd = sys.stdout.fileno()
         self._stdin_fd = sys.stdin.fileno()
         self._saved_termios: list | None = None
@@ -112,6 +125,26 @@ class Terminal:
             return True
         return False
 
+    def set_mouse_reporting(self, enabled: bool) -> None:
+        """Toggle SGR mouse reporting at runtime.
+
+        Sends the enable / disable escape sequences immediately. After
+        calling this with True, the input stream will start carrying SGR
+        mouse events (CSI < button ; col ; row M/m) — the KeyDecoder will
+        emit MouseEvent objects for them.
+
+        While mouse reporting is on, the terminal stops handling click-
+        drag selection itself. Users need to hold Shift to override and
+        use native selection. This is honored by Ghostty / kitty / iTerm2 /
+        alacritty / modern xterm.
+        """
+        if enabled and not self.mouse_reporting:
+            self.write(MOUSE_ON)
+            self.mouse_reporting = True
+        elif not enabled and self.mouse_reporting:
+            self.write(MOUSE_OFF)
+            self.mouse_reporting = False
+
     def copy_to_clipboard(self, text: str) -> None:
         """Programmatically copy text to the system clipboard via OSC 52.
 
@@ -148,6 +181,8 @@ class Terminal:
         out.append(HIDE_CURSOR)
         if self.bracketed_paste:
             out.append(BRACKETED_PASTE_ON)
+        if self.mouse_reporting:
+            out.append(MOUSE_ON)
         out.append(CLEAR_HOME)
         self.write("".join(out))
         # Install handlers.
@@ -173,6 +208,8 @@ class Terminal:
             return
         self._installed = False
         out: list[str] = [RESET_SGR, SHOW_CURSOR]
+        if self.mouse_reporting:
+            out.append(MOUSE_OFF)
         if self.bracketed_paste:
             out.append(BRACKETED_PASTE_OFF)
         if self.alt_screen:

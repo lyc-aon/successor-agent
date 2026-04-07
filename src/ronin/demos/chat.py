@@ -50,12 +50,15 @@ import time
 from dataclasses import dataclass
 
 from ..input.keys import (
+    InputEvent,
     Key,
     KeyDecoder,
     KeyEvent,
     MOD_ALT,
     MOD_CTRL,
     MOD_SHIFT,
+    MouseButton,
+    MouseEvent,
 )
 from ..providers.llama import (
     ChatStream,
@@ -175,6 +178,38 @@ def density_index(d: Density) -> int:
         return -1
 
 
+# ─── Hit boxes for clickable widgets ───
+#
+# Each tick, the chat App records the painted location of every
+# clickable widget into self._hit_boxes. The mouse event handler scans
+# this list to find which widget contains a click and dispatches to
+# the existing keyboard handlers (e.g. _cycle_theme).
+#
+# Hit boxes are recomputed every frame because the widget positions
+# can shift on resize, theme/density change, or scroll-state change.
+# This is cheap (3-5 small tuples per frame).
+
+
+@dataclass(slots=True, frozen=True)
+class _HitBox:
+    x: int
+    y: int
+    w: int
+    h: int
+    action: str  # "theme" | "density" | "scroll_to_bottom"
+
+    def contains(self, col: int, row: int) -> bool:
+        return (
+            self.x <= col < self.x + self.w
+            and self.y <= row < self.y + self.h
+        )
+
+
+# How many lines to scroll per wheel notch. 3 lines is the conventional
+# value (matches xterm and most terminal scroll-rate defaults).
+WHEEL_SCROLL_LINES = 3
+
+
 # ─── Tunables ───
 
 FADE_IN_S = 0.35
@@ -274,6 +309,17 @@ class RoninChat(App):
         # how Ronin uses cells.
         self.density: Density = NORMAL
 
+        # ─── Mouse state ───
+        # Mouse reporting is opt-in via /mouse on. When enabled, the
+        # title bar widgets become clickable and the scroll wheel works.
+        # The trade-off: native click-drag selection requires holding
+        # Shift while mouse reporting is on. Default is OFF so users
+        # who never opt in keep their normal selection behavior.
+        self._mouse_enabled: bool = False
+        # Hit boxes recorded each frame by the painters. Cleared at
+        # the start of on_tick and refilled as widgets are painted.
+        self._hit_boxes: list[_HitBox] = []
+
         # Probe the server immediately so we can show a useful greeting.
         server_up = self.client.health()
         if server_up:
@@ -320,9 +366,48 @@ class RoninChat(App):
     # ─── Input handling ───
 
     def on_key(self, byte: int) -> None:
-        """Bytes from stdin → KeyEvents → dispatched."""
+        """Bytes from stdin → InputEvents → dispatched.
+
+        The decoder may emit KeyEvent or MouseEvent depending on what
+        the byte stream encodes. Mouse events only arrive when mouse
+        reporting is enabled (via /mouse on).
+        """
         for event in self._key_decoder.feed(byte):
-            self._handle_key_event(event)
+            if isinstance(event, MouseEvent):
+                self._handle_mouse_event(event)
+            else:
+                self._handle_key_event(event)
+
+    def _handle_mouse_event(self, event: MouseEvent) -> None:
+        """Dispatch a mouse event to the appropriate handler.
+
+        Scroll wheel works regardless of widget hit boxes. Left clicks
+        check the recorded hit boxes for the title-bar widgets and
+        dispatch to the same handlers the keyboard shortcuts use.
+        Other buttons are ignored for v0.
+        """
+        # Scroll wheel — always navigate the chat history.
+        if event.button == MouseButton.WHEEL_UP:
+            self._scroll_lines(WHEEL_SCROLL_LINES)
+            return
+        if event.button == MouseButton.WHEEL_DOWN:
+            self._scroll_lines(-WHEEL_SCROLL_LINES)
+            return
+
+        # We only act on left button presses (not releases).
+        if event.button != MouseButton.LEFT or not event.pressed:
+            return
+
+        # Find which hit box contains the click.
+        for hb in self._hit_boxes:
+            if hb.contains(event.col, event.row):
+                if hb.action == "theme":
+                    self._cycle_theme()
+                elif hb.action == "density":
+                    self._cycle_density()
+                elif hb.action == "scroll_to_bottom":
+                    self._scroll_to_bottom()
+                return
 
     def _handle_key_event(self, event: KeyEvent) -> None:
         # ─── Bracketed paste boundaries ───
@@ -486,6 +571,20 @@ class RoninChat(App):
             idx = 0
         self._set_density(DENSITIES[(idx + 1) % len(DENSITIES)])
 
+    # ─── Mouse mode toggle ───
+
+    def _enable_mouse(self) -> None:
+        if self._mouse_enabled:
+            return
+        self.term.set_mouse_reporting(True)
+        self._mouse_enabled = True
+
+    def _disable_mouse(self) -> None:
+        if not self._mouse_enabled:
+            return
+        self.term.set_mouse_reporting(False)
+        self._mouse_enabled = False
+
     def _current_theme(self) -> Theme:
         """The theme to use for THIS frame's render.
 
@@ -544,6 +643,58 @@ class RoninChat(App):
                 )
                 return
             self._set_theme(target)
+            return
+
+        # /mouse         — show current state
+        # /mouse on      — enable mouse reporting (clickable widgets, scroll wheel)
+        # /mouse off     — disable
+        # /mouse toggle  — flip
+        if text.startswith("/mouse"):
+            parts = text.split(maxsplit=1)
+            if len(parts) == 1:
+                state = "on" if self._mouse_enabled else "off"
+                hint = (
+                    f"mouse: {state}. /mouse on enables clickable widgets and "
+                    f"scroll wheel; while on, hold Shift to drag-select text."
+                )
+                self.messages.append(_Message("ronin", hint, synthetic=True))
+                return
+            arg = parts[1].strip().lower()
+            if arg == "on":
+                self._enable_mouse()
+                self.messages.append(
+                    _Message(
+                        "ronin",
+                        "mouse on. Click the title-bar widgets, use scroll wheel "
+                        "to navigate history. Hold Shift while click-dragging to "
+                        "use native text selection.",
+                        synthetic=True,
+                    )
+                )
+                return
+            if arg == "off":
+                self._disable_mouse()
+                self.messages.append(
+                    _Message(
+                        "ronin",
+                        "mouse off. Native click-drag selection works again.",
+                        synthetic=True,
+                    )
+                )
+                return
+            if arg == "toggle":
+                if self._mouse_enabled:
+                    self._disable_mouse()
+                else:
+                    self._enable_mouse()
+                return
+            self.messages.append(
+                _Message(
+                    "ronin",
+                    f"unknown /mouse argument '{arg}'. try on, off, or toggle.",
+                    synthetic=True,
+                )
+            )
             return
 
         # /density       — show current density and available options
@@ -645,7 +796,13 @@ class RoninChat(App):
     def on_tick(self, grid: Grid) -> None:
         # Flush bare ESC / incomplete sequences from the key decoder.
         for event in self._key_decoder.flush():
-            self._handle_key_event(event)
+            if isinstance(event, MouseEvent):
+                self._handle_mouse_event(event)
+            else:
+                self._handle_key_event(event)
+
+        # Reset hit boxes — refilled as widgets are painted this frame.
+        self._hit_boxes = []
 
         # Drain any pending llama.cpp stream events.
         self._pump_stream()
@@ -688,7 +845,8 @@ class RoninChat(App):
 
         # ─── Theme widget (rightmost cell of title row) ───
         # Renders as a small accent-colored pill so it visually reads
-        # as an interactive element. The keybinding (Ctrl+T) cycles it.
+        # as an interactive element. Keybinding: Ctrl+T. Click target
+        # when mouse mode is on.
         theme_label = f" {theme.icon} {theme.name} "
         theme_style = Style(
             fg=theme.bg,
@@ -697,10 +855,14 @@ class RoninChat(App):
         )
         theme_x = max(0, cols - len(theme_label))
         paint_text(grid, theme_label, theme_x, 0, style=theme_style)
+        self._hit_boxes.append(
+            _HitBox(theme_x, 0, len(theme_label), 1, "theme")
+        )
 
         # ─── Density widget (just left of the theme widget) ───
         # Different background color so it visually distinguishes from
-        # the theme widget. Its keybindings are Alt+=, Alt+-, Ctrl+].
+        # the theme widget. Keybindings: Alt+=, Alt+-, Ctrl+]. Click
+        # target when mouse mode is on.
         density_label = f" {self.density.name} "
         density_style = Style(
             fg=theme.bg,
@@ -709,6 +871,9 @@ class RoninChat(App):
         )
         density_x = max(0, theme_x - len(density_label) - 1)
         paint_text(grid, density_label, density_x, 0, style=density_style)
+        self._hit_boxes.append(
+            _HitBox(density_x, 0, len(density_label), 1, "density")
+        )
 
         # ─── Scroll indicator (left of the density widget when scrolled) ───
         if self.scroll_offset > 0:
@@ -723,6 +888,9 @@ class RoninChat(App):
                 ix,
                 0,
                 style=Style(fg=theme.accent_warm, bg=theme.bg, attrs=ATTR_BOLD),
+            )
+            self._hit_boxes.append(
+                _HitBox(ix, 0, len(indicator), 1, "scroll_to_bottom")
             )
 
         # ─── Input area ───

@@ -1,29 +1,35 @@
-"""Real key parser — bytes from stdin → typed key events.
+"""Real input parser — bytes from stdin → typed input events.
 
 This is the foundational input layer that replaces the inline ESC
 accumulator we had in `RoninChat`. It handles:
 
   - Printable ASCII (0x20-0x7E)
   - UTF-8 multi-byte sequences (accumulated and emitted as full chars)
-  - Control codes (Ctrl+A through Ctrl+Z, plus Tab/Enter/Backspace)
+  - Control codes (Ctrl+A-Z, Ctrl+\\, ], ^, _, plus Tab/Enter/Backspace)
   - CSI escape sequences (arrow keys, Page Up/Down, Home/End, F-keys)
   - SS3 / application cursor mode escape sequences
   - Bracketed paste (CSI 200~ ... 201~)
   - Bare ESC (with timeout, after a tick boundary)
   - Modifier-bearing CSI sequences (CSI 1;2A = Shift+Up, etc.)
+  - SGR mouse events (CSI < button ; col ; row M/m) — when the terminal
+    has mouse reporting enabled. Includes left/middle/right click and
+    scroll wheel up/down. Drag motion is decoded but unused for v0.
 
 Use:
     decoder = KeyDecoder()
     for byte in input_bytes:
         for event in decoder.feed(byte):
-            handle(event)
+            if isinstance(event, MouseEvent):
+                handle_mouse(event)
+            else:
+                handle_key(event)
     # On frame boundary, flush any pending bare-ESC etc:
     for event in decoder.flush():
-        handle(event)
+        ...
 
-Each call to feed() emits 0 or more KeyEvents. The decoder maintains
-internal state across calls, so a multi-byte sequence is reassembled
-even if it arrives byte-by-byte.
+Each call to feed() emits 0 or more InputEvents (a union of KeyEvent
+and MouseEvent). The decoder maintains internal state across calls,
+so a multi-byte sequence is reassembled even if it arrives byte-by-byte.
 
 The decoder is **pure** — it doesn't touch the terminal, doesn't block,
 and has no I/O. It's a state machine over the input byte stream.
@@ -145,6 +151,43 @@ def key_name(event: KeyEvent) -> str:
     return "+".join(parts) if parts else "?"
 
 
+# ─── Mouse types ───
+
+
+class MouseButton(Enum):
+    """The button (or wheel direction) for a mouse event."""
+    LEFT = auto()
+    MIDDLE = auto()
+    RIGHT = auto()
+    WHEEL_UP = auto()
+    WHEEL_DOWN = auto()
+
+
+@dataclass(slots=True, frozen=True)
+class MouseEvent:
+    """A single decoded mouse event.
+
+    button:   which button or wheel direction triggered the event
+    col:      0-based column of the cursor cell
+    row:      0-based row of the cursor cell
+    pressed:  True for press, False for release. Wheel events are always
+              pressed=True (the protocol doesn't release wheel events).
+    motion:   True if this was a drag (button held while moving). For
+              wheel events, always False.
+    mods:     bitmask of MOD_SHIFT / MOD_ALT / MOD_CTRL
+    """
+    button: MouseButton
+    col: int
+    row: int
+    pressed: bool = True
+    motion: bool = False
+    mods: int = MOD_NONE
+
+
+# Union type for everything the decoder can emit.
+InputEvent = KeyEvent | MouseEvent
+
+
 # ─── Lookup tables for ESC sequences ───
 #
 # CSI = ESC [ , SS3 = ESC O. Both are common ways terminals encode
@@ -264,20 +307,21 @@ class KeyDecoder:
 
     # ─── public ───
 
-    def feed(self, byte: int) -> list[KeyEvent]:
-        """Feed a single byte. Returns 0 or more KeyEvents."""
-        out: list[KeyEvent] = []
+    def feed(self, byte: int) -> list[InputEvent]:
+        """Feed a single byte. Returns 0 or more InputEvents
+        (KeyEvent or MouseEvent)."""
+        out: list[InputEvent] = []
         self._step(byte, out)
         return out
 
-    def feed_bytes(self, data: bytes | bytearray) -> list[KeyEvent]:
-        """Feed multiple bytes. Returns 0 or more KeyEvents."""
-        out: list[KeyEvent] = []
+    def feed_bytes(self, data: bytes | bytearray) -> list[InputEvent]:
+        """Feed multiple bytes. Returns 0 or more InputEvents."""
+        out: list[InputEvent] = []
         for b in data:
             self._step(b, out)
         return out
 
-    def flush(self) -> list[KeyEvent]:
+    def flush(self) -> list[InputEvent]:
         """Drain pending sequences at frame boundaries.
 
         A bare ESC press leaves the decoder in ESC_SEEN with no follow-
@@ -488,16 +532,22 @@ class KeyDecoder:
         self,
         params: bytes,
         final: int,
-        out: list[KeyEvent],
+        out: list[InputEvent],
     ) -> None:
-        """Map a parsed CSI sequence to a KeyEvent.
+        """Map a parsed CSI sequence to a KeyEvent or MouseEvent.
 
         Handles:
-          CSI <final>            (no params)        → arrow keys, Home, End
-          CSI <num>~             (number ; tilde)   → PgUp/PgDn, F-keys
-          CSI <num1>;<num2><fin> (modifier-bearing) → e.g. Shift+Up
-          CSI 200~ / CSI 201~    (bracketed paste)
+          CSI <final>                 (no params)        → arrow keys, Home, End
+          CSI <num>~                  (number ; tilde)   → PgUp/PgDn, F-keys
+          CSI <num1>;<num2><fin>      (modifier-bearing) → e.g. Shift+Up
+          CSI 200~ / CSI 201~         (bracketed paste)
+          CSI < button;col;row M/m    (SGR mouse — press / release)
         """
+        # SGR mouse: parameters start with '<' and the final byte is M or m
+        if params and params[:1] == b"<" and final in (ord("M"), ord("m")):
+            self._dispatch_mouse(params[1:], final == ord("M"), out)
+            return
+
         # Parse parameters as integers separated by ';'
         nums: list[int] = []
         if params:
@@ -542,6 +592,79 @@ class KeyDecoder:
             return
 
         # Unknown CSI — silently ignore.
+
+    def _dispatch_mouse(
+        self,
+        params: bytes,
+        pressed: bool,
+        out: list[InputEvent],
+    ) -> None:
+        """Decode an SGR mouse sequence into a MouseEvent.
+
+        params is the parameter bytes AFTER the leading '<'. Format is
+        `<b>;<col>;<row>` where b is the button-encoding byte from the
+        xterm mouse protocol:
+
+          bit 0-1: base button (0=left, 1=middle, 2=right, 3=release-old)
+          bit 2:   shift modifier
+          bit 3:   alt/meta modifier
+          bit 4:   ctrl modifier
+          bit 5:   motion (drag — button held while moving)
+          bit 6:   wheel — when set, base button 0=up, 1=down
+          bit 7:   extended (button 8+)
+
+        col and row are 1-based screen coordinates; we convert to 0-based.
+        """
+        parts = params.split(b";")
+        if len(parts) != 3:
+            return
+        try:
+            b = int(parts[0])
+            col_raw = int(parts[1])
+            row_raw = int(parts[2])
+        except ValueError:
+            return
+
+        is_motion = bool(b & 0x20)
+        is_wheel = bool(b & 0x40)
+        base = b & 0x03
+
+        if is_wheel:
+            if base == 0:
+                button = MouseButton.WHEEL_UP
+            elif base == 1:
+                button = MouseButton.WHEEL_DOWN
+            else:
+                return
+            is_motion = False  # wheel events aren't motion
+        else:
+            if base == 0:
+                button = MouseButton.LEFT
+            elif base == 1:
+                button = MouseButton.MIDDLE
+            elif base == 2:
+                button = MouseButton.RIGHT
+            else:
+                return
+
+        mods = MOD_NONE
+        if b & 0x04:
+            mods |= MOD_SHIFT
+        if b & 0x08:
+            mods |= MOD_ALT
+        if b & 0x10:
+            mods |= MOD_CTRL
+
+        out.append(
+            MouseEvent(
+                button=button,
+                col=max(0, col_raw - 1),
+                row=max(0, row_raw - 1),
+                pressed=pressed,
+                motion=is_motion,
+                mods=mods,
+            )
+        )
 
     # ─── helpers ───
 
