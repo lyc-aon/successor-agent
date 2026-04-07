@@ -93,6 +93,15 @@ from .render.cells import (
     Grid,
     Style,
 )
+from .agent import (
+    BudgetTracker,
+    CompactionError,
+    ContextBudget,
+    LogMessage,
+    MessageLog,
+    TokenCounter,
+    compact as agent_compact,
+)
 from .bash import (
     DangerousCommandRefused,
     ToolCard,
@@ -414,6 +423,19 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
         name="bash",
         description="run a bash command and render it as a structured tool card",
         args_hint="<command>",
+    ),
+    SlashCommand(
+        name="budget",
+        description="show current context fill % + token usage stats",
+    ),
+    SlashCommand(
+        name="burn",
+        description="inject N synthetic tokens to stress-test compaction",
+        args_hint="<N|loop N>",
+    ),
+    SlashCommand(
+        name="compact",
+        description="manually trigger compaction of the current chat history",
     ),
     SlashCommand(
         name="config",
@@ -1713,6 +1735,42 @@ class SuccessorChat(App):
             self._scroll_to_bottom()
             return
 
+        # /budget — show context fill % + token usage stats
+        if text == "/budget":
+            self._handle_budget_cmd()
+            return
+
+        # /burn N — inject synthetic context to stress-test compaction
+        if text.startswith("/burn"):
+            parts = text.split()
+            if len(parts) < 2:
+                self.messages.append(_Message(
+                    "successor",
+                    "usage: /burn <N>  → inject N synthetic tokens of "
+                    "varied content into the chat history. Use this to "
+                    "stress-test compaction without burning real model "
+                    "calls. Pair with /budget to watch the fill % climb "
+                    "and /compact to fire the summarizer.",
+                    synthetic=True,
+                ))
+                return
+            try:
+                n_tokens = int(parts[1])
+            except ValueError:
+                self.messages.append(_Message(
+                    "successor",
+                    f"unknown /burn argument '{parts[1]}'. Expected an integer token count.",
+                    synthetic=True,
+                ))
+                return
+            self._handle_burn_cmd(n_tokens)
+            return
+
+        # /compact — manually fire compaction against the live client
+        if text == "/compact":
+            self._handle_compact_cmd()
+            return
+
         # /profile         — show current profile and available options
         # /profile <name>  — switch to a registered profile by name
         # /profile cycle   — cycle to the next profile in registry order
@@ -1913,6 +1971,251 @@ class SuccessorChat(App):
         self._stream = self.client.stream_chat(messages=api_messages)
         self._stream_content = []
         self._stream_reasoning_chars = 0
+
+    # ─── Agent loop adapter (for /budget /burn /compact) ───
+    #
+    # The chat's existing _Message list is what the streaming path
+    # uses. The agent module's MessageLog is what compaction operates
+    # on. These two helpers convert in both directions so we can
+    # exercise the agent code against the chat's live history without
+    # rewriting the chat to use MessageLog directly.
+
+    def _to_agent_log(self) -> MessageLog:
+        """Snapshot self.messages as an agent.MessageLog."""
+        log = MessageLog(system_prompt=self.system_prompt)
+        for msg in self.messages:
+            if msg.synthetic and msg.tool_card is None:
+                # Skip synthetic non-tool messages (greetings, error
+                # notes) — they were never the model's voice
+                continue
+            # Each non-tool user message starts a new round
+            if msg.role == "user" and not msg.tool_card:
+                log.begin_round(started_at=msg.created_at)
+            elif not log.rounds:
+                log.begin_round(started_at=msg.created_at)
+            agent_role = (
+                "assistant" if msg.role == "successor"
+                else "tool" if msg.role == "tool"
+                else msg.role
+            )
+            log.append_to_current_round(LogMessage(
+                role=agent_role,
+                content=msg.raw_text or "",
+                tool_card=msg.tool_card,
+                created_at=msg.created_at,
+            ))
+        return log
+
+    def _from_agent_log(self, log: MessageLog) -> None:
+        """Replace self.messages from an agent.MessageLog (after compact)."""
+        new_messages: list[_Message] = []
+        for m in log.iter_messages():
+            if m.is_boundary:
+                # Boundary marker → synthetic system-style message
+                # marked with the role "successor" so the existing
+                # painter renders it; carry the raw text intact.
+                new_messages.append(_Message(
+                    "successor",
+                    f"━━━ {m.content[1:-1]} ━━━",  # strip surrounding [ ]
+                    synthetic=True,
+                ))
+                continue
+            if m.is_summary:
+                new_messages.append(_Message(
+                    "successor",
+                    m.content,
+                    synthetic=True,
+                ))
+                continue
+            if m.tool_card is not None:
+                new_messages.append(_Message(
+                    "tool", "", tool_card=m.tool_card,
+                ))
+                continue
+            chat_role = "successor" if m.role == "assistant" else m.role
+            new_messages.append(_Message(chat_role, m.content))
+        self.messages = new_messages
+
+    def _agent_token_counter(self) -> TokenCounter:
+        """Lazy: build a TokenCounter pointed at the chat's client.
+        Cached so subsequent /budget calls reuse the same per-string LRU."""
+        if not hasattr(self, "_cached_token_counter") or self._cached_token_counter is None:
+            self._cached_token_counter = TokenCounter(endpoint=self.client)
+        return self._cached_token_counter
+
+    def _agent_budget(self) -> ContextBudget:
+        """Build a ContextBudget from the profile's window setting.
+
+        Default: window=262_144 (qwopus). Profiles can override via
+        provider.context_window. Headroom buffers are static defaults
+        for now — they could move into the profile later.
+        """
+        provider_cfg = self.profile.provider or {}
+        window = int(provider_cfg.get("context_window", 262_144))
+        return ContextBudget(
+            window=window,
+            warning_buffer=max(8_000, window // 16),
+            autocompact_buffer=max(4_000, window // 32),
+            blocking_buffer=max(1_000, window // 128),
+        )
+
+    # ─── /budget ───
+
+    def _handle_budget_cmd(self) -> None:
+        log = self._to_agent_log()
+        counter = self._agent_token_counter()
+        budget = self._agent_budget()
+        used = counter.count_log(log)
+        state = budget.state(used)
+        fill = budget.fill_pct(used) * 100
+        headroom = budget.headroom(used)
+        msg = (
+            f"context: {used:,} / {budget.window:,} tokens · "
+            f"{fill:.1f}% full · {headroom:,} headroom · state: {state}\n"
+            f"thresholds: warn @ {budget.warning_at:,} · "
+            f"autocompact @ {budget.autocompact_at:,} · "
+            f"blocking @ {budget.blocking_at:,}\n"
+            f"rounds: {log.round_count} · "
+            f"messages (excl synthetic): {log.total_messages()}"
+        )
+        self.messages.append(_Message("successor", msg, synthetic=True))
+
+    # ─── /burn ───
+
+    def _handle_burn_cmd(self, target_tokens: int) -> None:
+        """Inject synthetic chat history until total token count reaches
+        the target. Each synthetic round is a (user question + assistant
+        answer) pair with varied content (lorem-ipsum-style filler with
+        occasional code blocks and fake file paths) so it tokenizes
+        realistically.
+
+        Marks every injected message as NON-synthetic so /budget and
+        /compact see it as real history. Uses fake created_at timestamps
+        spaced 1s apart so microcompact's idle logic doesn't fire.
+        """
+        counter = self._agent_token_counter()
+        # Build the burn rounds
+        added_rounds = 0
+        added_tokens = 0
+        base_t = time.monotonic() - 100.0  # synthetic recent timestamps
+        while added_tokens < target_tokens:
+            payload = self._make_burn_payload(added_rounds)
+            user_text = payload["user"]
+            asst_text = payload["assistant"]
+            t = base_t + added_rounds * 0.5
+            self.messages.append(_Message("user", user_text))
+            self.messages[-1].created_at = t
+            self.messages.append(_Message("successor", asst_text))
+            self.messages[-1].created_at = t + 0.1
+            added_rounds += 1
+            added_tokens += counter.count(user_text) + counter.count(asst_text) + 8
+            if added_rounds > 10000:
+                break  # safety bail
+
+        # Report what we added
+        log = self._to_agent_log()
+        new_total = counter.count_log(log)
+        budget = self._agent_budget()
+        fill = budget.fill_pct(new_total) * 100
+        self.messages.append(_Message(
+            "successor",
+            f"injected {added_rounds} synthetic rounds · "
+            f"≈{added_tokens:,} tokens · "
+            f"context now {new_total:,} / {budget.window:,} ({fill:.1f}%)",
+            synthetic=True,
+        ))
+        self._scroll_to_bottom()
+
+    @staticmethod
+    def _make_burn_payload(idx: int) -> dict:
+        """Generate one synthetic burn round. Varies content to avoid
+        tokenizer-cache cheating."""
+        topics = [
+            ("the rendering layers in successor",
+             "five layers — measure, cells, paint, composite, diff"),
+            ("how the bash subsystem parses commands",
+             "shlex split, registry lookup, fall back to generic card"),
+            ("what compaction does",
+             "summarizes old turns into one block, keeps recent rounds verbatim"),
+            ("the steel theme palette",
+             "cool blue oklch instrument-panel — bg navy, accent steel, warm copper"),
+            ("how the message log handles tool results",
+             "ApiRound holds them; PTL retry drops oldest rounds whole"),
+            ("why we use bash instead of structured tool schemas",
+             "qwen3.5 distill is unreliable at tool schemas, fluent in bash"),
+        ]
+        topic_q, topic_a = topics[idx % len(topics)]
+        # Long-form pad — varies per index so token count grows roughly
+        # linearly without becoming a single cache hit
+        pad_lines = [
+            f"In iteration {idx}, the user paid attention to {topic_q}.",
+            "Here is some longer-form discussion that fills tokens",
+            "without being purely random gibberish, because the burn",
+            f"rig wants the tokenizer to see realistic prose at index {idx}.",
+            f"```\nsample-code-{idx} = {idx * 7 + 13}\nsample-fn({idx})\n```",
+            f"Followed by another paragraph at index {idx} discussing",
+            "the renderer pipeline, the diff layer, and the",
+            "five-layer architecture that successor is built around.",
+        ]
+        pad = "\n".join(pad_lines)
+        return {
+            "user": f"Tell me again about {topic_q}.\n{pad}",
+            "assistant": (
+                f"Sure, on iteration {idx}: {topic_a}. "
+                f"Going into more detail: {pad}"
+            ),
+        }
+
+    # ─── /compact ───
+
+    def _handle_compact_cmd(self) -> None:
+        """Manually fire compaction against the live client.
+
+        Builds an agent.MessageLog from the current chat history,
+        runs compact() against the live client, then writes the
+        result back to self.messages. Reports the boundary stats
+        as a synthetic message.
+        """
+        counter = self._agent_token_counter()
+        log = self._to_agent_log()
+        if log.round_count < 4:
+            self.messages.append(_Message(
+                "successor",
+                f"need at least 4 rounds to compact, have {log.round_count}. "
+                f"Run /burn first to inflate the context.",
+                synthetic=True,
+            ))
+            return
+        pre_tokens = counter.count_log(log)
+        self.messages.append(_Message(
+            "successor",
+            f"compacting {log.round_count} rounds ({pre_tokens:,} tokens)…",
+            synthetic=True,
+        ))
+        try:
+            new_log, boundary = agent_compact(
+                log, self.client,
+                counter=counter,
+                reason="manual",
+            )
+        except (CompactionError, ValueError) as exc:
+            self.messages.append(_Message(
+                "successor",
+                f"compaction failed: {exc}",
+                synthetic=True,
+            ))
+            return
+
+        self._from_agent_log(new_log)
+        self.messages.append(_Message(
+            "successor",
+            f"✓ compacted: {boundary.pre_compact_tokens:,} → "
+            f"{boundary.post_compact_tokens:,} tokens "
+            f"({boundary.reduction_pct:.1f}% reduction · "
+            f"{boundary.rounds_summarized} rounds summarized)",
+            synthetic=True,
+        ))
+        self._scroll_to_bottom()
 
     def _pump_stream(self) -> None:
         """Drain any pending stream events and update accumulators."""

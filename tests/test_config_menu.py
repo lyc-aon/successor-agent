@@ -494,11 +494,16 @@ def test_snapshot_dirty_marker_on_profile_row(temp_config_dir: Path) -> None:
         dirty=(("default", "theme"),),
     )
     plain = render_grid_to_plain(g)
-    # Find the line with the default profile and check for the * marker
-    default_line = next(
-        line for line in plain.split("\n") if " default" in line
-    )
-    assert "*" in default_line
+    # Find the profile row that has "default" as the FULL profile name.
+    # The profiles pane shows a swatch glyph (●) followed by the name.
+    # We look for the swatch + the trailing ' *' marker on the same row.
+    default_lines = [
+        line for line in plain.split("\n")
+        if "● default" in line or "▸ ● default" in line
+    ]
+    assert default_lines, "no default profile row found in snapshot"
+    # The dirty marker `*` should appear on at least one of those rows
+    assert any("*" in line for line in default_lines)
 
 
 def test_snapshot_too_small_terminal(temp_config_dir: Path) -> None:

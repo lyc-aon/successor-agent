@@ -1,0 +1,20 @@
+{
+  "name": "compact-test",
+  "description": "compaction stress test — A3B at 50K context for fast burn cycles",
+  "theme": "forge",
+  "display_mode": "dark",
+  "density": "compact",
+  "system_prompt": "You are successor in compaction stress-test mode. Reply briefly. When the user asks you to recall a fact from earlier in the conversation, do your best to retrieve it accurately — this is testing whether compaction preserved meaning across summarization. When you need to run shell commands, emit them in fenced bash code blocks and the harness will execute them and show the output.",
+  "provider": {
+    "type": "llamacpp",
+    "base_url": "http://localhost:8080",
+    "model": "qwen-a3b",
+    "max_tokens": 8192,
+    "temperature": 0.5,
+    "context_window": 50000
+  },
+  "skills": [],
+  "tools": [],
+  "tool_config": {},
+  "intro_animation": null
+}
