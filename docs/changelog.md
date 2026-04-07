@@ -779,6 +779,124 @@ newline insertion (line shift)
 
 ---
 
+## Phase 4.8 — successor emergence intro + demo system removed (2026-04-06)
+
+The samurai-themed nusamurai braille animation is gone, the entire
+`demo`/`show`/`frames` subcommand surface is deleted, and a new
+bundled `successor` intro animation plays before the chat opens — an
+11-frame braille emergence sequence ending on the title portrait,
+held for ~2 seconds. Theme-aware, any keypress skips ahead.
+
+This phase also collapsed `src/successor/demos/` — `chat.py` moved
+up to `src/successor/chat.py` since it was the only file left.
+
+### What landed
+
+- **`src/successor/intros/successor.py`** — `SuccessorIntro` App.
+  Loads 11 braille frames as `BrailleArt` instances at construction
+  time (Pretext-shaped layout cache). Plays them sequentially with
+  Bayer-dot interpolation between adjacent frames over
+  `EMERGE_PER_FRAME_S = 0.32s` per transition (10 transitions =
+  3.2s emerge). Holds the final frame for `HOLD_FINAL_S = 2.4s`.
+  Auto-exits. Any keypress skips.
+  - Theme-aware: resolves the active profile and uses its accent
+    color for the braille ink, bg for the background.
+  - First `FADE_IN_S = 0.4s` lerps from bg → accent so the first
+    frame doesn't pop in hard.
+  - "press any key to skip" hint at the bottom during emerge,
+    hidden during the final hold.
+- **`src/successor/intros/__init__.py`** — re-exports
+  `SuccessorIntro` and `run_successor_intro()` entry point.
+- **`src/successor/builtin/intros/successor/`** — 11 braille frame
+  text files (`00-emerge.txt` through `10-title.txt`), extracted
+  from the lycaonwtf gallery's TypeScript frames file via a
+  one-shot regex parsing script. `pyproject.toml` package data
+  config updated to ship `intros/*/*.txt`.
+
+### What got deleted
+
+- **`src/successor/demos/braille.py`** — `SuccessorDemo` and
+  `SuccessorShow` App classes that played the nusamurai keyframes.
+  Both gone. The `BrailleArt` / `interpolate_frame` / `load_frame`
+  primitives in `render/braille.py` stay — they're still used by
+  the new intro and the wizard's welcome frame.
+- **`src/successor/demos/__init__.py` + the demos/ directory** —
+  empty after deletions, removed entirely.
+- **`successor demo`, `successor show`, `successor frames`** —
+  three CLI subcommands deleted from `cli.py` along with their
+  argparse subparser entries.
+- **`assets/nusamurai/`** — the entire samurai braille keyframe
+  directory deleted. The `assets/` parent directory was empty
+  afterward and also removed. The repo no longer ships any
+  samurai-themed assets.
+- **`_assets_root()`, `_nusamurai_dir()`, `_list_frames()`** in
+  `cli.py` — dead code, all gone.
+
+### What got refactored
+
+- **`src/successor/demos/chat.py` → `src/successor/chat.py`** —
+  moved up since the demos/ directory is gone. All `from ..xxx`
+  imports inside chat.py changed to `from .xxx`. All consumers
+  updated:
+  - `src/successor/cli.py`
+  - `src/successor/snapshot.py`
+  - `src/successor/wizard/setup.py`
+  - `src/successor/wizard/config.py`
+  - `tests/test_chat_profiles.py`
+- **`successor-dev` profile** — `intro_animation` field changed
+  from `"nusamurai"` to `"successor"`. Description updated.
+- **`_play_intro_animation()` in cli.py** — calls
+  `run_successor_intro()` instead of constructing the old
+  `SuccessorDemo`. Only "successor" is recognized as a valid
+  intro name; future user intros will live in
+  `~/.config/successor/intros/<name>/`.
+- **`_try_load_welcome_frame()` in `wizard/setup.py`** — used to
+  load `assets/nusamurai/pos-th30/Meditating-ascii-art.txt`. Now
+  loads `src/successor/builtin/intros/successor/10-title.txt` (the
+  same final-portrait frame the intro animation holds at the end).
+  The wizard welcome screen now shows the successor portrait, not
+  the meditating samurai.
+- **`cmd_doctor`** — reports the successor intro frame count
+  instead of nusamurai frame count.
+- **`cmd_bench`** — uses the first and last successor intro
+  frames for the morph perf test.
+- **Wizard intro-step UI** — `_INTRO_OPTIONS` updated, footer
+  helper text updated. The wizard's intro toggle now offers
+  "(none)" or "successor emergence — braille portrait (~5s)".
+
+### Tests (339 — unchanged count, all passing)
+
+No new tests added since this phase is mostly file moves and
+deletions. Existing test fixtures that referenced `"nusamurai"` as
+the `intro_animation` value were updated to `"successor"` in
+`test_profiles.py`, `test_config_menu.py`, `test_wizard.py`. The
+chat.py relocation was caught by import tests automatically once
+the package was reinstalled.
+
+### Renderer features the new intro exercises
+
+| concepts.md cat | feature | where |
+|---|---|---|
+| Cat 1 (mutable cells) | per-frame Bayer-dot interpolation between adjacent braille frames | `interpolate_frame()` in `_resolve_frame_lines` |
+| Cat 2 (smooth animation) | ease-in-out cubic on the per-transition `t`, fade-in lerp on the first 0.4s | `ease_in_out_cubic`, `lerp_rgb` |
+| Cat 5 (deterministic) | every frame is a function of `(elapsed, viewport_size)` | `_resolve_frame_lines` |
+| Cat 6 (inline media) | braille art at viewport-fitted size with cached layout | `BrailleArt.layout()` |
+| Cat 7 (programmatic UI) | the chat opens with a pre-configured intro driven by the profile | `cli.cmd_chat` → `_play_intro_animation()` |
+
+### Notes
+
+- Total intro duration: 5.61s measured end-to-end (3.2s emerge +
+  2.4s hold + 0.01s startup). Matches the design target.
+- The user originally thought the title frame (frame 10) had "slop
+  letters" above the portrait when viewing the plaintext output —
+  the braille block letters at the top look noisy when stripped of
+  their colors and rendered through `render_grid_to_plain`. After
+  diffing frames 9 and 10, they confirmed frame 10 is solid in
+  actual terminal output. Frame 10 IS the integrated portrait;
+  the plaintext rendering just couldn't show the letters cleanly.
+
+---
+
 ## What's next
 
 - **Skill invocation strategy** — pick always-on vs on-demand after
@@ -789,6 +907,9 @@ newline insertion (line shift)
 - **Find/replace in the prompt editor** — Ctrl+F opens a search bar
   inside the editor overlay, n/N jump matches
 - **Undo/redo in the prompt editor** — operation log + Ctrl+Z/Ctrl+Y
+- **User intros** — `~/.config/successor/intros/<name>/` directory
+  walking, like themes and profiles. Lets the user drop their own
+  intro frame sets.
 - **Editing existing profiles via the wizard** — wizard re-entry mode
   that pre-populates state from a registered profile
 - **Framework docs** — once the surface is stable

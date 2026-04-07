@@ -35,7 +35,7 @@ from successor.snapshot import (
 
 def test_chat_uses_active_profile_when_no_arg(temp_config_dir: Path) -> None:
     """SuccessorChat() with no args reads the active profile from chat.json."""
-    from successor.demos.chat import SuccessorChat
+    from successor.chat import SuccessorChat
 
     (temp_config_dir / "chat.json").write_text(json.dumps({
         "version": 2,
@@ -52,7 +52,7 @@ def test_chat_uses_active_profile_when_no_arg(temp_config_dir: Path) -> None:
 
 def test_chat_uses_explicit_profile_arg(temp_config_dir: Path) -> None:
     """SuccessorChat(profile=...) overrides the config-resolved profile."""
-    from successor.demos.chat import SuccessorChat
+    from successor.chat import SuccessorChat
 
     PROFILE_REGISTRY.reload()
     THEME_REGISTRY.reload()
@@ -80,7 +80,7 @@ def test_saved_config_overrides_profile_defaults(temp_config_dir: Path) -> None:
     On restart, the saved values win — the user's last choice is what
     they expect to see.
     """
-    from successor.demos.chat import SuccessorChat
+    from successor.chat import SuccessorChat
 
     # Drop a forge theme into the user dir so it's available
     user_themes = temp_config_dir / "themes"
@@ -122,7 +122,7 @@ def test_saved_config_overrides_profile_defaults(temp_config_dir: Path) -> None:
 
 def test_profile_field_used_when_no_saved_value(temp_config_dir: Path) -> None:
     """When chat.json has no theme/mode/density, the profile's defaults apply."""
-    from successor.demos.chat import SuccessorChat
+    from successor.chat import SuccessorChat
 
     PROFILE_REGISTRY.reload()
     THEME_REGISTRY.reload()
@@ -145,7 +145,7 @@ def test_profile_field_used_when_no_saved_value(temp_config_dir: Path) -> None:
 
 def test_set_profile_swaps_everything(temp_config_dir: Path) -> None:
     """Switching profile updates theme, mode, density, system_prompt."""
-    from successor.demos.chat import SuccessorChat
+    from successor.chat import SuccessorChat
 
     PROFILE_REGISTRY.reload()
     THEME_REGISTRY.reload()
@@ -171,7 +171,7 @@ def test_set_profile_swaps_everything(temp_config_dir: Path) -> None:
 def test_set_profile_persists_active(temp_config_dir: Path) -> None:
     """_set_profile writes the new active_profile to chat.json."""
     from successor.config import load_chat_config
-    from successor.demos.chat import SuccessorChat
+    from successor.chat import SuccessorChat
 
     PROFILE_REGISTRY.reload()
     THEME_REGISTRY.reload()
@@ -187,7 +187,7 @@ def test_set_profile_persists_active(temp_config_dir: Path) -> None:
 
 def test_set_profile_noop_on_same_name(temp_config_dir: Path) -> None:
     """Switching to the currently-active profile is a no-op."""
-    from successor.demos.chat import SuccessorChat
+    from successor.chat import SuccessorChat
 
     PROFILE_REGISTRY.reload()
     THEME_REGISTRY.reload()
@@ -201,7 +201,7 @@ def test_set_profile_noop_on_same_name(temp_config_dir: Path) -> None:
 
 def test_set_profile_appends_synthetic_message(temp_config_dir: Path) -> None:
     """Switching profile drops a breadcrumb message into the chat."""
-    from successor.demos.chat import SuccessorChat
+    from successor.chat import SuccessorChat
 
     PROFILE_REGISTRY.reload()
     THEME_REGISTRY.reload()
@@ -222,7 +222,7 @@ def test_set_profile_appends_synthetic_message(temp_config_dir: Path) -> None:
 
 def test_cycle_profile_walks_registry(temp_config_dir: Path) -> None:
     """_cycle_profile advances to the next profile in registry order."""
-    from successor.demos.chat import SuccessorChat
+    from successor.chat import SuccessorChat
 
     PROFILE_REGISTRY.reload()
     THEME_REGISTRY.reload()

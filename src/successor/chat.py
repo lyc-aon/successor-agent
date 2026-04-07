@@ -50,8 +50,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from ..config import load_chat_config, save_chat_config
-from ..input.keys import (
+from .config import load_chat_config, save_chat_config
+from .input.keys import (
     InputEvent,
     Key,
     KeyDecoder,
@@ -62,7 +62,7 @@ from ..input.keys import (
     MouseButton,
     MouseEvent,
 )
-from ..profiles import (
+from .profiles import (
     PROFILE_REGISTRY,
     Profile,
     all_profiles,
@@ -71,8 +71,8 @@ from ..profiles import (
     next_profile,
     set_active_profile,
 )
-from ..providers import make_provider
-from ..providers.llama import (
+from .providers import make_provider
+from .providers.llama import (
     ChatStream,
     ContentChunk,
     LlamaCppClient,
@@ -81,8 +81,8 @@ from ..providers.llama import (
     StreamError,
     StreamStarted,
 )
-from ..render.app import App
-from ..render.cells import (
+from .render.app import App
+from .render.cells import (
     ATTR_BOLD,
     ATTR_DIM,
     ATTR_ITALIC,
@@ -93,15 +93,15 @@ from ..render.cells import (
     Grid,
     Style,
 )
-from ..render.markdown import (
+from .render.markdown import (
     LaidOutLine,
     LaidOutSpan,
     PreparedMarkdown,
 )
-from ..render.paint import fill_region, paint_box, paint_text
-from ..render.terminal import Terminal
-from ..render.text import PreparedText, ease_out_cubic, hard_wrap, lerp_rgb
-from ..render.theme import (
+from .render.paint import fill_region, paint_box, paint_text
+from .render.terminal import Terminal
+from .render.text import PreparedText, ease_out_cubic, hard_wrap, lerp_rgb
+from .render.theme import (
     THEME_REGISTRY,
     Theme,
     ThemeVariant,

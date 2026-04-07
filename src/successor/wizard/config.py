@@ -408,7 +408,7 @@ class SuccessorConfig(App):
 
     def _build_preview_chat(self):
         """Construct the live preview chat — same pattern as the wizard."""
-        from ..demos.chat import SuccessorChat, _Message
+        from ..chat import SuccessorChat, _Message
 
         chat = SuccessorChat()
         chat.messages = []
@@ -450,7 +450,7 @@ class SuccessorConfig(App):
         if target_mode != self._preview_chat.display_mode:
             self._preview_chat._set_display_mode(target_mode)
 
-        from ..demos.chat import find_density, NORMAL
+        from ..chat import find_density, NORMAL
         target_density = find_density(profile.density) or NORMAL
         if target_density.name != self._preview_chat.density.name:
             self._preview_chat._set_density(target_density)

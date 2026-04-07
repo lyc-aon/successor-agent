@@ -1,14 +1,17 @@
 """Successor command-line interface.
 
-The project is "Successor" but the installed binary is `successor` (the `successor`
-binary name is heavily contested in the open-source ecosystem).
+Subcommands:
 
     successor                — show help
-    successor chat           — chat interface (v0, scripted successor responses)
-    successor demo           — braille animation
-    successor show <name>    — render a single static braille frame
-    successor frames         — list available braille frames
-    successor doctor         — terminal capabilities and renderer info
+    successor chat           — chat interface (real llama.cpp streaming)
+    successor setup          — profile creation wizard with live preview
+    successor config         — three-pane profile config menu
+    successor doctor         — terminal capability check
+    successor skills         — list loaded skills
+    successor tools          — list registered tools
+    successor record         — record an input session
+    successor replay         — replay a recorded session
+    successor snapshot       — headless render of a chat scenario
     successor bench          — renderer benchmark
 """
 
@@ -23,32 +26,6 @@ from pathlib import Path
 from . import __version__
 
 
-def _assets_root() -> Path:
-    """Locate assets/ relative to the source tree.
-
-    Phase 0 expects a development install (pip install -e . or running
-    directly from a checkout). The path walks from src/successor/cli.py up to
-    the repo root.
-    """
-    here = Path(__file__).resolve()
-    return here.parent.parent.parent / "assets"
-
-
-def _nusamurai_dir() -> Path:
-    return _assets_root() / "nusamurai" / "pos-th30"
-
-
-def _list_frames() -> list[tuple[str, Path]]:
-    """Return sorted [(name, path)] of available braille frames."""
-    d = _nusamurai_dir()
-    if not d.exists():
-        return []
-    out: list[tuple[str, Path]] = []
-    for p in sorted(d.glob("*-ascii-art.txt")):
-        out.append((p.name.replace("-ascii-art.txt", ""), p))
-    return out
-
-
 # ─── subcommands ───
 
 
@@ -61,7 +38,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
     is checked after each chat.run() to decide whether to open the
     config menu and then resume the chat.
     """
-    from .demos.chat import SuccessorChat
+    from .chat import SuccessorChat
     from .profiles import get_active_profile
     from .wizard import run_config_menu
 
@@ -108,7 +85,7 @@ def cmd_config(args: argparse.Namespace) -> int:
     profile. If they cancel, drops into the chat with the previously-
     active profile.
     """
-    from .demos.chat import SuccessorChat
+    from .chat import SuccessorChat
     from .profiles import get_active_profile, get_profile
     from .wizard import run_config_menu
 
@@ -130,7 +107,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
     On save, transitions directly into the chat with the new profile
     active.
     """
-    from .demos.chat import SuccessorChat
+    from .chat import SuccessorChat
     from .wizard import run_setup_wizard
 
     saved_profile = run_setup_wizard()
@@ -149,68 +126,22 @@ def cmd_setup(args: argparse.Namespace) -> int:
 def _play_intro_animation(name: str) -> None:
     """Play a registered intro animation, blocking until it finishes.
 
-    For v0, only "nusamurai" is supported — it plays the bundled
-    9-frame braille demo for ~4 seconds in one-shot mode (any keypress
-    skips ahead). Unknown intro names are silently ignored so a profile
-    that references a future intro doesn't break the chat.
+    For v0, only "successor" is supported — it plays the bundled
+    11-frame braille emergence sequence ending on the title portrait
+    held for a couple of seconds. Any keypress skips ahead. Unknown
+    intro names are silently ignored so a profile that references a
+    future intro doesn't break the chat.
     """
-    if name != "nusamurai":
+    if name != "successor":
         # Future: walk ~/.config/successor/intros/<name>/ for user intros.
         return
-    from .demos.braille import SuccessorDemo
+    from .intros import run_successor_intro
 
     try:
-        intro = SuccessorDemo(
-            target_fps=30.0,
-            assets_dir=_nusamurai_dir(),
-            max_duration_s=4.0,
-            intro_mode=True,
-        )
+        run_successor_intro()
     except RuntimeError:
-        # Asset dir missing on this install — skip the intro silently.
+        # Frames dir missing on this install — skip silently.
         return
-    intro.run()
-
-
-def cmd_demo(args: argparse.Namespace) -> int:
-    from .demos.braille import SuccessorDemo
-
-    demo = SuccessorDemo(target_fps=args.fps, assets_dir=_nusamurai_dir())
-    demo.run()
-    return 0
-
-
-def cmd_show(args: argparse.Namespace) -> int:
-    from .demos.braille import SuccessorShow
-
-    frames = dict(_list_frames())
-    if not frames:
-        print(f"successor: no frames in {_nusamurai_dir()}", file=sys.stderr)
-        return 1
-    name = args.name
-    if name not in frames:
-        print(f"successor: no frame named '{name}'", file=sys.stderr)
-        print(f"  available: {', '.join(sorted(frames))}", file=sys.stderr)
-        return 1
-    SuccessorShow(name=name, path=frames[name]).run()
-    return 0
-
-
-def cmd_frames(args: argparse.Namespace) -> int:
-    from .render.braille import load_frame
-
-    frames = _list_frames()
-    if not frames:
-        print(f"successor: no frames in {_nusamurai_dir()}", file=sys.stderr)
-        return 1
-    print(f"{len(frames)} braille frames in assets/nusamurai/pos-th30:")
-    print()
-    for name, path in frames:
-        f = load_frame(path)
-        h = len(f)
-        w = max((len(line) for line in f), default=0)
-        print(f"  {name:30s}  {w:>3} × {h:<3}")
-    return 0
 
 
 def cmd_skills(args: argparse.Namespace) -> int:
@@ -335,9 +266,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"    {label:12s}  char_width={char_width(ch[0])}  text_width={text_width(ch)}")
     print()
 
-    frames = _list_frames()
-    print(f"  assets      {len(frames)} braille frames in nusamurai/pos-th30")
-    print(f"  assets_dir  {_nusamurai_dir()}")
+    from .loader import builtin_root
+    intro_dir = builtin_root() / "intros" / "successor"
+    if intro_dir.exists():
+        intro_frames = list(intro_dir.glob("*.txt"))
+        print(f"  intro       {len(intro_frames)} successor emergence frames")
+        print(f"  intro_dir   {intro_dir}")
     return 0
 
 
@@ -348,7 +282,7 @@ def cmd_record(args: argparse.Namespace) -> int:
     file is JSONL — one event per line — and can be inspected or
     hand-edited.
     """
-    from .demos.chat import SuccessorChat
+    from .chat import SuccessorChat
     from .recorder import Recorder
 
     path = Path(args.output)
@@ -373,7 +307,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
     consumer would need to also record the model output, which is
     deferred to a future commit.
     """
-    from .demos.chat import SuccessorChat
+    from .chat import SuccessorChat
     from .recorder import Player
 
     path = Path(args.input)
@@ -446,6 +380,7 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
 
 
 def cmd_bench(args: argparse.Namespace) -> int:
+    from .loader import builtin_root
     from .render.braille import interpolate_frame, load_frame
     from .render.cells import Grid, Style
     from .render.diff import diff_frames
@@ -457,12 +392,13 @@ def cmd_bench(args: argparse.Namespace) -> int:
 
     print(f"successor bench: {n} frames at {cols}×{rows}")
 
-    fr = _list_frames()
+    intro_dir = builtin_root() / "intros" / "successor"
+    fr = sorted(intro_dir.glob("*.txt")) if intro_dir.exists() else []
     if len(fr) < 2:
-        print("successor: need at least 2 frames to bench", file=sys.stderr)
+        print("successor: need at least 2 intro frames to bench", file=sys.stderr)
         return 1
-    fa = load_frame(fr[0][1])
-    fb = load_frame(fr[1][1])
+    fa = load_frame(fr[0])
+    fb = load_frame(fr[-1])
 
     front = Grid(rows, cols)
     back = Grid(rows, cols)
@@ -526,17 +462,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="three-pane profile config menu (browse + edit + live preview)",
     )
     p_config.set_defaults(func=cmd_config)
-
-    p_demo = sub.add_parser("demo", help="braille animation demo")
-    p_demo.add_argument("--fps", type=float, default=30.0, help="target FPS (default 30)")
-    p_demo.set_defaults(func=cmd_demo)
-
-    p_show = sub.add_parser("show", help="render a single static braille frame")
-    p_show.add_argument("name", help="frame name (see `successor frames`)")
-    p_show.set_defaults(func=cmd_show)
-
-    p_frames = sub.add_parser("frames", help="list available braille frames")
-    p_frames.set_defaults(func=cmd_frames)
 
     p_doctor = sub.add_parser("doctor", help="terminal capability check")
     p_doctor.set_defaults(func=cmd_doctor)

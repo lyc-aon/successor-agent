@@ -60,25 +60,24 @@ src/successor/tools/         @tool decorator + ToolRegistry (Python imports, gat
 src/successor/wizard/        successor setup wizard with live preview pane (the showcase)
 
 src/successor/builtin/       package-shipped data files loaded by the registries
-  themes/steel.json      the default theme — instrument-panel oklch
-  profiles/default.json  general-purpose profile
-  profiles/successor-dev.json  harness-development profile (uses nusamurai intro)
+  themes/steel.json                       the default theme — instrument-panel oklch
+  profiles/default.json                   general-purpose profile
+  profiles/successor-dev.json             harness-development profile (uses successor intro)
   skills/successor-rendering-pattern.md   the One Rule + five-layer architecture
-  tools/read_file.py     example built-in tool
+  tools/read_file.py                      example built-in tool
+  intros/successor/00..10-*.txt           11 braille frames for the bundled emergence intro
 
-src/successor/demos/         runnable scenes
-  braille.py             SuccessorDemo (animation, supports intro_mode + max_duration_s)
-  chat.py                SuccessorChat — v0 chat interface (now profile-aware)
+src/successor/chat.py        SuccessorChat — chat interface (profile-aware, real llama.cpp streaming)
+src/successor/intros/        intro animations played before the chat opens
+  successor.py           SuccessorIntro App — emerge then hold the title portrait
 
-src/successor/snapshot.py    headless render via chat_demo_snapshot()
+src/successor/snapshot.py    headless render via chat_demo_snapshot() / wizard_demo_snapshot() / config_demo_snapshot()
 src/successor/recorder.py    record/replay session traces
 src/successor/cli.py         argparse subcommand dispatch (`successor` binary)
 src/successor/__main__.py    `python -m successor` entry point
 
 docs/example-themes/     copy these into ~/.config/successor/themes/ to install
   forge.json             warm red, hand-tuned hex palette
-
-assets/nusamurai/pos-th30/   9 braille keyframes (the intro animation source)
 
 tests/                   pytest suite — 187 tests, hermetic via SUCCESSOR_CONFIG_DIR
   conftest.py            temp_config_dir fixture
@@ -118,19 +117,16 @@ Available subcommands (use either `successor` or `sx`):
 ```
 successor              help
 successor -V           version
-successor chat         v0 chat
-successor setup        profile creation wizard
-successor config       three-pane profile config menu
-successor demo         braille animation cycle
-successor show <name>  single static braille frame
-successor frames       list 9 bundled braille keyframes
+successor chat         chat interface (real llama.cpp streaming, intro plays first)
+successor setup        profile creation wizard with live preview
+successor config       three-pane profile config menu (browse + edit + live preview)
 successor doctor       terminal capabilities + measure samples
-successor bench        renderer benchmark (no TTY needed)
 successor skills       list loaded skills
 successor tools        list registered tools
 successor snapshot     headless render of a chat scenario
 successor record       record an input session to JSONL
 successor replay       replay a recorded session
+successor bench        renderer benchmark (no TTY needed)
 ```
 
 ## The five layers
@@ -213,8 +209,9 @@ The harness now has the loader pattern + four customizable axes:
   refs + tool refs + intro_animation. Switching a profile is one
   user-facing action that swaps everything coherently. Built-in
   profiles: `default` (general purpose) and `successor-dev` (harness work,
-  uses the nusamurai braille intro). Slash command: `/profile <name>`.
-  Keybind: Ctrl+P cycles. Title bar shows the active profile name.
+  uses the bundled successor emergence intro). Slash command:
+  `/profile <name>`. Keybind: Ctrl+P cycles. Title bar shows the
+  active profile name.
 
 - **Providers** (`src/successor/providers/`): `ChatProvider` Protocol +
   `LlamaCppClient` + `OpenAICompatClient` + `make_provider(config)`
@@ -245,10 +242,14 @@ The harness now has the loader pattern + four customizable axes:
   `active_profile`, `allow_user_tools` slots. v1 configs are migrated
   transparently on load. Migration is idempotent and tested.
 
-The intro animation feature uses the existing `SuccessorDemo` with two new
-parameters (`max_duration_s`, `intro_mode`) so a profile's
-`intro_animation: "nusamurai"` plays the bundled braille keyframes for
-4 seconds before the chat opens. Any keypress skips ahead.
+- **Intros** (`src/successor/intros/`): standalone intro animations
+  played before the chat opens. Currently bundles one: `successor` —
+  an 11-frame braille emergence sequence (Bayer-dot interpolation
+  between adjacent frames) that morphs through the emerge stages and
+  holds the final title portrait for ~2 seconds. Total ~5 seconds,
+  any keypress skips. Profiles reference it via
+  `intro_animation: "successor"`. Theme-aware — paints in the active
+  profile's accent color.
 
 **`successor setup` wizard** (`src/successor/wizard/setup.py`): multi-region App
 with a LIVE preview pane that's a real SuccessorChat instance the wizard

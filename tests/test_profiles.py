@@ -73,7 +73,7 @@ def test_parse_full_profile(tmp_path: Path) -> None:
         "skills": ["skill-a", "skill-b"],
         "tools": ["read_file", "bash"],
         "tool_config": {"bash": {"allowed_dirs": ["/tmp"]}},
-        "intro_animation": "nusamurai",
+        "intro_animation": "successor",
     }
     p = tmp_path / "full.json"
     p.write_text(json.dumps(data))
@@ -90,7 +90,7 @@ def test_parse_full_profile(tmp_path: Path) -> None:
     assert profile.skills == ("skill-a", "skill-b")
     assert profile.tools == ("read_file", "bash")
     assert profile.tool_config == {"bash": {"allowed_dirs": ["/tmp"]}}
-    assert profile.intro_animation == "nusamurai"
+    assert profile.intro_animation == "successor"
 
 
 def test_parse_lowercases_name(tmp_path: Path) -> None:
@@ -161,12 +161,12 @@ def test_default_profile_is_builtin(temp_config_dir: Path) -> None:
 
 
 def test_successor_dev_profile_is_builtin_with_intro(temp_config_dir: Path) -> None:
-    """The bundled successor-dev profile uses the nusamurai intro animation."""
+    """The bundled successor-dev profile uses the successor intro animation."""
     PROFILE_REGISTRY.reload()
     rd = get_profile("successor-dev")
     assert rd is not None
     assert rd.name == "successor-dev"
-    assert rd.intro_animation == "nusamurai"
+    assert rd.intro_animation == "successor"
 
 
 def test_user_profile_overrides_builtin(temp_config_dir: Path) -> None:

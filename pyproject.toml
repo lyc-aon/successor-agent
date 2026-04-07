@@ -25,4 +25,9 @@ sx = "successor.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"successor.builtin" = ["themes/*.json", "profiles/*.json", "skills/*.md"]
+"successor.builtin" = [
+  "themes/*.json",
+  "profiles/*.json",
+  "skills/*.md",
+  "intros/*/*.txt",
+]

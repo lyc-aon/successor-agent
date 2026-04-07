@@ -54,8 +54,8 @@ Renderer capabilities exercised (concepts.md categories):
           via wizard_demo_snapshot — every step has a snapshot fixture.
           A Player can replay a recording to verify save flows.
 
-  Cat 6 — Inline media: the welcome screen paints the bundled
-          nusamurai braille frame above the typewriter text.
+  Cat 6 — Inline media: the welcome screen paints a bundled
+          successor intro frame above the typewriter text.
 
   Cat 7 — Programmatic UI: when the user advances steps, the wizard
           drives an automatic spotlight + scroll on the new active
@@ -221,7 +221,7 @@ _MODE_OPTIONS: tuple[str, ...] = ("dark", "light")
 # Intro animation options
 _INTRO_OPTIONS: tuple[tuple[str | None, str], ...] = (
     (None, "(none) — chat opens immediately"),
-    ("nusamurai", "nusamurai braille flourish (~4s)"),
+    ("successor", "successor emergence — braille portrait (~5s)"),
 )
 
 
@@ -294,17 +294,15 @@ class _ValidationGlow:
 
 
 def _try_load_welcome_frame() -> BrailleArt | None:
-    """Best-effort load of the Meditating braille frame for the welcome screen.
+    """Best-effort load of the successor title frame for the welcome screen.
 
     Returns None if the asset isn't available — the welcome screen
     falls back to text-only in that case. The frame lives at
-    `assets/nusamurai/pos-th30/Meditating-ascii-art.txt` relative to
-    the package root.
+    `src/successor/builtin/intros/successor/10-title.txt`, the same
+    final-frame portrait the intro animation holds at the end.
     """
-    here = Path(__file__).resolve()
-    # walk up from src/successor/wizard/setup.py to the repo root
-    repo_root = here.parent.parent.parent.parent
-    candidate = repo_root / "assets" / "nusamurai" / "pos-th30" / "Meditating-ascii-art.txt"
+    from ..loader import builtin_root
+    candidate = builtin_root() / "intros" / "successor" / "10-title.txt"
     if not candidate.exists():
         return None
     try:
@@ -400,7 +398,7 @@ class SuccessorSetup(App):
         cycle — chat.py imports from profiles, profiles is imported
         by the wizard, and the wizard wants to render a chat.
         """
-        from ..demos.chat import SuccessorChat, _Message
+        from ..chat import SuccessorChat, _Message
 
         # Construct the chat WITHOUT a real client (the preview never
         # talks to a model) and WITHOUT a profile (we set state directly).
@@ -436,7 +434,7 @@ class SuccessorSetup(App):
         chat.display_mode = self.state.display_mode
 
         # Density: look up by name through the chat's helper
-        from ..demos.chat import find_density, NORMAL
+        from ..chat import find_density, NORMAL
         d = find_density(self.state.density) or NORMAL
         chat.density = d
 
@@ -454,7 +452,7 @@ class SuccessorSetup(App):
             self._preview_chat._set_theme(target_theme)
         if self.state.display_mode != self._preview_chat.display_mode:
             self._preview_chat._set_display_mode(self.state.display_mode)
-        from ..demos.chat import find_density, NORMAL
+        from ..chat import find_density, NORMAL
         target_density = find_density(self.state.density) or NORMAL
         if target_density.name != self._preview_chat.density.name:
             self._preview_chat._set_density(target_density)
@@ -1337,10 +1335,10 @@ class SuccessorSetup(App):
         right: int,
         bottom: int,
     ) -> None:
-        """Intro animation toggle (none / nusamurai)."""
+        """Intro animation toggle (none / successor emergence)."""
         prompt = "play an intro animation when the chat opens?"
         paint_text(grid, prompt, left, top, style=Style(fg=theme.fg, bg=theme.bg))
-        helper = "the nusamurai braille flourish takes ~4s, any key skips"
+        helper = "the successor emergence portrait takes ~5s, any key skips"
         paint_text(
             grid, helper, left, top + 1,
             style=Style(fg=theme.fg_dim, bg=theme.bg, attrs=ATTR_DIM | ATTR_ITALIC),

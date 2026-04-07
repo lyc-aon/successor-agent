@@ -157,7 +157,7 @@ def test_toggle_mode_flips_immediately(temp_config_dir: Path) -> None:
     assert menu._is_dirty(menu._current_profile().name, "display_mode")
 
 
-def test_toggle_intro_flips_none_to_nusamurai(temp_config_dir: Path) -> None:
+def test_toggle_intro_flips_none_to_successor(temp_config_dir: Path) -> None:
     menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     intro_idx = next(
@@ -962,7 +962,7 @@ def test_profile_to_json_round_trip(temp_config_dir: Path) -> None:
         skills=("a", "b"),
         tools=("read_file",),
         tool_config={"read_file": {"max_size": 1024}},
-        intro_animation="nusamurai",
+        intro_animation="successor",
     )
     payload = _profile_to_json_dict(original)
     target = temp_config_dir / "profiles" / "roundtrip.json"
@@ -976,6 +976,6 @@ def test_profile_to_json_round_trip(temp_config_dir: Path) -> None:
     assert parsed.display_mode == "light"
     assert parsed.density == "compact"
     assert parsed.system_prompt == "test prompt"
-    assert parsed.intro_animation == "nusamurai"
+    assert parsed.intro_animation == "successor"
     assert parsed.skills == ("a", "b")
     assert parsed.tools == ("read_file",)

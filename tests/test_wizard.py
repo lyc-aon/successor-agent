@@ -71,7 +71,7 @@ def test_wizard_state_to_json_dict_round_trips() -> None:
         theme_name="steel",
         display_mode="light",
         density="compact",
-        intro_animation="nusamurai",
+        intro_animation="successor",
     )
     payload = state.to_json_dict()
     # Must be JSON-serializable and contain all the fields
@@ -81,7 +81,7 @@ def test_wizard_state_to_json_dict_round_trips() -> None:
     assert parsed["theme"] == "steel"
     assert parsed["display_mode"] == "light"
     assert parsed["density"] == "compact"
-    assert parsed["intro_animation"] == "nusamurai"
+    assert parsed["intro_animation"] == "successor"
     assert parsed["provider"]["type"] == "llamacpp"
 
 
@@ -286,7 +286,7 @@ def test_handle_intro_toggles(temp_config_dir: Path) -> None:
     wizard._enter_step(Step.INTRO)
     assert wizard.state.intro_animation is None
     wizard._handle_intro(KeyEvent(key=Key.DOWN))
-    assert wizard.state.intro_animation == "nusamurai"
+    assert wizard.state.intro_animation == "successor"
     wizard._handle_intro(KeyEvent(key=Key.UP))
     assert wizard.state.intro_animation is None
 
@@ -409,7 +409,7 @@ def test_snapshot_review_shows_summary(temp_config_dir: Path) -> None:
         rows=30, cols=110, step="review",
         name="my-prof", theme_name="steel",
         display_mode="light", density="spacious",
-        intro_animation="nusamurai",
+        intro_animation="successor",
     )
     plain = render_grid_to_plain(g)
     assert "ready to save 'my-prof'" in plain
@@ -417,7 +417,7 @@ def test_snapshot_review_shows_summary(temp_config_dir: Path) -> None:
     assert "steel" in plain
     assert "light" in plain
     assert "spacious" in plain
-    assert "nusamurai" in plain
+    assert "successor" in plain
 
 
 def test_snapshot_saved_step(temp_config_dir: Path) -> None:

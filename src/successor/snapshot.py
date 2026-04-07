@@ -90,14 +90,14 @@ def chat_demo_snapshot(
     """
     # Imports here to avoid pulling chat into module-level when only
     # snapshot helpers are needed.
-    from .demos.chat import (
+    from .chat import (
         SuccessorChat,
         _Message,
         SLASH_COMMANDS,
         find_slash_command,
     )
     from .render.theme import get_theme, normalize_display_mode
-    from .demos.chat import find_density
+    from .chat import find_density
 
     chat = SuccessorChat()
 
