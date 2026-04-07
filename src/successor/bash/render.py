@@ -56,9 +56,6 @@ from .verbclass import VerbClass, glyph_for_class, verb_class_for
 
 # ─── Constants ───
 
-# How many output lines we show inline before "more lines" hint kicks in.
-DEFAULT_MAX_OUTPUT_LINES = 12
-
 # How wide the param label column gets, max. Wider labels wrap to
 # next line for readability.
 MAX_LABEL_WIDTH = 16
@@ -202,7 +199,6 @@ def measure_tool_card_height(
     *,
     width: int,
     show_output: bool = True,
-    max_output_lines: int = DEFAULT_MAX_OUTPUT_LINES,
     prepared: PreparedToolOutput | None = None,
 ) -> int:
     """Compute the total height a ToolCard would consume at this width.
@@ -225,10 +221,12 @@ def measure_tool_card_height(
     if not show_output or not card.executed:
         return box_h
 
-    # Output rows + status line
+    # Output rows + status line. No display-side line cap — the exec
+    # layer's MAX_OUTPUT_BYTES is the real ceiling, and the card's
+    # `truncated` flag + status footer handle the overflow case.
     prep = prepared if prepared is not None else PreparedToolOutput(card)
     avail = max(20, width - OUTPUT_INDENT - 2)
-    out_lines = prep.layout(avail, max_lines=max_output_lines)
+    out_lines = prep.layout(avail)
     return box_h + len(out_lines) + 1  # +1 for the trailing status line
 
 
@@ -244,7 +242,6 @@ def paint_tool_card(
     w: int,
     theme: ThemeVariant,
     show_output: bool = True,
-    max_output_lines: int = DEFAULT_MAX_OUTPUT_LINES,
     prepared: PreparedToolOutput | None = None,
 ) -> int:
     """Paint `card` at (x, y) with width `w`. Returns rows consumed.
@@ -372,7 +369,7 @@ def paint_tool_card(
 
     prep = prepared if prepared is not None else PreparedToolOutput(card)
     avail = max(20, w - OUTPUT_INDENT - 2)
-    out_lines = prep.layout(avail, max_lines=max_output_lines)
+    out_lines = prep.layout(avail)
     out_x = x + OUTPUT_INDENT
     for line in out_lines:
         if cur_y >= grid.rows:

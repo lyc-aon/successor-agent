@@ -45,6 +45,7 @@ communicate via a thread-safe queue.
 
 from __future__ import annotations
 
+import os
 import random
 import time
 from dataclasses import dataclass, field
@@ -349,6 +350,16 @@ class _HitBox:
 WHEEL_SCROLL_LINES = 3
 
 
+# Hard cap on agent-loop turns within a single user submission. Each
+# user message kicks off turn 1; if the model emits bash blocks, the
+# harness executes them and calls back into the model for turn 2, then
+# 3, etc. Stops when the model returns no bash blocks (text-only) OR
+# when this cap is hit, whichever comes first. 25 is generous enough
+# for realistic multi-step tasks (scaffold → install → verify ≈ 5-8
+# turns) and low enough to catch pathological loops in seconds.
+MAX_AGENT_TURNS = 25
+
+
 # ─── Slash command registry ───
 #
 # Every slash command lives here as a SlashCommand instance. The
@@ -362,42 +373,38 @@ WHEEL_SCROLL_LINES = 3
 # (e.g. file paths) supply a custom callable.
 
 
-def _serialize_tool_card_for_api(card: ToolCard) -> str:
-    """Serialize a ToolCard as an XML tool-result block for the model.
+def _tool_card_content_for_api(card: ToolCard) -> str:
+    """Build the message content for a ToolCard going back to the model.
 
-    The old format was `$ command\\n<output>`. The problem: the model
-    saw `$ cmd` in its own history and learned to imitate the format,
-    emitting `$ cat missing.txt` as plain text INSTEAD of a fenced
-    bash block — no tool card would fire, the command never ran, the
-    user just saw raw text.
+    Sent as a `role: "tool"` message. Qwen 3.5's chat template renders
+    role=tool as `<|im_start|>user\\n<tool_response>\\n…\\n</tool_response>`,
+    which matches the format Qwen was trained on for tool use. The model
+    natively recognizes empty content + role=tool as "command ran with
+    no output" — exactly what writes / mkdir / chmod / redirects produce
+    on success — and does NOT re-run.
 
-    XML tags are harder to imitate accidentally (models don't emit
-    `<tool-output>` unless specifically asked) AND they're visibly
-    distinct from command-invocation syntax, so the model's context
-    clearly separates "this is what I ran" from "this is what
-    happened next". The system prompt reinforces this: commands go
-    in fenced bash blocks, tool-output tags are read-only history.
+    Earlier iterations wrapped the content in `<tool-output name="bash" …>`
+    XML inside a user-role message. The model has never seen that format
+    in training, treated it as random user text, and looped on writes
+    because it couldn't tell success from failure. The fix is structural,
+    not prompted: use the role the chat template understands.
 
-    Format:
-      <tool-output name="bash" exit="N">
-      [stdout]
-      [stderr lines prefixed with "stderr:"]
-      </tool-output>
+    Content shape (mirrors free-code's pattern at BashTool.tsx:617-622):
+      - successful command (exit 0):       stdout (or empty string)
+      - failed command   (exit non-zero):  stdout + stderr + exit marker
+      - command with stderr but exit 0:    stdout + stderr (no marker)
+
+    No exit-code prefix for success. The empty-content / role=tool
+    pairing is the success signal — adding prose dilutes it.
     """
-    lines: list[str] = []
-    exit_attr = f' exit="{card.exit_code}"' if card.exit_code is not None else ""
-    lines.append(f'<tool-output name="bash"{exit_attr}>')
-    body: list[str] = []
+    parts: list[str] = []
     if card.output:
-        body.append(card.output.rstrip())
+        parts.append(card.output.rstrip())
     if card.stderr and card.stderr.strip():
-        stderr_text = card.stderr.rstrip()
-        body.append("\n".join(f"stderr: {line}" for line in stderr_text.split("\n")))
-    if not body:
-        body.append("(no output)")
-    lines.append("\n".join(body))
-    lines.append("</tool-output>")
-    return "\n".join(lines)
+        parts.append(card.stderr.rstrip())
+    if card.exit_code is not None and card.exit_code != 0:
+        parts.append(f"[command exited with code {card.exit_code}]")
+    return "\n".join(parts)
 
 
 def static_args(*choices: str) -> Callable[[str], list[str]]:
@@ -663,7 +670,8 @@ class _Message:
     """
 
     __slots__ = (
-        "role", "raw_text", "body", "created_at", "synthetic", "tool_card",
+        "role", "raw_text", "_display_text", "body", "created_at",
+        "synthetic", "tool_card",
         "is_boundary", "is_summary", "boundary_meta",
         "_token_count",
         "_prepared_tool_output",
@@ -680,10 +688,22 @@ class _Message:
         is_boundary: bool = False,
         is_summary: bool = False,
         boundary_meta: object | None = None,
+        display_text: str | None = None,
     ) -> None:
         self.role = role  # "user" | "successor" | "tool"
+        # raw_text is the canonical body — what gets sent to the model
+        # in API history. It must include any fenced bash blocks the
+        # model emitted, otherwise the model can't see what commands
+        # it ran when reading its own context.
         self.raw_text = content
-        self.body = PreparedMarkdown(content)
+        # display_text is what the chat renderer paints. For ordinary
+        # messages it's the same as raw_text; for assistant messages
+        # that contained fenced bash blocks, the chat passes a cleaned
+        # variant (block-elided) so the user sees the surrounding
+        # narrative without a duplicate of the tool card's content.
+        # Tool cards render the bash separately as a structured card.
+        self._display_text = display_text if display_text is not None else content
+        self.body = PreparedMarkdown(self._display_text)
         self.created_at = time.monotonic()
         # Synthetic messages (the greeting, error notices) are NOT sent
         # to the model in the conversation history. Tool cards, boundary
@@ -711,6 +731,15 @@ class _Message:
         # (resize) or switching theme/mode invalidates the cache.
         self._card_rows_cache_key: tuple | None = None
         self._card_rows_cache: list | None = None
+
+    @property
+    def display_text(self) -> str:
+        """The text the renderer should paint. For ordinary messages
+        this matches `raw_text`; for assistant messages that emitted
+        fenced bash blocks, this is the cleaned (block-elided)
+        variant so the user doesn't see a duplicate of the tool card.
+        """
+        return self._display_text
 
 
 # Prefix strings shown at the start of every message.
@@ -1308,6 +1337,13 @@ class SuccessorChat(App):
         # the detector and dispatch each completed bash command,
         # appending tool cards to self.messages.
         self._stream_bash_detector: BashStreamDetector | None = None
+        # Agent-loop turn counter for the continue-loop. _submit
+        # resets this to 0 before kicking off a new user turn; each
+        # _begin_agent_turn call increments. When a bash batch
+        # finishes, _pump_stream calls _begin_agent_turn again so
+        # the model can react to its own tool output. Hard-capped
+        # at MAX_AGENT_TURNS to bound runaway loops.
+        self._agent_turn: int = 0
 
         # ─── Scrollback state ───
         self.scroll_offset: int = 0
@@ -2488,9 +2524,41 @@ class SuccessorChat(App):
             self._set_density(target)
             return
 
-        # Add the user's message and start a stream.
+        # Add the user's message and kick off turn 1 of the agent loop.
+        # _begin_agent_turn opens the stream and the continue-loop in
+        # _pump_stream calls it again when tool results come back.
         self.messages.append(_Message("user", text))
         self._scroll_to_bottom()
+        self._agent_turn = 0
+        self._begin_agent_turn()
+
+    def _begin_agent_turn(self) -> None:
+        """Open a new stream for the next turn of the agent loop.
+
+        Called once at the start of each user submission (from
+        `_submit`) AND again from `_pump_stream` after a bash batch
+        finishes, so the model gets a chance to react to its own
+        tool output. Increments `self._agent_turn` and refuses to
+        exceed `MAX_AGENT_TURNS` — a synthetic message is committed
+        instead so the user knows the loop stopped on its own.
+
+        The whole pipeline (enabled-tools resolution, system-prompt
+        assembly, api-messages build, stream open, detector init)
+        lives here rather than in `_submit` because the continue-loop
+        needs to re-run it for each turn against the updated
+        `self.messages` (which now contains the last turn's tool
+        cards serialized as assistant-role history).
+        """
+        self._agent_turn += 1
+        if self._agent_turn > MAX_AGENT_TURNS:
+            self.messages.append(_Message(
+                "successor",
+                f"[agent loop halted at {MAX_AGENT_TURNS} turns — "
+                f"send a new message to continue]",
+                synthetic=True,
+            ))
+            self._agent_turn = 0
+            return
 
         # Resolve which tools are enabled for THIS turn from the active
         # profile. filter_known() drops any unrecognized names so a
@@ -2506,21 +2574,22 @@ class SuccessorChat(App):
             tools_section = build_system_prompt_tools_section(list(enabled_tools))
             if tools_section:
                 sys_prompt = f"{sys_prompt}\n\n{tools_section}"
-            # If bash is enabled AND the profile pins a working
-            # directory, tell the model the truth about where its
-            # commands run. Otherwise it has to guess from echoes
-            # of pwd / ls output.
+            # If bash is enabled, ALWAYS tell the model the truth
+            # about where its commands run. Profile override first,
+            # process cwd otherwise — never let the model guess.
             if "bash" in enabled_tools:
                 bash_cfg = resolve_bash_config(self.profile)
-                if bash_cfg.working_directory:
-                    sys_prompt = (
-                        f"{sys_prompt}\n\n"
-                        f"## Bash working directory\n\n"
-                        f"Every bash command you emit runs with "
-                        f"`cwd={bash_cfg.working_directory}`. Relative "
-                        f"paths resolve from there. You do not need "
-                        f"to prefix file names with an absolute path."
-                    )
+                effective_cwd = bash_cfg.working_directory or os.getcwd()
+                sys_prompt = (
+                    f"{sys_prompt}\n\n"
+                    f"## Bash working directory\n\n"
+                    f"Every bash command you emit runs with "
+                    f"`cwd={effective_cwd}`. Relative paths resolve "
+                    f"from there. If the user asks for a file "
+                    f"somewhere specific (like `~/Desktop/foo.html`), "
+                    f"use the absolute path — do not assume your cwd "
+                    f"is what the user had in mind."
+                )
 
         # Build the conversation history for the model. Walk in API
         # order (summary at the START — chronologically correct) and
@@ -2529,41 +2598,66 @@ class SuccessorChat(App):
         # because they carry context the model needs:
         #   - summary: older conversation content
         #   - tool cards: previous bash outputs the model already saw
+        #
+        # Tool cards become `role: "tool"` messages — Qwen 3.5's chat
+        # template renders those as `<tool_response>` blocks, which is
+        # the format the model was trained on. Using role=user with a
+        # custom XML wrapper looked like random user text to the model
+        # and caused it to loop on commands with no stdout. role=tool
+        # is the structural fix: empty content + role=tool is read as
+        # "command succeeded with no output", which matches what writes
+        # and redirects actually produce.
+        #
+        # Same-role merging is still applied for plain user/assistant
+        # turns to keep the alternation strict and avoid HTTP 400 from
+        # the chat template, but tool messages are emitted standalone.
         api_messages: list[dict] = [{"role": "system", "content": sys_prompt}]
+
+        def _append_text(role: str, content: str) -> None:
+            """Append with same-role merge. If the last non-system
+            entry has the same role, extend its content with a blank
+            line separator; otherwise start a new entry. Used for
+            user and assistant turns; tool messages bypass this and
+            go straight onto the list.
+            """
+            if not content:
+                return
+            if len(api_messages) > 1 and api_messages[-1].get("role") == role:
+                api_messages[-1]["content"] = (
+                    api_messages[-1]["content"].rstrip() + "\n\n" + content
+                )
+                return
+            api_messages.append({"role": role, "content": content})
+
         for m in self._api_ordered_messages():
             if m.is_summary:
-                api_messages.append({
-                    "role": "user",
-                    "content": (
-                        "[summary of earlier conversation, provided by the "
-                        "harness — treat as authoritative context, not a "
-                        "user turn]\n\n" + m.raw_text
-                    ),
-                })
+                _append_text(
+                    "user",
+                    "[summary of earlier conversation, provided by the "
+                    "harness — treat as authoritative context, not a "
+                    "user turn]\n\n" + m.raw_text,
+                )
                 continue
             if m.tool_card is not None:
-                # Serialize the tool card as if the model itself had run
-                # the command — `$ command\n<output>\n[exit N]`. This
-                # gives the model continuity across turns: it sees the
-                # bash command it emitted and the output that came back,
-                # and it can decide whether to call more tools or
-                # respond to the user.
+                # Native role=tool message — chat template wraps the
+                # content in `<tool_response>` tags. Empty content is
+                # the canonical "succeeded silently" signal.
                 api_messages.append({
-                    "role": "assistant",
-                    "content": _serialize_tool_card_for_api(m.tool_card),
+                    "role": "tool",
+                    "content": _tool_card_content_for_api(m.tool_card),
                 })
                 continue
             if m.synthetic:
                 continue
             api_role = "user" if m.role == "user" else "assistant"
-            api_messages.append({"role": api_role, "content": m.raw_text})
+            _append_text(api_role, m.raw_text)
 
         self._stream = self.client.stream_chat(messages=api_messages)
         self._stream_content = []
         self._stream_reasoning_chars = 0
         # Initialize the bash detector for this stream — only when bash
         # is enabled in the active profile. The detector consumes
-        # ContentChunk text and queues completed `」```bash...`」`」` blocks
+        # ContentChunk text and queues completed fenced bash blocks
         # for execution after StreamEnded.
         if "bash" in enabled_tools:
             self._stream_bash_detector = BashStreamDetector()
@@ -3133,32 +3227,71 @@ class SuccessorChat(App):
                 if self._stream_bash_detector is not None:
                     self._stream_bash_detector.feed(ev.text)
             elif isinstance(ev, StreamEnded):
-                # Flush the detector BEFORE committing the assistant
-                # message so we can use its cleaned text — the stream
-                # text with every fenced bash block elided. Without
-                # this, the assistant body would double-render the
-                # block as a markdown code block AND the tool card
-                # below would show the same command again.
+                # Two text streams to capture: the FULL stream content
+                # (raw, includes any fenced bash blocks the model
+                # emitted) is what the model needs to see in its own
+                # API history. The DISPLAY text is the bash-elided
+                # variant from the detector — that's what the chat
+                # paints, so the user doesn't see a duplicate of the
+                # bash command above the tool card it produced.
+                #
+                # Critical: never strip bash blocks from the API path.
+                # If the model can't see what it ran, it re-runs the
+                # same command on the next turn — the loop never
+                # converges. Free-code's BashTool.tsx maintains the
+                # same separation: tool calls live in the assistant
+                # message structure, results in a separate user
+                # message, and the model reads both.
+                raw_content = "".join(self._stream_content).strip()
                 if self._stream_bash_detector is not None:
                     self._stream_bash_detector.flush()
-                    full_content = self._stream_bash_detector.cleaned_text().strip()
+                    display_content = self._stream_bash_detector.cleaned_text().strip()
                     all_blocks = self._stream_bash_detector.completed()
                     self._stream_bash_detector = None
                 else:
-                    full_content = "".join(self._stream_content).strip()
+                    display_content = raw_content
                     all_blocks = []
-                if not full_content:
-                    full_content = "(ran the commands — see cards below)" if all_blocks else "(no answer — model produced only reasoning)"
-                self.messages.append(_Message("successor", full_content))
+                # Commit the assistant body if there's real raw text.
+                # If both raw and display are empty (reasoning-only
+                # turn that produced nothing), commit an honest marker
+                # so the user knows the model didn't say anything.
+                if raw_content:
+                    self.messages.append(_Message(
+                        "successor",
+                        raw_content,
+                        display_text=display_content,
+                    ))
+                elif not all_blocks:
+                    self.messages.append(_Message(
+                        "successor",
+                        "(no answer — model produced only reasoning)",
+                    ))
                 self._last_usage = ev.usage
                 self._stream = None
                 self._stream_content = []
                 self._stream_reasoning_chars = 0
                 # Tool cards appear AFTER the assistant message in the
                 # chat — visually: assistant text, then tool cards
-                # stacked below as separate _Message instances.
+                # stacked below as separate _Message instances. If any
+                # card ran successfully (not all refused), continue
+                # the agent loop: the model gets another turn with the
+                # tool output fed back as context and produces real
+                # commentary describing what just happened.
+                #
+                # The `_agent_turn > 0` guard is important: tests drive
+                # `_pump_stream` directly with a pre-installed fake
+                # stream WITHOUT going through `_submit`, so they never
+                # increment the counter. Only user-initiated submissions
+                # trigger continuation; synthetic test streams don't.
                 if all_blocks:
-                    self._dispatch_streamed_bash_blocks(all_blocks)
+                    any_ran = self._dispatch_streamed_bash_blocks(all_blocks)
+                    if any_ran and self._agent_turn > 0:
+                        self._begin_agent_turn()
+                        return
+                # No tool blocks OR nothing successfully ran — turn
+                # ends here. Reset the agent-turn counter so the next
+                # user submission starts fresh.
+                self._agent_turn = 0
             elif isinstance(ev, StreamError):
                 partial = "".join(self._stream_content)
                 if partial:
@@ -3172,10 +3305,23 @@ class SuccessorChat(App):
                 # Drop the bash detector — partial bash blocks in a
                 # failed stream aren't safe to execute
                 self._stream_bash_detector = None
+                # A stream error inside a continuation kills the loop
+                # for this user submission. Reset the turn counter so
+                # the chat returns to IDLE instead of waiting forever
+                # for a stream that'll never come back.
+                self._agent_turn = 0
 
-    def _dispatch_streamed_bash_blocks(self, blocks: list[str]) -> None:
+    def _dispatch_streamed_bash_blocks(self, blocks: list[str]) -> bool:
         """Execute each bash block detected during streaming and append
         the resulting tool cards to self.messages.
+
+        Returns True if at least one block ran to completion (regardless
+        of exit code — exit 1 is a valid result the model should react
+        to). Returns False if every block was refused or errored at
+        dispatch-layer (no subprocess started). The caller uses this
+        to decide whether to continue the agent loop — refused-only
+        batches dead-end so the user can resolve, whereas runs (even
+        failed ones) deserve a follow-up model turn.
 
         Each block becomes its own _Message with a tool_card attached.
         Cards stack BELOW the assistant message that produced them.
@@ -3189,8 +3335,9 @@ class SuccessorChat(App):
         zero extra plumbing.
         """
         if not blocks:
-            return
+            return False
         bash_cfg = resolve_bash_config(self.profile)
+        any_ran = False
         for command in blocks:
             try:
                 card = dispatch_bash(
@@ -3224,6 +3371,8 @@ class SuccessorChat(App):
             self.messages.append(_Message(
                 "tool", "", tool_card=card,
             ))
+            any_ran = True
+        return any_ran
 
     def _refusal_hint(
         self, exc: RefusedCommand, bash_cfg: BashConfig,
@@ -3988,7 +4137,7 @@ class SuccessorChat(App):
                 md_lines = msg.body.lines(md_width)
                 summary_color = lerp_rgb(theme.fg_subtle, theme.fg_dim, 0.6)
                 rendered_rows = self._render_md_lines_with_search(
-                    md_lines, msg.raw_text, [], prefix, summary_color,
+                    md_lines, msg.display_text, [], prefix, summary_color,
                 )
                 for r in rendered_rows:
                     r.is_summary = True
@@ -4011,6 +4160,18 @@ class SuccessorChat(App):
                         card_rows, theme.bg, 1.0 - global_fade_alpha,
                     )
                 out.extend(card_rows)
+                if i < n - 1:
+                    for _ in range(spacing):
+                        out.append(_RenderedRow(base_color=base_color))
+                continue
+
+            # If the message's display body is empty (e.g., assistant
+            # turn that was nothing but a fenced bash block — the
+            # block lives in raw_text for the model but shouldn't
+            # paint as a bare "successor ▸" line above the tool card),
+            # skip the row entirely. The tool card that follows
+            # speaks for the message.
+            if msg.role != "user" and not msg.display_text.strip():
                 if i < n - 1:
                     for _ in range(spacing):
                         out.append(_RenderedRow(base_color=base_color))
@@ -4042,7 +4203,7 @@ class SuccessorChat(App):
                 )
             else:
                 rendered_rows = self._render_md_lines_with_search(
-                    md_lines, msg.raw_text, msg_matches, prefix, base_color,
+                    md_lines, msg.display_text, msg_matches, prefix, base_color,
                 )
                 # Apply the global fade to every row produced by this msg
                 if global_fade_alpha < 1.0:
@@ -4311,6 +4472,14 @@ class SuccessorChat(App):
         show a spinner with the reasoning char count. Once content
         starts arriving, we parse it as markdown live — every frame
         re-parses, but the source is short and the parser is cheap.
+
+        When a bash detector is active, the visible text comes from
+        `detector.cleaned_text()` — the stream minus any fenced bash
+        block. This prevents the jarring "block appears mid-stream
+        then gets elided at StreamEnded" jump the user sees otherwise.
+        If a block is in flight (fence opened, body streaming), a
+        dim italic "running bash…" marker sits under the body so the
+        user knows a command is being queued.
         """
         if self._stream is None:
             return []
@@ -4318,7 +4487,16 @@ class SuccessorChat(App):
         spinner_idx = int(now * SPINNER_FPS) % len(SPINNER_FRAMES)
         spinner = SPINNER_FRAMES[spinner_idx]
 
-        content_so_far = "".join(self._stream_content)
+        # Visible stream content: prefer the detector's cleaned text
+        # (which elides fenced bash blocks in real time) over the raw
+        # stream buffer. Falls back to the raw buffer when bash isn't
+        # enabled for this turn.
+        block_in_flight = False
+        if self._stream_bash_detector is not None:
+            content_so_far = self._stream_bash_detector.cleaned_text()
+            block_in_flight = self._stream_bash_detector.is_inside_block()
+        else:
+            content_so_far = "".join(self._stream_content)
 
         out: list[_RenderedRow] = [_RenderedRow(base_color=theme.accent)]
 
@@ -4392,6 +4570,27 @@ class SuccessorChat(App):
                     base_color=theme.accent,
                     line_tag=md_line.line_tag,
                     body_indent=md_line.indent,
+                )
+            )
+
+        # Mid-stream bash block indicator. When the detector is inside
+        # a fenced bash block, those characters are already elided
+        # from the visible text above — this row gives the user a
+        # concrete signal that a command is being queued so the layout
+        # doesn't feel like it froze or dropped content.
+        if block_in_flight:
+            out.append(
+                _RenderedRow(
+                    leading_text=" " * _PREFIX_W + "  ↳ ",
+                    leading_color_kind="fg_dim",
+                    leading_attrs=ATTR_DIM,
+                    body_spans=(
+                        LaidOutSpan(
+                            text=f"{spinner} queuing bash command…",
+                            attrs=ATTR_DIM | ATTR_ITALIC,
+                        ),
+                    ),
+                    base_color=theme.fg_subtle,
                 )
             )
         return out

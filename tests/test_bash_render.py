@@ -13,7 +13,6 @@ from __future__ import annotations
 import pytest
 
 from successor.bash import (
-    DEFAULT_MAX_OUTPUT_LINES,
     ToolCard,
     dispatch_bash,
     measure_tool_card_height,
@@ -205,13 +204,21 @@ def test_no_output_placeholder() -> None:
     assert "(no output)" in plain
 
 
-def test_truncated_output_shows_more_lines_marker() -> None:
-    """A command producing > max_output_lines gets a 'N more lines' marker."""
+def test_long_output_renders_every_line_without_cap() -> None:
+    """The renderer no longer caps output at a fixed line count. A
+    30-line command paints all 30 lines into a tall-enough grid, and
+    no "more lines" truncation marker appears. The only real ceiling
+    is MAX_OUTPUT_BYTES at the exec layer, which the status footer
+    flags via the `truncated` glyph when it trips.
+    """
     card = dispatch_bash("for i in $(seq 1 30); do echo line$i; done")
-    g = Grid(50, 80)
-    paint_tool_card(g, card, x=0, y=0, w=80, theme=THEME, max_output_lines=5)
+    g = Grid(60, 80)  # plenty of rows for 30 output lines + box + status
+    paint_tool_card(g, card, x=0, y=0, w=80, theme=THEME)
     plain = render_grid_to_plain(g)
-    assert "more line" in plain
+    assert "more line" not in plain
+    # Every numbered line is visible
+    for i in range(1, 31):
+        assert f"line{i}" in plain, f"line{i} missing from paint"
 
 
 # ─── measure_tool_card_height ───

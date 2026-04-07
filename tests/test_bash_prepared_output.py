@@ -5,8 +5,7 @@ Three layers of coverage:
   1. Structural parsers — grep, ls, git-status output is parsed into
      the correct spans with the right kinds (chrome/dim/match/plain).
   2. Pretext-shaped caching — layout(width) returns the same object
-     on repeat calls; different widths invalidate; max_lines override
-     invalidates.
+     on repeat calls; different widths invalidate.
   3. Integration — real dispatch_bash runs hit the right prep path
      and render highlighted output at paint time.
 """
@@ -166,16 +165,6 @@ def test_prepared_tool_output_invalidates_on_width_change() -> None:
     assert lines_80 is not lines_40
 
 
-def test_prepared_tool_output_max_lines_override_invalidates() -> None:
-    card = dispatch_bash("for i in $(seq 1 20); do echo line$i; done")
-    prep = PreparedToolOutput(card)
-    few = prep.layout(80, max_lines=3)
-    many = prep.layout(80, max_lines=10)
-    assert few is not many
-    assert len(few) <= 3
-    assert len(many) <= 10
-
-
 def test_prepared_tool_output_no_output_placeholder() -> None:
     card = dispatch_bash("true")  # succeeds, no stdout/stderr
     prep = PreparedToolOutput(card)
@@ -193,16 +182,22 @@ def test_prepared_tool_output_stderr_becomes_warn_lines() -> None:
     assert any(l.kind == "stderr" for l in lines)
 
 
-# ─── Truncation ───
+# ─── No line cap: every wrapped output row is returned ───
 
 
-def test_truncation_emits_more_lines_footer() -> None:
+def test_layout_returns_all_lines_with_no_cap() -> None:
+    """PreparedToolOutput.layout no longer truncates at a line count.
+    The 8 KiB byte cap at the exec layer is the only ceiling, and the
+    full (post-byte-cap) output is wrapped and returned.
+    """
     card = dispatch_bash("for i in $(seq 1 20); do echo line$i; done")
     prep = PreparedToolOutput(card)
-    lines = prep.layout(80, max_lines=5)
-    # Last line is the truncation marker
-    assert lines[-1].kind == "truncated"
-    assert "more line" in lines[-1].plain
+    lines = prep.layout(80)
+    # Every one of the 20 lines is present — no truncation marker
+    assert not any(l.kind == "truncated" for l in lines)
+    plain_concat = "\n".join(l.plain for l in lines)
+    for i in range(1, 21):
+        assert f"line{i}" in plain_concat
 
 
 # ─── Search integration: grep output renders with highlights ───

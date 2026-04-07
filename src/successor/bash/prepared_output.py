@@ -323,33 +323,27 @@ class PreparedToolOutput:
     and does one wrap pass.
     """
 
-    __slots__ = ("_prepared", "_cache_w", "_cache_max", "_cache_lines")
+    __slots__ = ("_prepared", "_cache_w", "_cache_lines")
 
     def __init__(self, card: ToolCard) -> None:
         self._prepared = _prepare_for_card(card)
         self._cache_w: int = -1
-        self._cache_max: int = -1
         self._cache_lines: list[OutputLine] = []
 
-    def layout(self, width: int, *, max_lines: int = 12) -> list[OutputLine]:
+    def layout(self, width: int) -> list[OutputLine]:
         """Return wrapped OutputLine rows for the target width.
 
-        max_lines clips the result; a truncation summary line is
-        appended when clipping fires. Because the cache key is just
-        width, callers should use a consistent max_lines value
-        across paints (or pass one width-lines tuple explicitly —
-        handled by clearing the cache when max_lines changes).
+        No display-side line cap — the exec layer's `MAX_OUTPUT_BYTES`
+        (8 KiB) is the real ceiling on how much content reaches here,
+        and that cap is already reflected in `ToolCard.truncated` and
+        the status footer. The full (post-byte-cap) output is wrapped
+        and returned so the user can scroll through every line.
         """
         if width <= 0:
             return []
-        if width == self._cache_w and max_lines == self._cache_max:
+        if width == self._cache_w:
             return self._cache_lines
 
-        # Wrap everything first, then truncate. The old _wrap_output
-        # worked this way too — early-breaking at max_lines means we
-        # can't tell if we DID overflow so we can't emit the
-        # "N more lines" footer. This is cheap enough in practice
-        # since output is already bounded by max_output_bytes.
         wrapped: list[OutputLine] = []
         for p in self._prepared:
             wrapped.extend(_wrap_prepared_line(p, width))
@@ -360,19 +354,7 @@ class PreparedToolOutput:
                 kind="truncated",
             )]
 
-        if len(wrapped) > max_lines:
-            hidden = len(wrapped) - max_lines + 1
-            wrapped = wrapped[: max_lines - 1]
-            wrapped.append(OutputLine(
-                spans=(OutputSpan(
-                    text=f"⋯ {hidden} more line{'s' if hidden != 1 else ''} ⋯",
-                    kind="dim",
-                ),),
-                kind="truncated",
-            ))
-
         self._cache_w = width
-        self._cache_max = max_lines
         self._cache_lines = wrapped
         return wrapped
 

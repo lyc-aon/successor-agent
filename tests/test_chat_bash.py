@@ -465,3 +465,341 @@ def test_read_only_profile_blocks_mutating_command_in_stream() -> None:
     # And the refusal hint points at the config path
     synthetic = [m for m in chat.messages if m.synthetic and "refused" in m.raw_text.lower()]
     assert any("read-only" in m.raw_text or "allow_mutating" in m.raw_text for m in synthetic)
+
+
+# ─── Agent-loop continuation ───
+#
+# These tests cover the continue-loop: after a successful tool batch,
+# _pump_stream calls _begin_agent_turn() again so the model can react
+# to its own output. The MAX_AGENT_TURNS cap bounds runaway loops,
+# and all-refused batches break the loop (the user has to resolve).
+
+
+class _MockClient:
+    """Multi-turn client stub: stream_chat pops from a preloaded
+    queue of _FakeStream instances, one per expected turn.
+
+    Tests install this on `chat.client` BEFORE calling `_submit`.
+    Each subsequent `_begin_agent_turn` consumes one canned stream.
+    If the queue is empty when `stream_chat` is called, the test
+    intentionally failed to queue enough turns — raise loudly so
+    the test author notices.
+    """
+
+    def __init__(self, streams: list) -> None:
+        self._streams = list(streams)
+        self.call_count = 0
+
+    def stream_chat(self, messages, **kwargs):
+        self.call_count += 1
+        if not self._streams:
+            raise RuntimeError(
+                f"_MockClient exhausted on call #{self.call_count}: "
+                f"test did not queue enough canned streams"
+            )
+        return self._streams.pop(0)
+
+
+def _drive_until_idle(chat: SuccessorChat, max_ticks: int = 100) -> int:
+    """Drive chat._pump_stream until the chat is idle (no stream OR
+    no pending agent turn). Returns the number of ticks consumed.
+
+    Hard-capped at `max_ticks` to catch runaway loops in tests.
+    """
+    for tick in range(max_ticks):
+        if chat._stream is None and chat._agent_turn == 0:
+            return tick
+        chat._pump_stream()
+    raise AssertionError(
+        f"_drive_until_idle exceeded {max_ticks} ticks — loop did not settle"
+    )
+
+
+def test_continue_loop_runs_second_turn_after_tool(temp_config_dir: Path) -> None:
+    """The archetype: turn 1 has bash + text, dispatch runs, turn 2
+    is text-only ("I wrote the file, here's what it does"). The chat
+    should commit both assistant messages, exactly one tool card in
+    between, and end with _agent_turn reset to 0.
+    """
+    from successor.profiles import Profile
+    chat = SuccessorChat()
+    chat.profile = Profile(
+        name="yolo",
+        tools=("bash",),
+        tool_config={"bash": {"allow_dangerous": True, "allow_mutating": True}},
+    )
+    chat.messages = []
+    chat.client = _MockClient(streams=[
+        _FakeStream([
+            _content("Let me check that for you.\n"),
+            _content("```bash\necho first-turn-output\n```\n"),
+            _stream_end(),
+        ]),
+        _FakeStream([
+            _content("I ran the command and it echoed successfully.\n"),
+            _stream_end(),
+        ]),
+    ])
+
+    chat.input_buffer = "show me that thing"
+    chat._submit()
+    _drive_until_idle(chat)
+
+    # Both streams were consumed
+    assert chat.client.call_count == 2, (
+        f"expected 2 stream_chat calls, got {chat.client.call_count}"
+    )
+
+    # Exactly one tool card
+    tool_msgs = [m for m in chat.messages if m.tool_card is not None]
+    assert len(tool_msgs) == 1
+    assert "first-turn-output" in tool_msgs[0].tool_card.output
+
+    # Both assistant messages are present, in order
+    assistant_texts = [
+        m.raw_text for m in chat.messages
+        if m.role == "successor" and not m.synthetic
+    ]
+    assert "Let me check that for you." in assistant_texts[0]
+    # Second turn's commentary appears
+    assert any("ran the command" in t for t in assistant_texts), (
+        f"second-turn commentary missing from {assistant_texts}"
+    )
+
+    # Counter reset after settling
+    assert chat._agent_turn == 0
+
+
+def test_continue_loop_respects_turn_cap(temp_config_dir: Path) -> None:
+    """If the model keeps emitting bash blocks turn after turn, the
+    harness bails out at MAX_AGENT_TURNS with a visible marker.
+    """
+    from successor.chat import MAX_AGENT_TURNS
+    from successor.profiles import Profile
+
+    chat = SuccessorChat()
+    chat.profile = Profile(
+        name="yolo",
+        tools=("bash",),
+        tool_config={"bash": {"allow_dangerous": True, "allow_mutating": True}},
+    )
+    chat.messages = []
+    # Queue MANY more streams than MAX_AGENT_TURNS would consume. Each
+    # one contains a simple echo so the dispatch succeeds and the loop
+    # wants to keep going.
+    chat.client = _MockClient(streams=[
+        _FakeStream([
+            _content(f"```bash\necho turn-{i}\n```\n"),
+            _stream_end(),
+        ])
+        for i in range(MAX_AGENT_TURNS + 10)
+    ])
+
+    chat.input_buffer = "keep going"
+    chat._submit()
+    _drive_until_idle(chat, max_ticks=200)
+
+    # Exactly MAX_AGENT_TURNS streams were consumed (not more)
+    assert chat.client.call_count == MAX_AGENT_TURNS, (
+        f"expected {MAX_AGENT_TURNS} stream_chat calls, "
+        f"got {chat.client.call_count}"
+    )
+
+    # MAX_AGENT_TURNS tool cards were created
+    tool_msgs = [m for m in chat.messages if m.tool_card is not None]
+    assert len(tool_msgs) == MAX_AGENT_TURNS
+
+    # The halt marker is present
+    halt_msgs = [
+        m for m in chat.messages
+        if m.synthetic and "halted" in m.raw_text.lower()
+    ]
+    assert len(halt_msgs) >= 1, "expected an 'agent loop halted' marker"
+
+
+def test_continue_loop_skips_when_all_blocks_refused(temp_config_dir: Path) -> None:
+    """If every block in a turn is refused, the loop does NOT continue
+    — the user has to resolve before more commands make sense.
+    """
+    from successor.profiles import Profile
+
+    chat = SuccessorChat()
+    # Read-only profile → mutating commands get refused
+    chat.profile = Profile(
+        name="readonly",
+        tools=("bash",),
+        tool_config={"bash": {"allow_mutating": False}},
+    )
+    chat.messages = []
+    chat.client = _MockClient(streams=[
+        _FakeStream([
+            _content("```bash\nmkdir /tmp/nope-successor-refused\n```\n"),
+            _stream_end(),
+        ]),
+        # Turn 2 is deliberately NOT queued: if the loop tries to
+        # continue, the mock will raise and the test will fail loudly.
+    ])
+
+    chat.input_buffer = "try to make a dir"
+    chat._submit()
+    _drive_until_idle(chat)
+
+    # Only ONE stream consumed (no continuation)
+    assert chat.client.call_count == 1
+
+    # Refused card + refusal hint present
+    tool_msgs = [m for m in chat.messages if m.tool_card is not None]
+    assert len(tool_msgs) == 1
+    assert not tool_msgs[0].tool_card.executed
+    assert tool_msgs[0].tool_card.risk == "mutating"
+
+    # Counter reset
+    assert chat._agent_turn == 0
+
+
+def test_cwd_always_injected_into_system_prompt(temp_config_dir: Path) -> None:
+    """The system prompt MUST include the effective cwd even when the
+    profile doesn't pin `tool_config["bash"]["working_directory"]`.
+    Regression guard for the P3 gap.
+    """
+    import os
+    from successor.profiles import Profile
+
+    chat = SuccessorChat()
+    # Default-ish profile: bash enabled, NO working_directory pinned
+    chat.profile = Profile(
+        name="nodir",
+        tools=("bash",),
+        tool_config={},
+    )
+    chat.messages = []
+
+    # Capture the payload on the only stream_chat call. We use a
+    # MockClient that records the messages arg.
+    captured: dict = {}
+    class _CapturingClient:
+        def stream_chat(self, messages, **kwargs):
+            captured["messages"] = messages
+            return _FakeStream([_stream_end()])
+    chat.client = _CapturingClient()
+
+    chat.input_buffer = "hi"
+    chat._submit()
+    _drive_until_idle(chat)
+
+    sys_msg = captured["messages"][0]
+    assert sys_msg["role"] == "system"
+    # The actual process cwd is injected — not a placeholder, not empty
+    assert "Bash working directory" in sys_msg["content"]
+    assert f"cwd={os.getcwd()}" in sys_msg["content"]
+
+
+def test_cwd_profile_override_takes_precedence(temp_config_dir: Path, tmp_path) -> None:
+    """When the profile pins working_directory, that path is injected,
+    not the process cwd.
+    """
+    from successor.profiles import Profile
+
+    chat = SuccessorChat()
+    chat.profile = Profile(
+        name="pinned",
+        tools=("bash",),
+        tool_config={"bash": {"working_directory": str(tmp_path)}},
+    )
+    chat.messages = []
+
+    captured: dict = {}
+    class _CapturingClient:
+        def stream_chat(self, messages, **kwargs):
+            captured["messages"] = messages
+            return _FakeStream([_stream_end()])
+    chat.client = _CapturingClient()
+
+    chat.input_buffer = "hi"
+    chat._submit()
+    _drive_until_idle(chat)
+
+    sys_msg = captured["messages"][0]
+    assert f"cwd={tmp_path}" in sys_msg["content"]
+
+
+def test_live_stream_never_exposes_bash_block_mid_stream(
+    temp_config_dir: Path,
+) -> None:
+    """The in-flight streaming renderer reads from the bash detector's
+    cleaned_text(), so the user NEVER sees raw fence markers or block
+    content appearing in the assistant body. Fix for the 'spastic
+    streaming' UX regression.
+    """
+    from successor.profiles import Profile
+
+    chat = SuccessorChat()
+    chat.profile = Profile(
+        name="yolo",
+        tools=("bash",),
+        tool_config={"bash": {"allow_dangerous": True, "allow_mutating": True}},
+    )
+    chat.messages = []
+
+    # Install a stream that includes a bash fence mid-stream. We'll
+    # drain it chunk-by-chunk and capture the visible stream text
+    # at each step.
+    fake = _FakeStream([
+        _content("I'll run that:\n"),
+        _content("```bash\n"),
+        _content("echo hello\n"),
+        _content("```\n"),
+        _content("Done.\n"),
+        _stream_end(),
+    ])
+
+    # Mock the client so _begin_agent_turn returns our fake for turn 1
+    # and a text-only finalizer for turn 2 (continuation).
+    chat.client = _MockClient(streams=[
+        fake,
+        _FakeStream([
+            _content("The echo succeeded.\n"),
+            _stream_end(),
+        ]),
+    ])
+
+    chat.input_buffer = "run echo"
+    chat._submit()
+
+    # Single-tick observation: drain events one at a time (not all at
+    # once via _drive_until_idle) so we can inspect the intermediate
+    # state between ContentChunk deliveries. We do this by draining
+    # the queue manually one event at a time.
+    observed_visible = []
+    orig_drain = fake.drain
+
+    def one_at_a_time() -> list:
+        if not fake._events:
+            return []
+        # Pop a single event and return it
+        ev = fake._events.pop(0)
+        return [ev]
+
+    fake.drain = one_at_a_time  # type: ignore[method-assign]
+
+    # Pump ticks until the first fake stream is fully drained
+    safety = 0
+    while fake._events and safety < 20:
+        chat._pump_stream()
+        if chat._stream_bash_detector is not None:
+            observed_visible.append(
+                chat._stream_bash_detector.cleaned_text()
+            )
+        safety += 1
+
+    # At NO POINT should the raw fence OR the raw command body have
+    # appeared in the visible cleaned text
+    for snap in observed_visible:
+        assert "```" not in snap, f"fence marker leaked into visible: {snap!r}"
+        assert "echo hello" not in snap, (
+            f"bash block content leaked into visible: {snap!r}"
+        )
+
+    # But the surrounding prose IS visible
+    joined = "\n".join(observed_visible)
+    assert "I'll run that" in joined, "prose before the block was elided"

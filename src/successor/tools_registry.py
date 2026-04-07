@@ -76,17 +76,16 @@ class ToolDescriptor:
 BASH_DOC = """\
 ### bash — execute shell commands
 
-You run shell commands by emitting a fenced code block with the
-`bash` language tag. The harness parses the block, executes it in
-the user's working directory, and feeds the output back to you on
-the next turn as a `<tool-output>` block. You never write
-`<tool-output>` yourself — the harness emits those blocks into
-your context as READ-ONLY history.
+You run shell commands by emitting a fenced code block tagged
+`bash`. The harness parses each block, executes it, and the
+command's output comes back to you as a tool response on the next
+turn. A successful command may produce no output at all — that is
+normal and means it worked.
 
 ### How to invoke
 
 Put every command you want to run in a fenced bash block. The
-block can contain a single command, a multi-command script, a
+block may contain a single command, a multi-command script, a
 heredoc file write, or any valid bash — the whole block is handed
 to `bash` as one script.
 
@@ -113,16 +112,33 @@ Example — a multi-step script:
     echo "done"
     ```
 
+### Reading tool responses
+
+When a command finishes, the next turn begins with a tool response
+containing whatever the command printed. Treat it as ground truth.
+Empty content is the success signal for writes, redirects, mkdir,
+touch, chmod, and most other mutating commands — they finished
+without printing anything because there was nothing to print. A
+non-empty response shows you the actual stdout / stderr.
+
+After you see a tool response, your next move is one of:
+
+  1. Issue the *next* command needed to advance the user's task.
+  2. If the task is complete, reply with plain text — no more
+     bash blocks. Plain text ends your turn and gives control
+     back to the user.
+
+Do not re-issue a command you just ran. Acting on the tool
+response, not repeating the call, is what moves things forward.
+
 ### Critical rules
 
-- **ALWAYS use fenced bash blocks.** Never write a command as plain
-  text like `$ cat README.md`. Plain text commands will NOT run —
-  only fenced blocks get dispatched.
-- **`<tool-output>` blocks in your context are READ-ONLY history.**
-  They show you what previous commands produced. Do not imitate
-  the format — only write fenced bash blocks.
-- **One fenced block per action.** If you need to do three things,
-  you can put them in one block or three blocks — either works.
+- **ALWAYS use fenced bash blocks.** Plain-text commands like
+  `$ cat README.md` will NOT run — only fenced blocks dispatch.
+- **One block per action is fine, multiple blocks per turn is
+  also fine.** Each block runs independently in order.
+- **End with plain text when done.** A turn that contains no
+  fenced bash block terminates the loop.
 
 ### Safety
 
