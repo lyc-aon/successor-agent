@@ -548,3 +548,47 @@ class LlamaCppClient:
                 return str(data.get("status", "")).lower() == "ok"
         except Exception:
             return False
+
+    def _server_root(self) -> str:
+        """Return base_url with any trailing /v1 stripped.
+
+        Used for llama.cpp-specific endpoints that live at the server
+        root (like /props, /health, /tokenize) rather than under /v1.
+        Mirrors the trailing-/v1 strip the token counter does.
+        """
+        root = self.base_url
+        if root.endswith("/v1"):
+            root = root[:-3]
+        return root
+
+    def detect_context_window(self) -> int | None:
+        """Probe llama.cpp's /props endpoint and return n_ctx.
+
+        llama.cpp exposes the launched server's context size at
+        `GET /props` under `default_generation_settings.n_ctx`. This
+        is the value the user passed to `-c` when starting llama-server,
+        which is the actual ceiling for any conversation against this
+        endpoint.
+
+        Result is cached on the instance after the first successful
+        probe so the chat doesn't pay the round-trip more than once.
+        Returns None if the server is unreachable, the response shape
+        is unexpected, or n_ctx is missing — callers fall back to
+        the profile override or the hardcoded default.
+        """
+        if hasattr(self, "_cached_context_window"):
+            return self._cached_context_window
+        result: int | None = None
+        try:
+            req = urllib.request.Request(f"{self._server_root()}/props")
+            with urllib.request.urlopen(req, timeout=2.0) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode("utf-8", errors="replace"))
+                    settings = data.get("default_generation_settings") or {}
+                    n_ctx = settings.get("n_ctx")
+                    if isinstance(n_ctx, int) and n_ctx > 0:
+                        result = n_ctx
+        except Exception:
+            pass
+        self._cached_context_window = result
+        return result

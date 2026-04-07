@@ -325,6 +325,10 @@ def test_full_save_flow_writes_json_file(temp_config_dir: Path) -> None:
 
     # Pick intro
     wizard._handle_intro(KeyEvent(key=Key.ENTER))
+    assert wizard.current_step == Step.PROVIDER
+
+    # Default provider (llamacpp) — just advance
+    wizard._handle_provider(KeyEvent(key=Key.RIGHT))
     assert wizard.current_step == Step.TOOLS
 
     # Accept the default tool selection (bash enabled)
@@ -383,7 +387,7 @@ def test_snapshot_welcome_renders(temp_config_dir: Path) -> None:
     plain = render_grid_to_plain(g)
     assert "successor · setup" in plain
     assert "welcome" in plain
-    assert "step 1 of 8" in plain
+    assert "step 1 of 9" in plain
 
 
 def test_snapshot_name_step_shows_input_field(temp_config_dir: Path) -> None:
@@ -393,7 +397,7 @@ def test_snapshot_name_step_shows_input_field(temp_config_dir: Path) -> None:
     plain = render_grid_to_plain(g)
     assert "test-name" in plain
     assert "name for your new profile" in plain
-    assert "step 2 of 8" in plain
+    assert "step 2 of 9" in plain
 
 
 def test_snapshot_theme_step_shows_live_preview(temp_config_dir: Path) -> None:
@@ -461,6 +465,94 @@ def test_wizard_state_chat_only_roundtrip(temp_config_dir: Path) -> None:
     assert profile.tools == ()
     payload = state.to_json_dict()
     assert payload["tools"] == []
+
+
+# ─── Provider step ───
+
+
+def test_provider_step_default_is_llamacpp(temp_config_dir: Path) -> None:
+    wizard = SuccessorSetup()
+    wizard._enter_step(Step.PROVIDER)
+    assert wizard.state.provider_kind == "llamacpp"
+    # Default → produces a llamacpp provider config
+    profile = wizard.state.to_profile()
+    assert profile.provider["type"] == "llamacpp"
+    assert profile.provider["base_url"] == "http://localhost:8080"
+
+
+def test_provider_step_space_toggles_kind_when_focused_on_row_0(temp_config_dir: Path) -> None:
+    wizard = SuccessorSetup()
+    wizard._enter_step(Step.PROVIDER)
+    assert wizard._cursors[Step.PROVIDER] == 0
+    wizard._handle_provider(KeyEvent(char=" "))
+    assert wizard.state.provider_kind == "openrouter"
+    wizard._handle_provider(KeyEvent(char=" "))
+    assert wizard.state.provider_kind == "llamacpp"
+
+
+def test_provider_step_openrouter_requires_api_key_to_advance(temp_config_dir: Path) -> None:
+    wizard = SuccessorSetup()
+    wizard._enter_step(Step.PROVIDER)
+    wizard._handle_provider(KeyEvent(char=" "))  # toggle to openrouter
+    assert wizard.state.provider_kind == "openrouter"
+    # Clear default model so we test ONLY the api_key requirement.
+    wizard.state.provider_api_key = ""
+    wizard._handle_provider(KeyEvent(key=Key.RIGHT))
+    assert wizard.current_step == Step.PROVIDER  # blocked
+    assert wizard._glow is not None
+    assert "api key" in wizard._glow.message
+
+
+def test_provider_step_openrouter_full_flow(temp_config_dir: Path) -> None:
+    wizard = SuccessorSetup()
+    wizard._enter_step(Step.PROVIDER)
+    wizard._handle_provider(KeyEvent(char=" "))  # toggle to openrouter
+    # Move focus to api_key, type some chars
+    wizard._handle_provider(KeyEvent(key=Key.DOWN))
+    assert wizard._cursors[Step.PROVIDER] == 1
+    for ch in "sk-or-test-key":
+        wizard._handle_provider(KeyEvent(char=ch))
+    assert wizard.state.provider_api_key == "sk-or-test-key"
+    # Backspace deletes one char
+    wizard._handle_provider(KeyEvent(key=Key.BACKSPACE))
+    assert wizard.state.provider_api_key == "sk-or-test-ke"
+    # Move focus to model field
+    wizard._handle_provider(KeyEvent(key=Key.DOWN))
+    assert wizard._cursors[Step.PROVIDER] == 2
+    # Default model is preset; clear and type a fresh one
+    wizard.state.provider_model = ""
+    for ch in "google/gemma-3-27b-it:free":
+        wizard._handle_provider(KeyEvent(char=ch))
+    assert wizard.state.provider_model == "google/gemma-3-27b-it:free"
+    # Right advances to TOOLS
+    wizard._handle_provider(KeyEvent(key=Key.RIGHT))
+    assert wizard.current_step == Step.TOOLS
+
+    # The serialized profile carries the openrouter config
+    payload = wizard.state.to_json_dict()
+    assert payload["provider"]["type"] == "openai_compat"
+    assert payload["provider"]["base_url"] == "https://openrouter.ai/api/v1"
+    assert payload["provider"]["model"] == "google/gemma-3-27b-it:free"
+    assert payload["provider"]["api_key"] == "sk-or-test-ke"
+    # context_window is intentionally NOT set — the chat detects it.
+    assert "context_window" not in payload["provider"]
+
+
+def test_provider_step_left_from_input_returns_to_toggle_then_back(
+    temp_config_dir: Path,
+) -> None:
+    wizard = SuccessorSetup()
+    wizard._enter_step(Step.PROVIDER)
+    wizard._handle_provider(KeyEvent(char=" "))  # toggle to openrouter
+    wizard._handle_provider(KeyEvent(key=Key.DOWN))
+    assert wizard._cursors[Step.PROVIDER] == 1
+    # Left from a focused input should pull back to row 0, NOT retreat to INTRO
+    wizard._handle_provider(KeyEvent(key=Key.LEFT))
+    assert wizard.current_step == Step.PROVIDER
+    assert wizard._cursors[Step.PROVIDER] == 0
+    # Left from row 0 retreats to INTRO
+    wizard._handle_provider(KeyEvent(key=Key.LEFT))
+    assert wizard.current_step == Step.INTRO
 
 
 def test_snapshot_review_shows_summary(temp_config_dir: Path) -> None:

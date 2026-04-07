@@ -189,9 +189,10 @@ class Step(Enum):
     MODE = 3
     DENSITY = 4
     INTRO = 5
-    TOOLS = 6
-    REVIEW = 7
-    SAVED = 8  # terminal screen — auto-advances into the chat
+    PROVIDER = 6
+    TOOLS = 7
+    REVIEW = 8
+    SAVED = 9  # terminal screen — auto-advances into the chat
 
 
 # Display labels for the sidebar
@@ -202,6 +203,7 @@ _STEP_LABELS: dict[Step, str] = {
     Step.MODE: "mode",
     Step.DENSITY: "density",
     Step.INTRO: "intro",
+    Step.PROVIDER: "provider",
     Step.TOOLS: "tools",
     Step.REVIEW: "review",
     Step.SAVED: "saved",
@@ -215,6 +217,7 @@ _SIDEBAR_STEPS: tuple[Step, ...] = (
     Step.MODE,
     Step.DENSITY,
     Step.INTRO,
+    Step.PROVIDER,
     Step.TOOLS,
     Step.REVIEW,
 )
@@ -249,6 +252,35 @@ class _WizardState:
     density: str = "normal"
     intro_animation: str | None = None
     enabled_tools: tuple[str, ...] = field(default_factory=default_enabled_tools)
+    # Provider configuration (collected by Step.PROVIDER):
+    #   provider_kind  — "llamacpp" (local) or "openrouter" (hosted)
+    #   provider_api_key — only used when provider_kind == "openrouter"
+    #   provider_model — model id; for openrouter, the OpenRouter slug
+    #                    (e.g. "openai/gpt-oss-20b:free"); for llamacpp,
+    #                    a label string ("local" by default — llama.cpp
+    #                    ignores it)
+    provider_kind: str = "llamacpp"
+    provider_api_key: str = ""
+    provider_model: str = "openai/gpt-oss-20b:free"
+
+    def _build_provider_dict(self) -> dict:
+        """Construct the provider config dict from the wizard state.
+
+        Local llamacpp uses the historical default. OpenRouter slots in
+        the OpenRouter base_url, the user's api_key, and the model slug
+        the user picked. context_window is intentionally NOT set —
+        the chat detects it from the provider on first use.
+        """
+        if self.provider_kind == "openrouter":
+            return {
+                "type": "openai_compat",
+                "base_url": "https://openrouter.ai/api/v1",
+                "model": self.provider_model.strip() or "openai/gpt-oss-20b:free",
+                "api_key": self.provider_api_key.strip(),
+                "max_tokens": 4096,
+                "temperature": 0.7,
+            }
+        return dict(_DEFAULT_PROVIDER)
 
     def to_profile(self) -> Profile:
         """Build the final Profile dataclass from the user's choices."""
@@ -259,7 +291,7 @@ class _WizardState:
             display_mode=self.display_mode,
             density=self.density,
             system_prompt=_DEFAULT_SYSTEM_PROMPT,
-            provider=dict(_DEFAULT_PROVIDER),
+            provider=self._build_provider_dict(),
             skills=(),
             tools=tuple(self.enabled_tools),
             tool_config={},
@@ -275,7 +307,7 @@ class _WizardState:
             "display_mode": self.display_mode,
             "density": self.density,
             "system_prompt": _DEFAULT_SYSTEM_PROMPT,
-            "provider": dict(_DEFAULT_PROVIDER),
+            "provider": self._build_provider_dict(),
             "skills": [],
             "tools": list(self.enabled_tools),
             "tool_config": {},
@@ -358,6 +390,7 @@ class SuccessorSetup(App):
             Step.MODE: 0,
             Step.DENSITY: 1,  # default to "normal"
             Step.INTRO: 0,
+            Step.PROVIDER: 0,  # 0 = type toggle, 1 = api_key, 2 = model
             Step.TOOLS: 0,
         }
 
@@ -580,6 +613,7 @@ class SuccessorSetup(App):
             Step.MODE: self._handle_mode,
             Step.DENSITY: self._handle_density,
             Step.INTRO: self._handle_intro,
+            Step.PROVIDER: self._handle_provider,
             Step.TOOLS: self._handle_tools,
             Step.REVIEW: self._handle_review,
         }
@@ -729,6 +763,96 @@ class SuccessorSetup(App):
             cursor = 1 - cursor
             self._cursors[Step.INTRO] = cursor
             self.state.intro_animation = _INTRO_OPTIONS[cursor][0]
+
+    def _handle_provider(self, event: KeyEvent) -> None:
+        """Provider step: pick local llama.cpp or OpenRouter.
+
+        Three input rows:
+          row 0 — provider type toggle (llama.cpp / openrouter)
+          row 1 — api_key field          (only used by openrouter)
+          row 2 — model name field       (only used by openrouter)
+
+        ↑↓ moves focus between visible rows. When focus is on row 0,
+        Space cycles the provider type. When focus is on rows 1/2,
+        printable input fills the field and Backspace deletes. → and
+        Enter advance to TOOLS once any required fields are non-empty.
+        """
+        focus = self._cursors[Step.PROVIDER]
+        is_or = self.state.provider_kind == "openrouter"
+        max_focus = 2 if is_or else 0  # llamacpp has only the toggle row
+
+        if event.key == Key.UP:
+            self._cursors[Step.PROVIDER] = max(0, focus - 1)
+            return
+        if event.key == Key.DOWN:
+            self._cursors[Step.PROVIDER] = min(max_focus, focus + 1)
+            return
+        if event.key == Key.LEFT:
+            # On the toggle row, ← retreats. On the input rows, ←
+            # would clobber typed characters; treat it as "go back to
+            # the toggle row" instead.
+            if focus == 0:
+                self._retreat_step()
+            else:
+                self._cursors[Step.PROVIDER] = 0
+            return
+        if event.key == Key.RIGHT or event.key == Key.ENTER:
+            # Validate before advancing. OpenRouter needs an api_key.
+            if is_or and not self.state.provider_api_key.strip():
+                self._cursors[Step.PROVIDER] = 1
+                self._glow = _ValidationGlow(
+                    field="provider_api_key",
+                    message="api key required for openrouter",
+                    started_at=self.elapsed,
+                )
+                return
+            if is_or and not self.state.provider_model.strip():
+                self._cursors[Step.PROVIDER] = 2
+                self._glow = _ValidationGlow(
+                    field="provider_model",
+                    message="model name required for openrouter",
+                    started_at=self.elapsed,
+                )
+                return
+            self._advance_step()
+            return
+
+        # Toggle row: Space cycles type
+        if focus == 0 and event.is_char and event.char == " ":
+            self.state.provider_kind = (
+                "openrouter" if self.state.provider_kind == "llamacpp" else "llamacpp"
+            )
+            return
+
+        # Input rows: only relevant when openrouter is selected.
+        if not is_or:
+            return
+
+        if focus == 1:
+            # api_key field
+            if event.key == Key.BACKSPACE:
+                if self.state.provider_api_key:
+                    self.state.provider_api_key = self.state.provider_api_key[:-1]
+                return
+            if event.is_char and event.char and not event.is_ctrl and not event.is_alt:
+                for ch in event.char:
+                    if ord(ch) >= 0x20 and ch != " ":
+                        self.state.provider_api_key += ch
+                return
+
+        if focus == 2:
+            # model field
+            if event.key == Key.BACKSPACE:
+                if self.state.provider_model:
+                    self.state.provider_model = self.state.provider_model[:-1]
+                return
+            if event.is_char and event.char and not event.is_ctrl and not event.is_alt:
+                for ch in event.char:
+                    # Allow alphanumerics and the few punctuation chars
+                    # used in model slugs (/, -, ., :, _).
+                    if ord(ch) >= 0x20 and ch != " ":
+                        self.state.provider_model += ch
+                return
 
     def _handle_tools(self, event: KeyEvent) -> None:
         """Tools step: space toggles the cursor'd tool on/off.
@@ -1023,6 +1147,8 @@ class SuccessorSetup(App):
             self._paint_density(grid, theme, body_left, body_top, body_right, body_bottom)
         elif self.current_step == Step.INTRO:
             self._paint_intro(grid, theme, body_left, body_top, body_right, body_bottom)
+        elif self.current_step == Step.PROVIDER:
+            self._paint_provider(grid, theme, body_left, body_top, body_right, body_bottom)
         elif self.current_step == Step.TOOLS:
             self._paint_tools(grid, theme, body_left, body_top, body_right, body_bottom)
         elif self.current_step == Step.REVIEW:
@@ -1038,6 +1164,7 @@ class SuccessorSetup(App):
             Step.MODE: "choose dark or light",
             Step.DENSITY: "choose layout density",
             Step.INTRO: "intro animation",
+            Step.PROVIDER: "model provider",
             Step.TOOLS: "enable tools",
             Step.REVIEW: "review and save",
             Step.SAVED: "saved",
@@ -1417,6 +1544,172 @@ class SuccessorSetup(App):
             )
             paint_text(grid, line, left, row_y, style=line_style)
 
+    def _paint_provider(
+        self,
+        grid: Grid,
+        theme: ThemeVariant,
+        left: int,
+        top: int,
+        right: int,
+        bottom: int,
+    ) -> None:
+        """Provider step painter.
+
+        Layout:
+            which model provider should this profile talk to?
+            ↑↓ move · space toggles type · → next
+
+            ▸ [▣] local llama.cpp     uses http://localhost:8080
+              [ ] openrouter            api key + model name required
+
+            api_key  ••••••••••••       (only when openrouter selected)
+            model    openai/gpt-oss-20b:free
+
+        The active row is highlighted with a ▸ glyph and accent color.
+        Inputs render in code-tinted boxes so they're visually distinct
+        from selectable rows. The api_key field renders as bullets
+        unless the cursor is on it (then plaintext while editing).
+        """
+        prompt = "which model provider should this profile talk to?"
+        paint_text(grid, prompt, left, top, style=Style(fg=theme.fg, bg=theme.bg))
+        helper = "↑↓ move · space toggles type · → next"
+        paint_text(
+            grid, helper, left, top + 1,
+            style=Style(fg=theme.fg_dim, bg=theme.bg, attrs=ATTR_DIM | ATTR_ITALIC),
+        )
+
+        focus = self._cursors[Step.PROVIDER]
+        is_or = self.state.provider_kind == "openrouter"
+
+        # Toggle row (focus = 0)
+        toggle_y = top + 3
+        sel_glyph = "▸" if focus == 0 else " "
+        for i, (kind, label, hint) in enumerate(
+            (
+                ("llamacpp", "local llama.cpp", "uses http://localhost:8080"),
+                ("openrouter", "openrouter", "api key + model name required"),
+            )
+        ):
+            row_y = toggle_y + i
+            if row_y >= bottom:
+                break
+            is_picked = self.state.provider_kind == kind
+            check = "[▣]" if is_picked else "[ ]"
+            cursor_glyph = sel_glyph if i == 0 else " "
+            line = f"{cursor_glyph} {check}  {label}"
+            line_style = Style(
+                fg=theme.accent if (focus == 0 and is_picked) else theme.fg,
+                bg=theme.bg,
+                attrs=ATTR_BOLD if is_picked else 0,
+            )
+            paint_text(grid, line, left, row_y, style=line_style)
+            paint_text(
+                grid, hint, left + len(line) + 4, row_y,
+                style=Style(fg=theme.fg_dim, bg=theme.bg, attrs=ATTR_DIM | ATTR_ITALIC),
+            )
+
+        # Input rows for openrouter (focus = 1, 2)
+        if not is_or:
+            # llamacpp picked — leave the rest blank but show one helpful line
+            note_y = toggle_y + 4
+            if note_y < bottom:
+                paint_text(
+                    grid,
+                    "press → to continue. nothing else to configure.",
+                    left, note_y,
+                    style=Style(fg=theme.fg_dim, bg=theme.bg, attrs=ATTR_DIM | ATTR_ITALIC),
+                )
+            return
+
+        # api_key field
+        api_y = toggle_y + 3
+        if api_y < bottom:
+            label = "api_key"
+            label_w = max(8, len(label))
+            label_style = Style(
+                fg=theme.accent if focus == 1 else theme.fg_dim,
+                bg=theme.bg,
+                attrs=ATTR_BOLD if focus == 1 else ATTR_DIM,
+            )
+            cursor_glyph = "▸" if focus == 1 else " "
+            paint_text(grid, cursor_glyph, left, api_y, style=label_style)
+            paint_text(grid, label.rjust(label_w), left + 2, api_y, style=label_style)
+
+            # Render the value: bullets when not focused, plaintext when focused
+            value = self.state.provider_api_key
+            if focus == 1:
+                display = value
+            else:
+                display = "•" * min(len(value), 24) if value else "(unset)"
+            value_x = left + 2 + label_w + 2
+            value_style = Style(
+                fg=theme.fg if focus == 1 else theme.fg_dim,
+                bg=theme.bg_input,
+            )
+            avail_w = max(0, right - value_x - 2)
+            display = display[:avail_w] if avail_w > 0 else ""
+            # Pad to a fixed width so the input box has a visible extent
+            box_w = max(40, len(display) + 4)
+            box_w = min(box_w, avail_w)
+            if box_w > 0:
+                fill_region(grid, value_x, api_y, box_w, 1, style=Style(bg=theme.bg_input))
+                paint_text(grid, display, value_x + 1, api_y, style=value_style)
+                # Cursor shows when this row is focused
+                if focus == 1:
+                    cur_x = value_x + 1 + len(display)
+                    if cur_x < value_x + box_w - 1:
+                        cursor_visible = (int(self.elapsed * 2) % 2) == 0
+                        if cursor_visible:
+                            grid.set(api_y, cur_x, Cell(" ", Style(fg=theme.bg_input, bg=theme.fg)))
+
+        # model field
+        model_y = api_y + 1
+        if model_y < bottom:
+            label = "model"
+            label_w = max(8, len("api_key"))
+            label_style = Style(
+                fg=theme.accent if focus == 2 else theme.fg_dim,
+                bg=theme.bg,
+                attrs=ATTR_BOLD if focus == 2 else ATTR_DIM,
+            )
+            cursor_glyph = "▸" if focus == 2 else " "
+            paint_text(grid, cursor_glyph, left, model_y, style=label_style)
+            paint_text(grid, label.rjust(label_w), left + 2, model_y, style=label_style)
+
+            value = self.state.provider_model or "(unset)"
+            value_x = left + 2 + label_w + 2
+            value_style = Style(
+                fg=theme.fg if focus == 2 else theme.fg_dim,
+                bg=theme.bg_input,
+            )
+            avail_w = max(0, right - value_x - 2)
+            display = value[:avail_w] if avail_w > 0 else ""
+            box_w = max(40, len(display) + 4)
+            box_w = min(box_w, avail_w)
+            if box_w > 0:
+                fill_region(grid, value_x, model_y, box_w, 1, style=Style(bg=theme.bg_input))
+                paint_text(grid, display, value_x + 1, model_y, style=value_style)
+                if focus == 2:
+                    cur_x = value_x + 1 + len(display)
+                    if cur_x < value_x + box_w - 1:
+                        cursor_visible = (int(self.elapsed * 2) % 2) == 0
+                        if cursor_visible:
+                            grid.set(model_y, cur_x, Cell(" ", Style(fg=theme.bg_input, bg=theme.fg)))
+
+        # Hint footer
+        hint_y = model_y + 2
+        if hint_y < bottom:
+            if self.state.provider_api_key.strip() and self.state.provider_model.strip():
+                hint = "press → to continue"
+                color = theme.accent
+            else:
+                hint = "fill api_key and model, then press →"
+                color = theme.accent_warm
+            paint_text(
+                grid, hint, left, hint_y,
+                style=Style(fg=color, bg=theme.bg, attrs=ATTR_BOLD),
+            )
+
     def _paint_tools(
         self,
         grid: Grid,
@@ -1517,6 +1810,10 @@ class SuccessorSetup(App):
             tools_label = ", ".join(self.state.enabled_tools)
         else:
             tools_label = "(none — chat-only)"
+        if self.state.provider_kind == "openrouter":
+            provider_summary = f"openrouter · {self.state.provider_model}"
+        else:
+            provider_summary = "local llama.cpp at http://localhost:8080"
         rows_data = [
             ("name", self.state.name),
             ("theme", self.state.theme_name),
@@ -1524,7 +1821,7 @@ class SuccessorSetup(App):
             ("density", self.state.density),
             ("intro animation", self.state.intro_animation or "(none)"),
             ("system prompt", "default — edit JSON file to customize"),
-            ("provider", "llamacpp localhost:8080 — edit JSON to change"),
+            ("provider", provider_summary),
             ("skills", "(none — phase 5 not yet wired)"),
             ("tools", tools_label),
         ]

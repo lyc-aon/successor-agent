@@ -160,6 +160,60 @@ class OpenAICompatClient:
         except (urllib.error.URLError, urllib.error.HTTPError, OSError, json.JSONDecodeError):
             return False
 
+    def detect_context_window(self) -> int | None:
+        """Probe /v1/models and return the configured model's context length.
+
+        OpenRouter (and any OpenAI-compat endpoint that follows the
+        OpenRouter convention) exposes per-model `context_length` in
+        the `/v1/models` listing — either at the top level or under
+        `top_provider.context_length`. This method finds the row whose
+        `id` matches `self.model` and returns whichever context_length
+        field is present.
+
+        Result is cached on the instance after the first probe so the
+        chat doesn't pay the round-trip more than once. Returns None
+        if the server is unreachable, the model isn't in the listing,
+        or the listing has no `context_length` field (e.g. OpenAI's
+        official endpoint, which doesn't expose it). Callers fall back
+        to the profile override or the hardcoded default.
+        """
+        if hasattr(self, "_cached_context_window"):
+            return self._cached_context_window
+        result: int | None = None
+        url = f"{self._api_root()}/models"
+        headers = {}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            # Slightly longer timeout than /health because the listing
+            # can be hundreds of KB on OpenRouter.
+            with urllib.request.urlopen(req, timeout=5.0) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode("utf-8", errors="replace"))
+                    models = data.get("data") if isinstance(data, dict) else None
+                    if isinstance(models, list):
+                        for m in models:
+                            if not isinstance(m, dict):
+                                continue
+                            if m.get("id") != self.model:
+                                continue
+                            # Top-level context_length is the OpenRouter
+                            # convention; top_provider.context_length is
+                            # the same number nested. Some providers
+                            # only populate one or the other.
+                            ctx = m.get("context_length")
+                            if not isinstance(ctx, int) or ctx <= 0:
+                                tp = m.get("top_provider") or {}
+                                ctx = tp.get("context_length") if isinstance(tp, dict) else None
+                            if isinstance(ctx, int) and ctx > 0:
+                                result = ctx
+                            break
+        except Exception:
+            pass
+        self._cached_context_window = result
+        return result
+
 
 class _AuthenticatedChatStream(ChatStream):
     """ChatStream variant that injects an Authorization header.

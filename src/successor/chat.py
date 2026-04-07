@@ -3118,15 +3118,46 @@ class SuccessorChat(App):
             self._cached_token_counter = TokenCounter(endpoint=self.client)
         return self._cached_token_counter
 
-    def _agent_budget(self) -> ContextBudget:
-        """Build a ContextBudget from the profile's window setting.
+    def _resolve_context_window(self) -> int:
+        """Resolve the active context window with provider-aware detection.
 
-        Default: window=262_144 (a 256K mid-grade model). Profiles can
-        override via provider.context_window. Headroom buffers are static
-        defaults for now — they could move into the profile later.
+        Precedence:
+          1. profile.provider.context_window  (explicit user override)
+          2. self.client.detect_context_window()  (lazy probe — llama.cpp
+             /props or OpenRouter-style /v1/models per-model context_length,
+             cached on the client instance after the first round trip)
+          3. CONTEXT_MAX (262_144) as the historical fallback
+
+        Cached on the chat instance after the first resolution so the
+        per-frame footer doesn't pay any overhead in the steady state.
         """
+        if hasattr(self, "_cached_resolved_window"):
+            return self._cached_resolved_window
         provider_cfg = self.profile.provider or {}
-        window = int(provider_cfg.get("context_window", 262_144))
+        override = provider_cfg.get("context_window")
+        if isinstance(override, int) and override > 0:
+            window = override
+        else:
+            detected = None
+            try:
+                detect = getattr(self.client, "detect_context_window", None)
+                if callable(detect):
+                    detected = detect()
+            except Exception:
+                detected = None
+            window = detected if isinstance(detected, int) and detected > 0 else CONTEXT_MAX
+        self._cached_resolved_window = window
+        return window
+
+    def _agent_budget(self) -> ContextBudget:
+        """Build a ContextBudget from the resolved context window.
+
+        Window comes from _resolve_context_window() which consults the
+        profile override first, then probes the provider, then falls
+        back to the hardcoded default. Headroom buffers are static for
+        now — they could move into the profile later.
+        """
+        window = self._resolve_context_window()
         return ContextBudget(
             window=window,
             warning_buffer=max(8_000, window // 16),
@@ -3699,7 +3730,12 @@ class SuccessorChat(App):
             or "temporary failure in name resolution" in lower
         )
         is_unreachable = "network is unreachable" in lower
-        if is_conn_refused or is_dns or is_unreachable:
+        is_timeout = (
+            "timed out" in lower
+            or "timeout" in lower
+            or "the read operation timed out" in lower
+        )
+        if is_conn_refused or is_dns or is_unreachable or is_timeout:
             return (
                 f"[no server at {base_url}]\n"
                 f"\n"
@@ -5863,9 +5899,10 @@ class SuccessorChat(App):
         else:
             used = self._fallback_token_count()
 
-        # Window: profile-driven, falls back to CONTEXT_MAX
-        provider_cfg = self.profile.provider or {}
-        window = int(provider_cfg.get("context_window", CONTEXT_MAX))
+        # Window: profile override → provider auto-detect → CONTEXT_MAX.
+        # Cached on the chat after the first resolution so the per-frame
+        # painter doesn't pay any overhead.
+        window = self._resolve_context_window()
         used = max(0, min(used, window))
         pct = used / window if window > 0 else 0.0
 
