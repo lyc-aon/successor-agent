@@ -3243,100 +3243,11 @@ class SuccessorChat(App):
                 break
             self._paint_chat_row(grid, body_x, y, body_width, row, theme)
 
-        # ─── Compaction WAITING overlay ───
-        # During the indefinite wait between fold and materialize,
-        # paint a centered spinner + status indicator. The chat area
-        # is fully dimmed (snapshot rendered with fade_alpha=0) so
-        # the spinner stands alone as the visual focus.
-        if self._compaction_anim is not None:
-            now = time.monotonic()
-            phase, phase_t = self._compaction_anim.phase_at(now)
-            if phase == "waiting":
-                self._paint_compaction_waiting_overlay(
-                    grid, top, bottom, body_x, body_width, theme,
-                    elapsed_s=phase_t,
-                )
-
-    def _paint_compaction_waiting_overlay(
-        self,
-        grid: Grid,
-        top: int,
-        bottom: int,
-        body_x: int,
-        body_width: int,
-        theme: ThemeVariant,
-        *,
-        elapsed_s: float,
-    ) -> None:
-        """Paint the spinner + status indicator during the WAITING phase.
-
-        Layout (centered in the chat region):
-            ┌─────────────────────────────────────────┐
-            │  ⠋ compacting 165 rounds (40,052 → ?)   │
-            │     elapsed: 00:42                      │
-            │                                         │
-            │     Ctrl+G to cancel                    │
-            └─────────────────────────────────────────┘
-
-        The spinner animates at ~10 Hz via _compaction_anim.spinner_frame.
-        """
-        anim = self._compaction_anim
-        if anim is None:
-            return
-
-        chat_h = bottom - top
-        if chat_h < 6 or body_width < 30:
-            return
-
-        # Center vertically
-        box_w = min(body_width - 4, 60)
-        box_h = 5
-        center_y = top + chat_h // 2 - box_h // 2
-        center_x = body_x + (body_width - box_w) // 2
-
-        # Background fill — darker bg to draw the eye
-        fill_region(
-            grid, center_x, center_y, box_w, box_h,
-            style=Style(bg=theme.bg_input),
-        )
-
-        # Border (subtle) using accent_warm
-        border_style = Style(fg=theme.accent_warm, bg=theme.bg_input, attrs=ATTR_BOLD)
-        paint_box(
-            grid, center_x, center_y, box_w, box_h,
-            style=border_style,
-            fill_style=Style(fg=theme.fg, bg=theme.bg_input),
-        )
-
-        # Spinner + status line
-        spinner = anim.spinner_frame(time.monotonic())
-        rounds_text = f"{anim.rounds_summarized} rounds"
-        if anim.pre_compact_tokens > 0:
-            tokens_text = f" · {anim.pre_compact_tokens:,} tokens"
-        else:
-            tokens_text = ""
-        status = f" {spinner}  compacting {rounds_text}{tokens_text} "
-        # Truncate to fit
-        if len(status) > box_w - 2:
-            status = status[:box_w - 2]
-        sx = center_x + (box_w - len(status)) // 2
-        sy = center_y + 1
-        paint_text(
-            grid, status, sx, sy,
-            style=Style(fg=theme.accent_warm, bg=theme.bg_input, attrs=ATTR_BOLD),
-        )
-
-        # Elapsed time + cancel hint
-        m, s = divmod(int(elapsed_s), 60)
-        elapsed_text = f" elapsed: {m:02d}:{s:02d}  ·  Ctrl+G to cancel "
-        if len(elapsed_text) > box_w - 2:
-            elapsed_text = elapsed_text[:box_w - 2]
-        ex = center_x + (box_w - len(elapsed_text)) // 2
-        ey = center_y + 3
-        paint_text(
-            grid, elapsed_text, ex, ey,
-            style=Style(fg=theme.fg_dim, bg=theme.bg_input, attrs=ATTR_DIM),
-        )
+        # NB: there is no centered "compacting" overlay anymore. The
+        # chat content stays fully visible during compaction so the
+        # user can scroll, search, and read freely while the model
+        # generates the summary in the background. The "compaction
+        # in progress" signal lives in the static footer instead.
 
     # ─── Paint a single _RenderedRow ───
 
@@ -3666,21 +3577,23 @@ class SuccessorChat(App):
                 # normal painting of self.messages
                 self._compaction_anim = None
             elif phase in ("anticipation", "fold", "waiting"):
-                # All three render the snapshot. During fold, apply
-                # progressive fade. During waiting, hold at fully faded
-                # (the spinner overlay handles the visual focus).
-                # During anticipation, no fade — just the warm glow.
-                if phase == "fold":
-                    fade_alpha = 1.0 - ease_out_cubic(phase_t)
-                elif phase == "waiting":
-                    fade_alpha = 0.0  # snapshot fully invisible
-                else:
-                    fade_alpha = 1.0
+                # The chat stays FULLY READABLE during waiting. The
+                # snapshot is the canonical "what the chat looked
+                # like before compaction started" — we paint it at
+                # full opacity so the user can scroll, search, and
+                # read freely while the model generates the summary
+                # in the background. The "compaction in progress"
+                # signal lives in the static footer (a small badge
+                # next to the context bar), NOT as a blocking overlay.
+                #
+                # This is the harness's strongpoint: every cell of
+                # past content is mutable data the user can interact
+                # with. Walling it off during a forced idle moment
+                # would be the opposite of what the architecture
+                # is good at.
                 return self._build_rows_from_messages(
                     self._compaction_anim.pre_compact_snapshot,
                     body_width, theme,
-                    global_fade_alpha=fade_alpha,
-                    anticipation_glow=(phase == "anticipation"),
                 )
             else:
                 # materialize / reveal / toast — paint the post-compact
@@ -4615,22 +4528,42 @@ class SuccessorChat(App):
             state_badge = " ◉ COMPACT "
         elif state == "blocking":
             state_badge = " ⚠ BLOCKED "
+        # Compacting indicator: tiny spinner + elapsed time while a
+        # /compact is in progress in the background. The chat content
+        # stays fully readable during compaction; this badge is the
+        # only visual signal that something's happening behind the
+        # scenes. Disappears once the result lands and the materialize
+        # animation begins.
+        compacting_badge = ""
+        if self._compaction_worker is not None and self._compaction_anim is not None:
+            spinner_idx = int(self.elapsed * 10) % len(SPINNER_FRAMES)
+            elapsed_compact = self._compaction_worker.elapsed()
+            m, s = divmod(int(elapsed_compact), 60)
+            n_rounds = self._compaction_anim.rounds_summarized
+            compacting_badge = (
+                f" {SPINNER_FRAMES[spinner_idx]} compacting "
+                f"{n_rounds}r · {m:02d}:{s:02d} "
+            )
         # Warming indicator: tiny spinner when the cache pre-warmer is
-        # running in the background. Quiet but visible — tells the user
-        # "the harness is doing background work that will make the next
-        # message faster".
+        # running in the background. Disappears when warming completes.
         warming_badge = ""
         if self._cache_warmer is not None and self._cache_warmer.is_running():
             spinner_idx = int(self.elapsed * 10) % len(SPINNER_FRAMES)
             warming_badge = f" {SPINNER_FRAMES[spinner_idx]} warming "
-        right_label = f"{warming_badge}{state_badge} {pct * 100:5.2f}%  {self.client.model[:20]} "
+        right_label = (
+            f"{compacting_badge}{warming_badge}{state_badge} "
+            f"{pct * 100:5.2f}%  {self.client.model[:20]} "
+        )
         label_style = Style(fg=theme.fg_dim, bg=theme.bg_footer, attrs=ATTR_DIM)
 
-        # Right-label color depends on state — warm in autocompact, warn in blocking
+        # Right-label color depends on state — warm in autocompact,
+        # warn in blocking, accent_warm if compacting/warming is active
         if state == "blocking":
             right_fg = theme.accent_warn
         elif state == "autocompact":
             right_fg = lerp_rgb(theme.accent_warm, theme.accent_warn, pulse)
+        elif compacting_badge or warming_badge:
+            right_fg = theme.accent_warm
         elif state == "warning":
             right_fg = theme.accent_warm
         else:

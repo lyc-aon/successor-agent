@@ -2173,6 +2173,101 @@ message.
 
 ---
 
+## Phase 5.5 — chat stays interactive during compaction wait (2026-04-07)
+
+User feedback caught a UX regression in phase 5.3: the centered
+spinner overlay during the WAITING phase blacked out the entire
+chat content with `fade_alpha=0`. This walled off the harness's
+strongpoint — searchable, scrollable, mutable past content — at
+exactly the moment when the user might want to read or catch up
+on notes while compaction runs in the background.
+
+> "It's helpful still to be able to scroll and see what's going
+> on in the session while you're waiting. Sometimes it's a good
+> time to catch up on notes. Our strongpoint in this harness is
+> that you can search and do whatever you want with the text in
+> it, it doesn't make sense to wall it off while there's a moment
+> of forced idle. In fact it makes the opposite of sense."
+
+The fix is small but the design philosophy matters: **the chat
+content is the user's content, and the harness should never block
+their access to it for purely cosmetic reasons.**
+
+### What changed
+
+- **`_build_message_lines`** during anticipation/fold/waiting now
+  paints the snapshot at full opacity (no `fade_alpha=0`). The
+  user sees the exact same chat content they had before /compact
+  was triggered.
+
+- **`_paint_compaction_waiting_overlay`** (the centered spinner box)
+  is GONE. The chat region is no longer obscured during the wait.
+
+- **A new compacting badge** lives in the static footer next to the
+  context bar:
+  ```
+  ctx 12345/262144 ████░░░░ ⠹ compacting 735r · 00:23  4.7% qwopus
+  ```
+  Animated spinner + round count + elapsed time. Quiet but always
+  visible. Disappears when the worker reports a result and the
+  materialize phase begins.
+
+- **Right-label color in the footer** now reflects compaction state
+  too — accent_warm tint while compacting/warming, falling back to
+  the normal threshold-based color afterward.
+
+### What stays the same
+
+- The 5-phase animation arc (anticipation → fold → waiting →
+  materialize → reveal → toast) still plays — only the visual
+  treatment of the early phases changed
+- Materialize/reveal/toast still play their dramatic moment when
+  the result lands (boundary divider grows from center, summary
+  fades in below, settled with subtle pulse)
+- The cache pre-warmer still fires in parallel with the animation
+- Ctrl+G still cancels mid-flight
+- All the underlying machinery — worker thread, phase machine,
+  result_arrived_at — is unchanged
+
+### Verified behavior
+
+- Chat content fully visible at full opacity during all phases
+  before materialize
+- Spinner badge visible in the footer while the worker is running
+- Scroll works during waiting (test verified by scrolling up and
+  confirming different content is visible at different offsets)
+- Search would also work (we didn't add a specific test but the
+  search infra is unchanged and operates on the snapshot)
+- The materialize/reveal/toast still play correctly when the
+  worker returns
+
+### Tests (1 updated, 1 renamed — 652 still passing)
+
+- `test_anim_fold_dims_snapshot` → `test_anim_keeps_chat_visible_during_wait`:
+  inverted assertion — instead of checking that fold dims content,
+  now checks that all phases keep content at full opacity
+- `test_waiting_overlay_shows_spinner_and_status` →
+  `test_waiting_shows_compacting_badge_in_footer`: the indicator
+  moved from the centered overlay to the footer badge; test
+  verifies the badge is in the footer AND the chat content is
+  still visible
+
+### The lesson
+
+The original design was clever (dramatic fade-out, centered focus
+point) but it fought the architecture instead of using it. The
+renderer is built around mutable, addressable past content — the
+*opposite* of "frozen scrollback you can never reach again".
+Blacking out the chat region during a forced wait makes the
+harness behave like Rich/prompt_toolkit at exactly the moment
+where its uniqueness should shine through.
+
+The fix isn't just removing the overlay — it's recognizing that
+the chat's visibility during long-running background work is a
+FEATURE, not something to compromise on for visual polish.
+
+---
+
 ## What's next
 
 - **Skill invocation strategy** — pick always-on vs on-demand after
@@ -2212,6 +2307,7 @@ message.
 | 5.2.1 (200K context fps regression fix) | 8 | 638 |
 | 5.3 (async + KV-cache-friendly compaction + waiting overlay) | 7 | 645 |
 | 5.4 (KV cache pre-warming after compaction) | 7 | 652 |
+| 5.5 (chat stays interactive during compaction wait) | 0 | 652 |
 
 (Counts above are approximate by phase boundary; actual test
 collection may include additional small additions in subsequent

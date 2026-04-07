@@ -284,55 +284,50 @@ def test_anim_anticipation_paints_snapshot(temp_config_dir: Path) -> None:
     assert "rounds" not in plain or "saved" not in plain
 
 
-def test_anim_fold_dims_snapshot(temp_config_dir: Path) -> None:
-    """During fold, snapshot characters should be present in the grid
-    but with foreground colors trending toward bg."""
-    chat, _ = _build_chat_with_anim(elapsed=0.05)  # anticipation
-    g_anticipation = Grid(30, 100)
-    chat.on_tick(g_anticipation)
-
-    chat, _ = _build_chat_with_anim(elapsed=0.9)  # mid-fold
-    g_mid_fold = Grid(30, 100)
-    chat.on_tick(g_mid_fold)
-
-    chat, _ = _build_chat_with_anim(elapsed=1.45)  # near end of fold
-    g_end_fold = Grid(30, 100)
-    chat.on_tick(g_end_fold)
-
-    # Find a content cell ("q") in each grid and check the fg → bg distance
-    theme = chat._current_variant()
-    bg = theme.bg
-
-    def _content_cell_fg(g: Grid) -> int | None:
+def test_anim_keeps_chat_visible_during_wait(temp_config_dir: Path) -> None:
+    """Phase 5.5 design change: the chat content stays FULLY VISIBLE
+    during anticipation/fold/waiting phases. The user can scroll,
+    search, and read the snapshot freely while the model generates
+    the summary in the background. The "compaction in progress"
+    signal lives in the static footer, not as a content fade.
+    """
+    # All three phases should render content at full opacity
+    for label, elapsed in [
+        ("anticipation", 0.05),
+        ("mid-fold", 0.9),
+        ("end-fold", 1.45),
+    ]:
+        chat, _ = _build_chat_with_anim(elapsed=elapsed)
+        g = Grid(30, 100)
+        chat.on_tick(g)
+        plain = render_grid_to_plain(g)
+        # Snapshot content visible (the "q0 synthetic" / "a0 response" pattern)
+        assert "q0 synthetic" in plain, f"snapshot should be visible during {label}"
+        # And the cell color should be at full opacity, not faded toward bg
+        theme = chat._current_variant()
+        bg = theme.bg
+        fg_q = None
         for ry in range(g.rows):
             for cx in range(g.cols):
                 cell = g.at(ry, cx)
                 if cell.char == "q":
-                    return cell.style.fg
-        return None
-
-    fg_anticipation = _content_cell_fg(g_anticipation)
-    fg_mid = _content_cell_fg(g_mid_fold)
-    fg_end = _content_cell_fg(g_end_fold)
-
-    assert fg_anticipation is not None
-    assert fg_mid is not None
-    assert fg_end is not None
-
-    def _dist(c1: int, c2: int) -> int:
-        return (
-            abs((c1 >> 16 & 0xFF) - (c2 >> 16 & 0xFF))
-            + abs((c1 >> 8 & 0xFF) - (c2 >> 8 & 0xFF))
-            + abs((c1 & 0xFF) - (c2 & 0xFF))
+                    fg_q = cell.style.fg
+                    break
+            if fg_q is not None:
+                break
+        assert fg_q is not None, f"could not find 'q' cell in {label}"
+        # Distance from bg should be substantial (not faded toward bg)
+        def _dist(c1: int, c2: int) -> int:
+            return (
+                abs((c1 >> 16 & 0xFF) - (c2 >> 16 & 0xFF))
+                + abs((c1 >> 8 & 0xFF) - (c2 >> 8 & 0xFF))
+                + abs((c1 & 0xFF) - (c2 & 0xFF))
+            )
+        dist = _dist(fg_q, bg)
+        assert dist > 100, (
+            f"{label}: cell fg=#{fg_q:06x} too close to bg=#{bg:06x} "
+            f"(distance={dist}); chat content should be at full opacity"
         )
-
-    d_anticipation = _dist(fg_anticipation, bg)
-    d_mid = _dist(fg_mid, bg)
-    d_end = _dist(fg_end, bg)
-
-    # Strict ordering: each later phase should be closer to bg
-    assert d_anticipation > d_mid, "anticipation should be more visible than fold mid"
-    assert d_mid > d_end, "fold mid should be more visible than fold end"
 
 
 def test_anim_materialize_shows_growing_divider(temp_config_dir: Path) -> None:
@@ -392,17 +387,27 @@ def test_post_anim_boundary_still_renders(temp_config_dir: Path) -> None:
 # ─── Boundary marker rendering (post-animation steady state) ───
 
 
-def test_waiting_overlay_shows_spinner_and_status(temp_config_dir: Path) -> None:
-    """During the WAITING phase, the chat should show a centered
-    spinner + 'compacting N rounds' status indicator."""
+def test_waiting_shows_compacting_badge_in_footer(temp_config_dir: Path) -> None:
+    """Phase 5.5: the 'compacting' indicator lives in the static
+    footer (not a centered overlay) so the chat content stays
+    fully visible during the wait. The badge shows when both
+    _compaction_worker and _compaction_anim are active.
+    """
+    from successor.chat import _CompactionWorker
+    from successor.agent import (
+        TokenCounter, MessageLog, LogMessage,
+    )
+
     chat = SuccessorChat()
     chat.messages = []
+    chat._cached_token_counter = TokenCounter()
     snapshot = []
     for i in range(4):
         snapshot.append(_Message("user", f"q{i}"))
         snapshot.append(_Message("successor", f"a{i}"))
+    chat.messages = snapshot
 
-    # Arm the animation in waiting state — no result yet
+    # Arm the animation in waiting state
     from successor.chat import (
         _COMPACT_ANTICIPATION_S, _COMPACT_FOLD_S,
     )
@@ -411,21 +416,48 @@ def test_waiting_overlay_shows_spinner_and_status(temp_config_dir: Path) -> None
         started_at=started,
         pre_compact_snapshot=snapshot,
         pre_compact_count=len(snapshot),
-        boundary=None,  # not arrived yet
+        boundary=None,
         summary_text="",
         reason="manual",
-        result_arrived_at=None,  # still waiting
+        result_arrived_at=None,
         pre_compact_tokens=12345,
         rounds_summarized=42,
     )
+    # Stand up a fake worker so the badge condition is met. The
+    # fake log needs at least MIN_ROUNDS_TO_COMPACT rounds or the
+    # worker errors out immediately and gets cleared by on_tick.
+    fake_log = MessageLog(system_prompt="sys")
+    for i in range(8):
+        fake_log.begin_round()
+        fake_log.append_to_current_round(
+            LogMessage(role="user", content=f"q{i}"),
+        )
+        fake_log.append_to_current_round(
+            LogMessage(role="assistant", content=f"a{i}"),
+        )
+    chat._compaction_worker = _CompactionWorker(
+        log=fake_log,
+        client=_MockCompactClient(delay_s=10.0),  # very slow — won't finish
+        counter=TokenCounter(),
+    )
+    chat._compaction_worker.start()
+
     g = Grid(30, 100)
     chat.on_tick(g)
     plain = render_grid_to_plain(g)
-    assert "compacting" in plain
-    assert "42 rounds" in plain
-    assert "12,345 tokens" in plain
-    assert "elapsed" in plain
-    assert "Ctrl+G" in plain
+    footer = plain.split("\n")[-1]
+
+    # Compacting badge in the footer
+    assert "compacting" in footer, f"footer: {footer!r}"
+    assert "42r" in footer
+    # Chat content STILL visible — that's the whole point
+    assert "q0" in plain
+    assert "q1" in plain
+    assert "a0" in plain
+
+    # Cleanup — close the worker so it doesn't keep running after the test
+    chat._compaction_worker.close()
+    chat._compaction_worker = None
 
 
 # ─── Worker thread integration ───
