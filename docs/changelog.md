@@ -2268,6 +2268,144 @@ FEATURE, not something to compromise on for visual polish.
 
 ---
 
+## Phase 5.6 — summary at the bottom + integrated boundary divider (2026-04-07)
+
+User feedback after watching phase 5.5: snapping the scroll up to
+show the boundary at the top of the post-compact log is the wrong
+direction. The user is auto-scrolled to the bottom of the chat
+where they're naturally looking; the agent's summary should appear
+THERE so they can immediately read it and judge its quality.
+
+> "Would it be better if we rendered the agent generated compaction
+> summary at the bottom instead of snapping up to the top and then
+> back down though? It's kind of cool to see the agent summary
+> because then we can also see where it might have shortcomings.
+> Makes it a lot easier to iterate"
+
+Two changes that together completely rethink the post-compaction
+display:
+
+### 1. Display order ≠ API order
+
+`self.messages` is now stored in DISPLAY order:
+```
+[kept_round_1]...[kept_round_K][summary]
+```
+
+The summary is the LAST message in the list, which means it appears
+at the BOTTOM of the chat (since the chat is bottom-anchored). The
+user stays auto-scrolled to the bottom — no snap, no scroll override.
+
+For the model, `_api_ordered_messages()` reorders to API/chronological
+order:
+```
+[summary][kept_round_1]...[kept_round_K]
+```
+
+The model sees the summary FIRST (representing older content that
+was summarized), then the recent rounds in temporal order. Both the
+chat send path (`_submit`) and the agent log adapter (`_to_agent_log`)
+use this reordered view.
+
+Implementation: a single `_api_ordered_messages()` helper that finds
+the summary message and emits `[summary] + [everything else in
+original order]`. No-compaction case is just `list(self.messages)`.
+
+### 2. Boundary divider integrated into summary's render
+
+Previously the boundary divider was a separate `_Message` in
+`self.messages`. With verbose summaries (Qwen sometimes produces
+1.5K char summaries with leaked reasoning), the boundary message
+could get pushed off-screen above the summary, separating them
+visually.
+
+Fix: the boundary divider is no longer a separate message. It's
+rendered as the FIRST ROW of the summary message itself, glued to
+the summary's top edge. They're never separated.
+
+`_from_agent_log` no longer creates a separate boundary `_Message`;
+it just attaches the `boundary_meta` to the summary message.
+
+The row builder's summary case now emits two parts:
+- ROW 1: a `_RenderedRow` with `is_boundary=True`, the `boundary_meta`
+  attached, and `materialize_t` driven by the animation phase
+- ROWS 2+: the summary content rows with the `▼` prefix and
+  `fade_alpha` driven by the reveal phase
+
+The materialize animation still plays (boundary divider grows from
+center outward) and the reveal animation still plays (summary
+fades in below it), but they're guaranteed to be visually adjacent
+because they're part of the same message's render.
+
+### 3. Scroll override removed
+
+The scroll override during materialize/reveal/toast is gone. The
+user stays at `auto_scroll=True` throughout. The boundary +
+summary now live at the bottom of `self.messages` so they're
+naturally in view at the bottom of the chat. No forced snap, no
+position recovery.
+
+### Live E2E result
+
+```
+After /burn 4000: 31 messages
+Firing /compact...
+_submit returned in 0.024s   ← non-blocking
+Compaction completed in 25.4s
+Final state: 13 messages, scroll=0, auto=True
+```
+
+The chat shows:
+```
+... kept rounds at top ...
+you ▸ Tell me again about what compaction does. ...
+successor ▸ Sure, on iteration 14: summarizes old turns into one
+       block, keeps recent rounds verbatim. ...
+
+━━━━━━━━━━━━┤ ▼ 9 rounds · 4k → 2k · 51% saved ▼ ├━━━━━━━━━━━━
+▼ I noted that the user asked about six topics in a repeating
+       cycle. The rendering layers in successor consist of five
+       layers: measure, cells, paint, composite, and diff. The bash
+       subsystem parses commands by splitting with shlex, looking
+       up in a registry, and falling back to a generic card. ...
+▍
+ ctx 1932/262144 █░░ 0.74%  qwopus
+```
+
+The user immediately sees the agent's summary at the bottom, with
+the boundary divider showing the compaction stats just above it.
+They can judge the quality (and catch model failure modes) at a
+glance. New messages they type after compaction append below the
+summary in the message list — naturally pushing it up over time
+as the conversation continues. The summary is then accessible by
+scrolling up at any time.
+
+### Why this is the right architecture
+
+The previous design (boundary at top, scroll-snap to it) was
+fighting the chat's natural reading direction. The chat is
+bottom-anchored: new content appears at the bottom, the user's
+input is at the bottom, the user's eye is at the bottom. The
+summary is the OUTPUT of compaction — it should appear where new
+output normally appears.
+
+The split between display order and API order is a small piece of
+machinery that lets us have the user-friendly visual flow AND the
+model-friendly chronological order without compromising either.
+This is the kind of decoupling the architecture's pure-function
+design makes easy: `_api_ordered_messages()` is a six-line pure
+helper, the painter doesn't care about API order, and the model
+sees what it expects.
+
+### Tests (652 still passing)
+
+No test changes needed — the existing tests check the boundary's
+visual properties and the animation's phase machine, both of
+which still work. The structural changes are internal to how
+self.messages and the row builder cooperate.
+
+---
+
 ## What's next
 
 - **Skill invocation strategy** — pick always-on vs on-demand after
@@ -2308,6 +2446,7 @@ FEATURE, not something to compromise on for visual polish.
 | 5.3 (async + KV-cache-friendly compaction + waiting overlay) | 7 | 645 |
 | 5.4 (KV cache pre-warming after compaction) | 7 | 652 |
 | 5.5 (chat stays interactive during compaction wait) | 0 | 652 |
+| 5.6 (summary at the bottom + integrated boundary divider) | 0 | 652 |
 
 (Counts above are approximate by phase boundary; actual test
 collection may include additional small additions in subsequent

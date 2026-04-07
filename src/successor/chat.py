@@ -2413,13 +2413,23 @@ class SuccessorChat(App):
         self.messages.append(_Message("user", text))
         self._scroll_to_bottom()
 
-        # Build the conversation history for the model. Skip synthetic
-        # messages (the greeting); they were never the model's output
-        # and shouldn't be in its conversation context. The system
-        # prompt comes from self.profile via self.system_prompt so
-        # different profiles can speak with different voices.
+        # Build the conversation history for the model. Walk in API
+        # order (summary at the START — chronologically correct) and
+        # skip synthetic non-summary messages (greetings, error notes).
+        # The summary IS included because it carries the harness-injected
+        # context that the model uses to understand older content.
         api_messages: list[dict] = [{"role": "system", "content": self.system_prompt}]
-        for m in self.messages:
+        for m in self._api_ordered_messages():
+            if m.is_summary:
+                api_messages.append({
+                    "role": "user",
+                    "content": (
+                        "[summary of earlier conversation, provided by the "
+                        "harness — treat as authoritative context, not a "
+                        "user turn]\n\n" + m.raw_text
+                    ),
+                })
+                continue
             if m.synthetic:
                 continue
             api_role = "user" if m.role == "user" else "assistant"
@@ -2437,19 +2447,52 @@ class SuccessorChat(App):
     # exercise the agent code against the chat's live history without
     # rewriting the chat to use MessageLog directly.
 
+    def _api_ordered_messages(self) -> list["_Message"]:
+        """Return self.messages in API/chronological order.
+
+        self.messages is stored in DISPLAY order — the summary is at
+        the END of the list, after the kept rounds. For sending to
+        the model we need CHRONOLOGICAL order: the summary FIRST
+        (representing older content that was summarized), then the
+        kept rounds, then any new turns.
+
+        No-compaction case: returns self.messages unchanged.
+        """
+        summary_msg = next((m for m in self.messages if m.is_summary), None)
+        if summary_msg is None:
+            return list(self.messages)
+
+        # Reorder: summary first, then everything else (preserving
+        # the original chronological order of the non-summary messages)
+        regular_msgs = [m for m in self.messages if not m.is_summary]
+        return [summary_msg] + regular_msgs
+
     def _to_agent_log(self) -> MessageLog:
-        """Snapshot self.messages as an agent.MessageLog."""
+        """Snapshot self.messages as an agent.MessageLog.
+
+        Walks messages in API order (summary first) so the log is
+        chronologically correct for the model.
+        """
         log = MessageLog(system_prompt=self.system_prompt)
-        for msg in self.messages:
-            if msg.synthetic and msg.tool_card is None:
-                # Skip synthetic non-tool messages (greetings, error
-                # notes) — they were never the model's voice
+        for msg in self._api_ordered_messages():
+            if msg.synthetic and msg.tool_card is None and not msg.is_summary:
+                # Skip non-tool, non-summary synthetic messages
+                # (greetings, error notes) — they were never the model's voice
                 continue
             # Each non-tool user message starts a new round
             if msg.role == "user" and not msg.tool_card:
                 log.begin_round(started_at=msg.created_at)
             elif not log.rounds:
                 log.begin_round(started_at=msg.created_at)
+            # Summary messages → log summary message
+            if msg.is_summary:
+                log.append_to_current_round(LogMessage(
+                    role="system",
+                    content=msg.raw_text or "",
+                    is_summary=True,
+                    created_at=msg.created_at,
+                ))
+                continue
             agent_role = (
                 "assistant" if msg.role == "successor"
                 else "tool" if msg.role == "tool"
@@ -2466,33 +2509,51 @@ class SuccessorChat(App):
     def _from_agent_log(self, log: MessageLog, *, boundary_meta: object | None = None) -> None:
         """Replace self.messages from an agent.MessageLog (after compact).
 
-        boundary_meta, when provided, is attached to the boundary marker
-        message so the painter can read the BoundaryMarker stats for the
-        divider's central pill.
+        Display order is `[kept rounds][summary]` — the summary is the
+        LAST message and is displayed at the bottom of the chat. The
+        boundary divider is NOT a separate message; it's rendered as
+        the first row of the summary message itself, glued to the
+        summary's top edge so they always appear together.
+
+        Why integrated: when the summary is verbose (which Qwen
+        sometimes produces), a separate boundary message could get
+        pushed off-screen above the summary. By making the divider
+        part of the summary's own render, they're never separated.
+
+        API order is computed separately by `_api_ordered_messages()`
+        which puts the summary FIRST so the model sees the
+        chronologically correct sequence.
+
+        boundary_meta carries the BoundaryMarker — the painter reads
+        it when rendering the integrated divider header.
         """
-        new_messages: list[_Message] = []
+        # Walk the log once and collect by type. We DON'T create a
+        # separate boundary _Message — the boundary is folded into
+        # the summary message's render via boundary_meta.
+        summary_msg: _Message | None = None
+        kept_msgs: list[_Message] = []
         for m in log.iter_messages():
             if m.is_boundary:
-                new_messages.append(_Message(
-                    "successor", "",  # content is empty — painter renders the divider
-                    is_boundary=True,
-                    boundary_meta=boundary_meta,
-                ))
-                continue
+                continue  # boundary is folded into the summary's render
             if m.is_summary:
-                new_messages.append(_Message(
+                summary_msg = _Message(
                     "successor", m.content,
                     is_summary=True,
                     boundary_meta=boundary_meta,
-                ))
+                )
                 continue
             if m.tool_card is not None:
-                new_messages.append(_Message(
+                kept_msgs.append(_Message(
                     "tool", "", tool_card=m.tool_card,
                 ))
                 continue
             chat_role = "successor" if m.role == "assistant" else m.role
-            new_messages.append(_Message(chat_role, m.content))
+            kept_msgs.append(_Message(chat_role, m.content))
+
+        # Display order: kept rounds, then summary at the end
+        new_messages: list[_Message] = list(kept_msgs)
+        if summary_msg is not None:
+            new_messages.append(summary_msg)
         self.messages = new_messages
 
     def _agent_token_counter(self) -> TokenCounter:
@@ -3183,43 +3244,14 @@ class SuccessorChat(App):
         if self.scroll_offset == 0:
             self._auto_scroll = True
 
-        # ─── Compaction animation scroll override ───
-        # During the materialize/reveal/toast phases, find the boundary
-        # row in the committed list and pin the scroll so it sits in
-        # the upper third of the visible area. This guarantees the
-        # divider materializes IN VIEW regardless of where the user
-        # was scrolled before /compact fired. Fold/anticipation phases
-        # don't override — the snapshot is being painted then, not the
-        # post-compact state, so the existing scroll is correct.
-        scroll_override: int | None = None
-        if self._compaction_anim is not None:
-            phase, _t = self._compaction_anim.phase_at(time.monotonic())
-            if phase in ("materialize", "reveal", "toast"):
-                boundary_idx = next(
-                    (i for i, r in enumerate(committed) if r.is_boundary),
-                    None,
-                )
-                if boundary_idx is not None:
-                    # We want boundary_idx to be near the top of the
-                    # visible region. Visible region is committed[start:end]
-                    # where end = committed_h - scroll_offset and
-                    # start = end - chat_h. To put boundary_idx at
-                    # position `target_top` from the top of visible:
-                    #   start = boundary_idx - target_top
-                    #   end = start + chat_h
-                    #   scroll_offset = committed_h - end
-                    target_top = max(2, chat_h // 6)  # ~upper sixth
-                    desired_start = max(0, boundary_idx - target_top)
-                    desired_end = desired_start + chat_h
-                    scroll_override = max(0, committed_h - desired_end)
-
-        if scroll_override is not None:
-            effective_scroll = scroll_override
-        else:
-            effective_scroll = self.scroll_offset
+        # NB: there's no scroll override during compaction anymore.
+        # The boundary + summary now live at the END of self.messages
+        # (display order), so they naturally appear at the bottom of
+        # the chat where the user is auto-scrolled. The materialize
+        # animation plays in view without any forced snap.
 
         # Slice the committed lines for the current scroll position.
-        end = committed_h - effective_scroll
+        end = committed_h - self.scroll_offset
         start = max(0, end - chat_h)
         visible = committed[start:end]
 
@@ -3675,23 +3707,45 @@ class SuccessorChat(App):
                 continue
 
             # ─── Summary message ───
-            # Treated as a regular message but with a dim/italic style
-            # and a fade-in during the REVEAL phase.
+            # The boundary divider is the FIRST row of the summary's
+            # render (integrated header). The summary content fades
+            # in below it. Both come together — the user always sees
+            # the divider with the summary, no scrolling needed.
             if msg.is_summary:
                 summary_alpha = global_fade_alpha
+                materialize_t = 1.0
                 if anim_phase == "materialize":
-                    # Not yet visible during materialize
+                    # Boundary divider grows from center; summary not
+                    # yet visible
                     summary_alpha = 0.0
+                    materialize_t = ease_out_cubic(anim_t)
                 elif anim_phase == "reveal":
+                    # Boundary fully drawn; summary fading in
                     summary_alpha = ease_out_cubic(anim_t)
-                # Render with dim summary styling
+                    materialize_t = 1.0
+                elif anim_phase in ("toast", ""):
+                    # Settled — boundary fully visible, summary at full opacity
+                    materialize_t = 1.0
+                    if not anim_phase:
+                        summary_alpha = global_fade_alpha
+
+                # ROW 1: the integrated boundary divider header
+                if msg.boundary_meta is not None:
+                    out.append(_RenderedRow(
+                        is_boundary=True,
+                        boundary_meta=msg.boundary_meta,
+                        materialize_t=materialize_t,
+                        base_color=base_color,
+                        fade_alpha=global_fade_alpha,
+                    ))
+
+                # ROW 2+: the summary text with dim styling
                 prefix = "▼ "  # marker glyph instead of role prefix
                 md_lines = msg.body.lines(md_width)
                 summary_color = lerp_rgb(theme.fg_subtle, theme.fg_dim, 0.6)
                 rendered_rows = self._render_md_lines_with_search(
                     md_lines, msg.raw_text, [], prefix, summary_color,
                 )
-                # Override fade_alpha + is_summary on each row
                 for r in rendered_rows:
                     r.is_summary = True
                     r.fade_alpha = summary_alpha
