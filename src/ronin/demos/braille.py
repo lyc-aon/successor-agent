@@ -133,9 +133,29 @@ class RoninDemo(App):
         target_fps: float = 30.0,
         assets_dir: Path,
         sequence: tuple[str, ...] = DEFAULT_SEQUENCE,
+        max_duration_s: float | None = None,
+        intro_mode: bool = False,
+        terminal=None,
     ) -> None:
-        super().__init__(target_fps=target_fps)
+        """The full nusamurai keyframe animation, optionally one-shot.
+
+        max_duration_s: if set, the demo auto-exits after that many
+            seconds. Used by the profile intro animation feature where
+            the demo plays for a brief opening flourish before the chat
+            takes over.
+        intro_mode: if True, ANY keypress (not just q/Ctrl+C) exits the
+            demo. Used as the intro variant so the user can skip past
+            the intro by tapping any key. Disables the space-to-pause
+            behavior since pausing during a brief intro doesn't make
+            sense.
+        terminal: optional Terminal instance to share with another App
+            (e.g. the chat App that runs after the intro). If None, a
+            default Terminal is constructed by App.__init__.
+        """
+        super().__init__(target_fps=target_fps, terminal=terminal)
         self.assets_dir = assets_dir
+        self.max_duration_s = max_duration_s
+        self.intro_mode = intro_mode
         self.arts: list[BrailleArt] = []
         self.names: list[str] = []
         for name in sequence:
@@ -153,6 +173,12 @@ class RoninDemo(App):
         self._last_live: float | None = None
 
     def on_key(self, byte: int) -> None:
+        # In intro mode, ANY keypress exits — the intro is meant to be
+        # skippable. Outside intro mode, only the App base class's
+        # quit_keys (q/Q/Ctrl+C) exit, and space/p toggles pause.
+        if self.intro_mode:
+            self.stop()
+            return
         # Space, p, P → toggle pause. Lets the user select+copy braille
         # without the morph overwriting cells under the selection.
         if byte in (0x20, 0x70, 0x50):
@@ -192,6 +218,11 @@ class RoninDemo(App):
         return (interpolate_frame(a_lines, b_lines, t), name_a, name_b, t, (cells_w, cells_h))
 
     def on_tick(self, grid: Grid) -> None:
+        # Auto-exit when the intro duration has elapsed. Checked at the
+        # top of the tick so we exit cleanly before painting another
+        # frame the user will never see.
+        if self.max_duration_s is not None and self.elapsed >= self.max_duration_s:
+            self.stop()
         self._advance_anim()
         rows, cols = grid.rows, grid.cols
         frame_lines, name_a, name_b, t, (cw, ch) = self._current(grid)

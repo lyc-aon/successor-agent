@@ -62,6 +62,16 @@ from ..input.keys import (
     MouseButton,
     MouseEvent,
 )
+from ..profiles import (
+    PROFILE_REGISTRY,
+    Profile,
+    all_profiles,
+    get_active_profile,
+    get_profile,
+    next_profile,
+    set_active_profile,
+)
+from ..providers import make_provider
 from ..providers.llama import (
     ChatStream,
     ContentChunk,
@@ -92,14 +102,16 @@ from ..render.paint import fill_region, paint_box, paint_text
 from ..render.terminal import Terminal
 from ..render.text import PreparedText, ease_out_cubic, hard_wrap, lerp_rgb
 from ..render.theme import (
-    DARK_THEME,
-    FORGE_THEME,
-    LIGHT_THEME,
-    THEMES,
+    THEME_REGISTRY,
     Theme,
-    blend_themes,
-    find_theme,
+    ThemeVariant,
+    all_themes,
+    blend_variants,
+    find_theme_or_fallback,
+    get_theme,
     next_theme,
+    normalize_display_mode,
+    toggle_display_mode,
 )
 
 
@@ -204,7 +216,9 @@ _HELP_SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("Ctrl+E Ctrl+Y", "vim-style end / top"),
     )),
     ("look & feel", (
-        ("Ctrl+T",      "cycle theme (dark → light → forge)"),
+        ("Ctrl+P",      "cycle active profile"),
+        ("Ctrl+T",      "cycle color theme"),
+        ("Alt+D",       "toggle display mode (dark / light)"),
         ("Ctrl+]",      "cycle density (compact / normal / spacious)"),
         ("Alt+= Alt+-", "step density up / down"),
     )),
@@ -291,7 +305,7 @@ class _HitBox:
     y: int
     w: int
     h: int
-    action: str  # "theme" | "density" | "scroll_to_bottom"
+    action: str  # "theme" | "mode" | "density" | "profile" | "scroll_to_bottom"
 
     def contains(self, col: int, row: int) -> bool:
         return (
@@ -357,6 +371,30 @@ class SlashCommand:
     complete_args: Callable[[str], list[str]] | None = None
 
 
+def _theme_arg_completer(partial: str) -> list[str]:
+    """Dynamic completer for /theme args.
+
+    Pulls names live from THEME_REGISTRY so newly-added user theme
+    files show up in autocomplete the next time the user opens the
+    dropdown — no chat restart needed. The "cycle" pseudo-arg always
+    appears at the end of the list.
+    """
+    p = partial.lower()
+    options = sorted(THEME_REGISTRY.names()) + ["cycle"]
+    return [o for o in options if o.startswith(p)]
+
+
+def _profile_arg_completer(partial: str) -> list[str]:
+    """Dynamic completer for /profile args.
+
+    Pulls names live from PROFILE_REGISTRY so newly-added user profile
+    files show up in autocomplete the next time the dropdown opens.
+    """
+    p = partial.lower()
+    options = sorted(PROFILE_REGISTRY.names()) + ["cycle"]
+    return [o for o in options if o.startswith(p)]
+
+
 SLASH_COMMANDS: tuple[SlashCommand, ...] = (
     SlashCommand(
         name="quit",
@@ -364,10 +402,22 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
         description="leave the chat",
     ),
     SlashCommand(
+        name="profile",
+        description="switch active profile (theme + prompt + provider)",
+        args_hint="[<profile>|cycle]",
+        complete_args=_profile_arg_completer,
+    ),
+    SlashCommand(
         name="theme",
         description="switch color theme",
-        args_hint="[dark|light|forge|cycle]",
-        complete_args=static_args("dark", "light", "forge", "cycle"),
+        args_hint="[<theme>|cycle]",
+        complete_args=_theme_arg_completer,
+    ),
+    SlashCommand(
+        name="mode",
+        description="switch display mode",
+        args_hint="[dark|light|toggle]",
+        complete_args=static_args("dark", "light", "toggle"),
     ),
     SlashCommand(
         name="density",
@@ -562,45 +612,96 @@ class RoninChat(App):
         *,
         client: LlamaCppClient | None = None,
         theme: Theme | None = None,
+        display_mode: str | None = None,
+        profile: Profile | None = None,
+        terminal: Terminal | None = None,
         recorder=None,
     ) -> None:
         super().__init__(
             target_fps=30.0,
             quit_keys=b"\x03",  # Ctrl+C only — q must remain typeable
-            terminal=Terminal(bracketed_paste=True),
+            terminal=terminal if terminal is not None else Terminal(bracketed_paste=True),
         )
-        self.client = client if client is not None else LlamaCppClient()
         # Optional recorder — captures every input byte to a JSONL file.
         # Set via the `rn record <file>` subcommand. None for normal use.
         self._recorder = recorder
 
         # ─── Persisted preferences ───
         # Loaded from ~/.config/ronin/chat.json on startup. Saved on
-        # every change to theme/density/mouse so the user's choices
-        # survive between `rn chat` invocations.
+        # every change to theme/display_mode/density/mouse so the user's
+        # choices survive between `rn chat` invocations. The migration
+        # from the v1 schema (where dark/light/forge were flat themes)
+        # happens transparently inside load_chat_config.
         self._config = load_chat_config()
 
+        # ─── Active profile ───
+        # If the caller didn't pass an explicit profile, resolve the
+        # active one from config (which falls back to "default" → first
+        # registered → hardcoded fallback). The profile supplies
+        # defaults for theme/mode/density/system_prompt/provider; saved
+        # config still wins per-setting so the user's manual changes
+        # persist across restarts.
+        if profile is None:
+            profile = get_active_profile()
+        self.profile: Profile = profile
+
+        # ─── Provider/client state ───
+        # Resolution: explicit `client` arg > profile.provider > default
+        # LlamaCppClient. The factory constructs from the profile's
+        # provider config dict; missing/empty config falls back to the
+        # default LlamaCppClient construction.
+        if client is not None:
+            self.client = client
+        elif profile.provider:
+            try:
+                self.client = make_provider(profile.provider)
+            except Exception:
+                # A bad provider config in a profile shouldn't prevent
+                # the chat from starting. Fall back and let the user
+                # see "forge is cold" with the default URL.
+                self.client = LlamaCppClient()
+        else:
+            self.client = LlamaCppClient()
+
+        # ─── System prompt ───
+        # Comes from the profile. Used in _submit when building the
+        # api_messages payload. Profiles can ship their own system
+        # prompts so a "ronin-dev" persona behaves differently from
+        # "default" without changing any code.
+        self.system_prompt: str = profile.system_prompt
+
         # ─── Theme state ───
-        # Resolve initial theme: explicit constructor arg → persisted
-        # config → DARK_THEME default.
-        initial_theme = theme
-        if initial_theme is None:
+        # Resolution per setting: explicit constructor arg → saved
+        # config → profile field → fallback. Saved config wins over
+        # the profile so the user's manual Ctrl+T cycling persists,
+        # even though the profile defines a default theme.
+        if theme is None:
             saved_name = self._config.get("theme")
-            if isinstance(saved_name, str):
-                initial_theme = find_theme(saved_name)
-        if initial_theme is None:
-            initial_theme = DARK_THEME
-        self.theme: Theme = initial_theme
+            if not isinstance(saved_name, str) or not saved_name:
+                saved_name = profile.theme
+            theme = find_theme_or_fallback(saved_name)
+        self.theme: Theme = theme
         self._theme_from: Theme | None = None
         self._theme_t0: float = 0.0
 
+        # ─── Display mode state ───
+        if display_mode is None:
+            saved_mode = self._config.get("display_mode")
+            if not isinstance(saved_mode, str) or not saved_mode:
+                saved_mode = profile.display_mode
+            display_mode = normalize_display_mode(saved_mode)
+        self.display_mode: str = display_mode
+        # Mode-only transitions get tracked separately so toggling
+        # dark/light without changing the theme bundle still animates
+        # smoothly. Set when mode changes; cleared when transition done.
+        self._mode_from: str | None = None
+
         # ─── Density state ───
-        initial_density = NORMAL
+        # Same resolution chain as theme/display_mode.
         saved_density_name = self._config.get("density")
-        if isinstance(saved_density_name, str):
-            found = find_density(saved_density_name)
-            if found is not None:
-                initial_density = found
+        if not isinstance(saved_density_name, str) or not saved_density_name:
+            saved_density_name = profile.density
+        initial_density = find_density(saved_density_name) or NORMAL
         self.density: Density = initial_density
         self._density_from: Density | None = None
         self._density_t0: float = 0.0
@@ -755,8 +856,12 @@ class RoninChat(App):
             if hb.contains(event.col, event.row):
                 if hb.action == "theme":
                     self._cycle_theme()
+                elif hb.action == "mode":
+                    self._toggle_display_mode()
                 elif hb.action == "density":
                     self._cycle_density()
+                elif hb.action == "profile":
+                    self._cycle_profile()
                 elif hb.action == "scroll_to_bottom":
                     self._scroll_to_bottom()
                 elif hb.action.startswith("slash:"):
@@ -849,6 +954,14 @@ class RoninChat(App):
             self._cycle_theme()
             return
 
+        # ─── Display mode toggle — Alt+D dark↔light, theme preserved ───
+        # Ctrl+D is reserved for terminal EOT so we use Alt+D, which
+        # also matches the alt-modifier convention used by density's
+        # Alt+= / Alt+- step controls.
+        if event.is_alt and event.char == "d":
+            self._toggle_display_mode()
+            return
+
         # ─── Density (font-size feel) — Alt+=/Alt+-/Ctrl+] always available ───
         if event.is_alt and event.char in ("=", "+"):
             self._density_step(+1)
@@ -888,19 +1001,20 @@ class RoninChat(App):
             self._scroll_to_bottom()
             return
 
-        # ─── Ctrl-prefix shortcuts (vim-style scroll fallback) ───
+        # ─── Ctrl-prefix shortcuts ───
         if event.is_ctrl and not event.is_alt:
+            # Profile cycling (Ctrl+P) — replaces the old vim "scroll
+            # up one line" binding because Up arrow already does that
+            # and profile switching is the more valuable shortcut now.
+            if event.char == "p":
+                self._cycle_profile()
+                return
+            # Vim-style page navigation kept for muscle memory.
             if event.char == "b":
                 self._scroll_lines(self._page_size())
                 return
             if event.char == "f":
                 self._scroll_lines(-self._page_size())
-                return
-            if event.char == "p":
-                self._scroll_lines(1)
-                return
-            if event.char == "n":
-                self._scroll_lines(-1)
                 return
             if event.char == "e":
                 self._scroll_to_bottom()
@@ -1025,19 +1139,131 @@ class RoninChat(App):
     def _page_size(self) -> int:
         return max(1, self._last_chat_h - 1)
 
-    # ─── Theme management ───
+    # ─── Theme + display mode management ───
 
     def _set_theme(self, new_theme: Theme) -> None:
-        """Switch to a new theme with a smooth lerp transition."""
-        if new_theme is self.theme:
+        """Switch to a new theme with a smooth lerp transition.
+
+        Captures the CURRENT visible variant as `_theme_from` so the
+        blend interpolates from whatever the user is actually seeing
+        (which may itself be mid-transition) to the new target. The
+        display_mode is preserved across theme switches.
+        """
+        if new_theme.name == self.theme.name:
             return
-        self._theme_from = self._current_theme()
+        # Snapshot what's on screen RIGHT NOW so the blend starts from
+        # the actual visible state, not the logical previous theme.
+        self._theme_from = self.theme
         self.theme = new_theme
+        # Cancel any in-flight mode transition since the snapshot
+        # already encodes the current mode-blend point.
+        self._mode_from = None
         self._theme_t0 = time.monotonic()
         self._persist_preferences()
 
     def _cycle_theme(self) -> None:
         self._set_theme(next_theme(self.theme))
+
+    def _set_display_mode(self, new_mode: str) -> None:
+        """Switch dark↔light with a smooth lerp transition.
+
+        Mode swaps preserve the current theme. The transition shares
+        the same `_theme_t0` clock and duration as theme swaps so a
+        rapid theme-then-mode switch (or vice versa) doesn't double up
+        animations.
+        """
+        new_mode = normalize_display_mode(new_mode)
+        if new_mode == self.display_mode:
+            return
+        self._mode_from = self.display_mode
+        self.display_mode = new_mode
+        # Use the same clock as theme transitions; if a theme transition
+        # was already in flight, this resets it from "now" so both
+        # axes finish together at a clean target.
+        self._theme_t0 = time.monotonic()
+        self._theme_from = None  # mode-only transition, no theme blend
+        self._persist_preferences()
+
+    def _toggle_display_mode(self) -> None:
+        self._set_display_mode(toggle_display_mode(self.display_mode))
+
+    # ─── Profile management ───
+
+    def _set_profile(self, new_profile: Profile) -> None:
+        """Switch the active profile, applying its settings atomically.
+
+        A profile defines theme + display_mode + density + system_prompt
+        + provider as a coherent persona unit. Switching:
+
+          1. Replaces self.profile and persists active_profile to config
+          2. Applies the new theme (with smooth transition)
+          3. Applies the new display_mode (with smooth transition)
+          4. Applies the new density (with smooth transition)
+          5. Replaces system_prompt for the next /submit
+          6. Reconstructs the provider client (next stream uses it)
+
+        Active conversation history is preserved. The new system prompt
+        and provider apply to the NEXT message the user submits, not
+        retroactively to the current scrollback.
+        """
+        if new_profile.name == self.profile.name:
+            return
+
+        self.profile = new_profile
+
+        # Apply theme — uses the existing transition machinery
+        new_theme = find_theme_or_fallback(new_profile.theme)
+        if new_theme.name != self.theme.name:
+            self._set_theme(new_theme)
+
+        # Apply display mode (separate transition axis)
+        target_mode = normalize_display_mode(new_profile.display_mode)
+        if target_mode != self.display_mode:
+            self._set_display_mode(target_mode)
+
+        # Apply density
+        new_density = find_density(new_profile.density) or NORMAL
+        if new_density.name != self.density.name:
+            self._set_density(new_density)
+
+        # System prompt + provider apply to the next submission. We
+        # don't tear down an in-flight stream — it finishes on the
+        # old provider, and the next user message starts on the new one.
+        self.system_prompt = new_profile.system_prompt
+
+        if new_profile.provider:
+            try:
+                self.client = make_provider(new_profile.provider)
+            except Exception:
+                # Bad provider config in a profile shouldn't break the
+                # active session. Keep the old client; user can fix
+                # the profile and try again.
+                pass
+        else:
+            self.client = LlamaCppClient()
+
+        # Persist the new active profile name to chat.json so the next
+        # `rn chat` startup uses it. Failures are silent — chat.json
+        # writes are best-effort.
+        self._config["active_profile"] = new_profile.name
+        save_chat_config(self._config)
+
+        # Add a synthetic message announcing the swap so the user has
+        # a clear breadcrumb in the scrollback. Reuses the existing
+        # synthetic-message machinery (rendered dim, not sent to model).
+        self.messages.append(
+            _Message(
+                "ronin",
+                f"switched to profile: {new_profile.name}"
+                + (f" — {new_profile.description}" if new_profile.description else ""),
+                synthetic=True,
+            )
+        )
+
+    def _cycle_profile(self) -> None:
+        """Cycle to the next profile in registry order."""
+        target = next_profile(self.profile)
+        self._set_profile(target)
 
     # ─── Density management ───
 
@@ -1200,9 +1426,11 @@ class RoninChat(App):
 
         Failures are silent — persistence is best-effort. The user keeps
         their session preferences even if the file write fails; they
-        just won't carry over to the next launch.
+        just won't carry over to the next launch. The schema version
+        is stamped by save_chat_config so future loads skip migration.
         """
         self._config["theme"] = self.theme.name
+        self._config["display_mode"] = self.display_mode
         self._config["density"] = self.density.name
         self._config["mouse"] = self._mouse_enabled
         save_chat_config(self._config)
@@ -1321,22 +1549,46 @@ class RoninChat(App):
         self._autocomplete_dismissed = True
         self._autocomplete_selected = 0
 
-    def _current_theme(self) -> Theme:
-        """The theme to use for THIS frame's render.
+    def _current_variant(self) -> ThemeVariant:
+        """The ThemeVariant to use for THIS frame's render.
 
-        If a transition is in progress, return a blended theme that's
-        partway between `_theme_from` and `self.theme`. When the
-        transition completes, drop the source and return `self.theme`
-        directly.
+        Resolves the orthogonal (theme, display_mode) state into one
+        concrete variant. If either axis is mid-transition, blends
+        accordingly:
+
+          - theme transition only: lerp current theme's variant from
+            old-theme[mode] toward new-theme[mode]
+          - mode transition only:  lerp current theme's variant from
+            theme[old_mode] toward theme[new_mode]
+          - neither: just return theme[mode]
+
+        Theme + mode transitions can't be in flight simultaneously by
+        construction (each setter clears the other's `_from` field),
+        which keeps the blend math single-axis and easy to reason about.
         """
-        if self._theme_from is None:
-            return self.theme
-        elapsed = time.monotonic() - self._theme_t0
-        if elapsed >= THEME_TRANSITION_S:
-            self._theme_from = None
-            return self.theme
-        t = ease_out_cubic(elapsed / THEME_TRANSITION_S)
-        return blend_themes(self._theme_from, self.theme, t)
+        target_variant = self.theme.variant(self.display_mode)
+
+        # Theme transition in flight
+        if self._theme_from is not None:
+            elapsed = time.monotonic() - self._theme_t0
+            if elapsed >= THEME_TRANSITION_S:
+                self._theme_from = None
+                return target_variant
+            t = ease_out_cubic(elapsed / THEME_TRANSITION_S)
+            from_variant = self._theme_from.variant(self.display_mode)
+            return blend_variants(from_variant, target_variant, t)
+
+        # Display-mode transition in flight
+        if self._mode_from is not None:
+            elapsed = time.monotonic() - self._theme_t0
+            if elapsed >= THEME_TRANSITION_S:
+                self._mode_from = None
+                return target_variant
+            t = ease_out_cubic(elapsed / THEME_TRANSITION_S)
+            from_variant = self.theme.variant(self._mode_from)
+            return blend_variants(from_variant, target_variant, t)
+
+        return target_variant
 
     # ─── Submission ───
 
@@ -1348,15 +1600,48 @@ class RoninChat(App):
             self.stop()
             return
 
+        # /profile         — show current profile and available options
+        # /profile <name>  — switch to a registered profile by name
+        # /profile cycle   — cycle to the next profile in registry order
+        if text.startswith("/profile"):
+            parts = text.split(maxsplit=1)
+            available_names = sorted(PROFILE_REGISTRY.names())
+            if len(parts) == 1:
+                names = ", ".join(available_names) or "(none loaded)"
+                hint = (
+                    f"current profile: {self.profile.name}"
+                    + (f" — {self.profile.description}" if self.profile.description else "")
+                    + f". Available: {names}. "
+                    f"Use /profile <name> or Ctrl+P to cycle."
+                )
+                self.messages.append(_Message("ronin", hint, synthetic=True))
+                return
+            arg = parts[1].strip().lower()
+            if arg == "cycle":
+                self._cycle_profile()
+                return
+            target = get_profile(arg)
+            if target is None:
+                self.messages.append(
+                    _Message(
+                        "ronin",
+                        f"no profile named '{arg}'. try one of: "
+                        f"{', '.join(available_names) or '(none)'}.",
+                        synthetic=True,
+                    )
+                )
+                return
+            self._set_profile(target)
+            return
+
         # /theme       — show current theme and available options
-        # /theme dark  — switch to dark theme
-        # /theme light — switch to light theme
-        # /theme forge — switch to forge theme
-        # /theme cycle — cycle to next theme
+        # /theme <name>— switch to a registered theme by name
+        # /theme cycle — cycle to next theme in registry order
         if text.startswith("/theme"):
             parts = text.split(maxsplit=1)
+            available_names = sorted(THEME_REGISTRY.names())
             if len(parts) == 1:
-                names = ", ".join(t.name for t in THEMES)
+                names = ", ".join(available_names) or "(none loaded)"
                 hint = (
                     f"current theme: {self.theme.name} {self.theme.icon}. "
                     f"Available: {names}. Use /theme <name> or Ctrl+T to cycle."
@@ -1367,18 +1652,49 @@ class RoninChat(App):
             if arg == "cycle":
                 self._cycle_theme()
                 return
-            target = find_theme(arg)
+            target = get_theme(arg)
             if target is None:
                 self.messages.append(
                     _Message(
                         "ronin",
                         f"no theme named '{arg}'. try one of: "
-                        f"{', '.join(t.name for t in THEMES)}.",
+                        f"{', '.join(available_names) or '(none)'}.",
                         synthetic=True,
                     )
                 )
                 return
             self._set_theme(target)
+            return
+
+        # /mode         — show current display mode
+        # /mode dark    — switch to dark mode (preserve theme)
+        # /mode light   — switch to light mode (preserve theme)
+        # /mode toggle  — flip dark↔light
+        if text.startswith("/mode"):
+            parts = text.split(maxsplit=1)
+            if len(parts) == 1:
+                hint = (
+                    f"display mode: {self.display_mode}. "
+                    f"Use /mode dark|light|toggle or Alt+D to flip. "
+                    f"Mode is independent of theme — switching mode keeps "
+                    f"the same theme."
+                )
+                self.messages.append(_Message("ronin", hint, synthetic=True))
+                return
+            arg = parts[1].strip().lower()
+            if arg == "toggle":
+                self._toggle_display_mode()
+                return
+            if arg in ("dark", "light"):
+                self._set_display_mode(arg)
+                return
+            self.messages.append(
+                _Message(
+                    "ronin",
+                    f"unknown /mode argument '{arg}'. try dark, light, or toggle.",
+                    synthetic=True,
+                )
+            )
             return
 
         # /mouse         — show current state
@@ -1471,8 +1787,10 @@ class RoninChat(App):
 
         # Build the conversation history for the model. Skip synthetic
         # messages (the greeting); they were never the model's output
-        # and shouldn't be in its conversation context.
-        api_messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        # and shouldn't be in its conversation context. The system
+        # prompt comes from self.profile via self.system_prompt so
+        # different profiles can speak with different voices.
+        api_messages: list[dict] = [{"role": "system", "content": self.system_prompt}]
         for m in self.messages:
             if m.synthetic:
                 continue
@@ -1543,11 +1861,13 @@ class RoninChat(App):
         # Drain any pending llama.cpp stream events.
         self._pump_stream()
 
-        # Resolve the active theme for THIS frame. If a theme transition
-        # is in progress this returns a blended palette; otherwise it's
-        # just self.theme. Every painter takes `theme` as a parameter so
-        # the same code paints in any palette.
-        theme = self._current_theme()
+        # Resolve the active theme variant for THIS frame. Combines the
+        # (theme, display_mode) state into one ThemeVariant. If either
+        # axis is mid-transition this returns a blended palette; otherwise
+        # it's just self.theme.variant(self.display_mode). Every painter
+        # takes `theme: ThemeVariant` so the same code paints in any
+        # palette × any mode.
+        theme = self._current_variant()
 
         rows, cols = grid.rows, grid.cols
         if rows < 3 or cols < 4:
@@ -1580,10 +1900,10 @@ class RoninChat(App):
         self._paint_chat_area(grid, chat_top, chat_bottom, cols, theme)
 
         # ─── Theme widget (rightmost cell of title row) ───
-        # Renders as a small accent-colored pill so it visually reads
-        # as an interactive element. Keybinding: Ctrl+T. Click target
-        # when mouse mode is on.
-        theme_label = f" {theme.icon} {theme.name} "
+        # Shows the theme's identity (icon + name). Keybinding: Ctrl+T.
+        # Click target when mouse mode is on. Background uses the
+        # theme's accent so the pill changes color with the theme.
+        theme_label = f" {self.theme.icon} {self.theme.name} "
         theme_style = Style(
             fg=theme.bg,
             bg=theme.accent,
@@ -1595,29 +1915,65 @@ class RoninChat(App):
             _HitBox(theme_x, 0, len(theme_label), 1, "theme")
         )
 
-        # ─── Density widget (just left of the theme widget) ───
+        # ─── Display mode widget (just left of the theme widget) ───
+        # Three-cell pill showing ☾ for dark or ☀ for light. The two
+        # axes (theme + mode) are independent, so this widget gets its
+        # own pill instead of being squashed into the theme widget.
+        # Keybinding: Alt+D. Click target when mouse mode is on.
+        mode_icon = "\u263e" if self.display_mode == "dark" else "\u2600"
+        mode_label = f" {mode_icon} "
+        mode_style = Style(
+            fg=theme.bg,
+            bg=theme.fg_dim,
+            attrs=ATTR_BOLD,
+        )
+        mode_x = max(0, theme_x - len(mode_label) - 1)
+        paint_text(grid, mode_label, mode_x, 0, style=mode_style)
+        self._hit_boxes.append(
+            _HitBox(mode_x, 0, len(mode_label), 1, "mode")
+        )
+
+        # ─── Density widget (just left of the display mode widget) ───
         # Different background color so it visually distinguishes from
-        # the theme widget. Keybindings: Alt+=, Alt+-, Ctrl+]. Click
-        # target when mouse mode is on.
+        # the theme + mode widgets. Keybindings: Alt+=, Alt+-, Ctrl+].
+        # Click target when mouse mode is on.
         density_label = f" {self.density.name} "
         density_style = Style(
             fg=theme.bg,
             bg=theme.accent_warm,
             attrs=ATTR_BOLD,
         )
-        density_x = max(0, theme_x - len(density_label) - 1)
+        density_x = max(0, mode_x - len(density_label) - 1)
         paint_text(grid, density_label, density_x, 0, style=density_style)
         self._hit_boxes.append(
             _HitBox(density_x, 0, len(density_label), 1, "density")
         )
 
-        # ─── Scroll indicator (left of the density widget when scrolled) ───
+        # ─── Profile widget (just left of the density widget) ───
+        # Dim text on the chat background so it reads as a label, not
+        # an interactive pill — but still clickable when mouse mode is
+        # on. The profile is the persona unit; showing it always lets
+        # the user instantly recognize which mode they're in.
+        # Keybinding: Ctrl+P (cycles to the next registered profile).
+        profile_label = f" {self.profile.name} "
+        profile_style = Style(
+            fg=theme.fg_dim,
+            bg=theme.bg,
+            attrs=ATTR_DIM | ATTR_BOLD,
+        )
+        profile_x = max(0, density_x - len(profile_label) - 1)
+        paint_text(grid, profile_label, profile_x, 0, style=profile_style)
+        self._hit_boxes.append(
+            _HitBox(profile_x, 0, len(profile_label), 1, "profile")
+        )
+
+        # ─── Scroll indicator (left of the profile widget when scrolled) ───
         if self.scroll_offset > 0:
             if self._stream is not None:
                 indicator = f" ↑ {self.scroll_offset} · ronin responding · Ctrl+E newest "
             else:
                 indicator = f" ↑ {self.scroll_offset}/{self._max_scroll()} · End for newest "
-            ix = max(0, density_x - len(indicator))
+            ix = max(0, profile_x - len(indicator))
             paint_text(
                 grid,
                 indicator,
@@ -1658,7 +2014,7 @@ class RoninChat(App):
         top: int,
         bottom: int,
         width: int,
-        theme: Theme,
+        theme: ThemeVariant,
     ) -> None:
         if bottom <= top or width <= 2:
             return
@@ -1737,7 +2093,7 @@ class RoninChat(App):
         y: int,
         body_width: int,
         row: _RenderedRow,
-        theme: Theme,
+        theme: ThemeVariant,
     ) -> None:
         """Render one paint-ready row at (x, y) with `body_width` cells.
 
@@ -1813,7 +2169,7 @@ class RoninChat(App):
             # but markdown content is overwhelmingly width-1 in practice.
 
     @staticmethod
-    def _resolve_leading_color(kind: str, base_color: int, theme: Theme) -> int:
+    def _resolve_leading_color(kind: str, base_color: int, theme: ThemeVariant) -> int:
         if kind == "fg":
             return theme.fg
         if kind == "fg_dim":
@@ -1825,7 +2181,7 @@ class RoninChat(App):
         span: LaidOutSpan,
         base_color: int,
         line_bg: int,
-        theme: Theme,
+        theme: ThemeVariant,
     ) -> Style:
         """Resolve a span's semantic tag to a concrete Style.
 
@@ -1860,7 +2216,7 @@ class RoninChat(App):
     def _build_message_lines(
         self,
         body_width: int,
-        theme: Theme,
+        theme: ThemeVariant,
     ) -> list[_RenderedRow]:
         """Flatten the conversation into a list of paint-ready rows.
 
@@ -2056,7 +2412,7 @@ class RoninChat(App):
     def _build_streaming_lines(
         self,
         body_width: int,
-        theme: Theme,
+        theme: ThemeVariant,
     ) -> list[_RenderedRow]:
         """Render the in-flight streaming reply as paint-ready rows.
 
@@ -2154,7 +2510,7 @@ class RoninChat(App):
     def _paint_autocomplete(
         self,
         grid: Grid,
-        theme: Theme,
+        theme: ThemeVariant,
         input_y: int,
     ) -> None:
         """Render the autocomplete popover above the input area.
@@ -2176,7 +2532,7 @@ class RoninChat(App):
         elif isinstance(state, _NoMatches):
             self._paint_no_matches(grid, theme, input_y, state)
 
-    def _blank_dropdown_rows(self, grid: Grid, theme: Theme, box_y: int, box_h: int) -> None:
+    def _blank_dropdown_rows(self, grid: Grid, theme: ThemeVariant, box_y: int, box_h: int) -> None:
         """Blank the full row width of the rows the dropdown occupies.
 
         Without this the chat content underneath would leak around the
@@ -2193,7 +2549,7 @@ class RoninChat(App):
     def _paint_name_mode(
         self,
         grid: Grid,
-        theme: Theme,
+        theme: ThemeVariant,
         input_y: int,
         state: _NameMode,
     ) -> None:
@@ -2269,7 +2625,7 @@ class RoninChat(App):
     def _paint_arg_mode(
         self,
         grid: Grid,
-        theme: Theme,
+        theme: ThemeVariant,
         input_y: int,
         state: _ArgMode,
     ) -> None:
@@ -2357,7 +2713,7 @@ class RoninChat(App):
     def _paint_no_matches(
         self,
         grid: Grid,
-        theme: Theme,
+        theme: ThemeVariant,
         input_y: int,
         state: _NoMatches,
     ) -> None:
@@ -2540,7 +2896,7 @@ class RoninChat(App):
         grid: Grid,
         y: int,
         width: int,
-        theme: Theme,
+        theme: ThemeVariant,
     ) -> None:
         # Compute approximate token usage from the latest known usage
         # info, falling back to a char-count estimate.
@@ -2603,7 +2959,7 @@ class RoninChat(App):
         y: int,
         height: int,
         width: int,
-        theme: Theme,
+        theme: ThemeVariant,
     ) -> None:
         # Search mode replaces the input with a search bar.
         if self._search_active:
@@ -2677,7 +3033,7 @@ class RoninChat(App):
         grid: Grid,
         y: int,
         width: int,
-        theme: Theme,
+        theme: ThemeVariant,
     ) -> None:
         """Render the search bar in place of the input area.
 

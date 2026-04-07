@@ -1,12 +1,52 @@
+# ─── Python ───
 __pycache__/
-*.pyc
-*.pyo
-.venv/
-.ronin/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-*.egg-info/
-dist/
-build/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+
+# ─── Virtual envs ───
+.venv/
+venv/
+env/
+.python-version
+
+# ─── Ronin runtime / state ───
+.ronin/
+*.session.jsonl
+recordings/
+
+# ─── Editors / IDEs ───
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.netrwhist
+*.sublime-workspace
+*.sublime-project
+
+# ─── OS junk ───
 .DS_Store
+Thumbs.db
+desktop.ini
+.directory
+
+# ─── Secrets (defensive — none currently in repo) ───
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+credentials/

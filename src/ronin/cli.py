@@ -53,10 +53,48 @@ def _list_frames() -> list[tuple[str, Path]]:
 
 
 def cmd_chat(args: argparse.Namespace) -> int:
+    """Open the chat. Plays the active profile's intro animation first."""
     from .demos.chat import RoninChat
+    from .profiles import get_active_profile
 
-    RoninChat().run()
+    profile = get_active_profile()
+
+    # Play the intro animation if the active profile asks for one.
+    # The intro is a separate App that runs to completion, then control
+    # transfers to the chat App. Both share the same terminal context
+    # by re-entering it cleanly between Apps. Brief flash between them
+    # is acceptable for v0.
+    if profile.intro_animation:
+        _play_intro_animation(profile.intro_animation)
+
+    RoninChat(profile=profile).run()
     return 0
+
+
+def _play_intro_animation(name: str) -> None:
+    """Play a registered intro animation, blocking until it finishes.
+
+    For v0, only "nusamurai" is supported — it plays the bundled
+    9-frame braille demo for ~4 seconds in one-shot mode (any keypress
+    skips ahead). Unknown intro names are silently ignored so a profile
+    that references a future intro doesn't break the chat.
+    """
+    if name != "nusamurai":
+        # Future: walk ~/.config/ronin/intros/<name>/ for user intros.
+        return
+    from .demos.braille import RoninDemo
+
+    try:
+        intro = RoninDemo(
+            target_fps=30.0,
+            assets_dir=_nusamurai_dir(),
+            max_duration_s=4.0,
+            intro_mode=True,
+        )
+    except RuntimeError:
+        # Asset dir missing on this install — skip the intro silently.
+        return
+    intro.run()
 
 
 def cmd_demo(args: argparse.Namespace) -> int:
@@ -97,6 +135,88 @@ def cmd_frames(args: argparse.Namespace) -> int:
         h = len(f)
         w = max((len(line) for line in f), default=0)
         print(f"  {name:30s}  {w:>3} × {h:<3}")
+    return 0
+
+
+def cmd_skills(args: argparse.Namespace) -> int:
+    """List every loaded skill (built-in + user) with size + source.
+
+    Inventory only — phase 5 deliberately doesn't wire skills into the
+    chat. The list shows what's available so the user can confirm their
+    `~/.config/ronin/skills/*.md` files are being picked up.
+    """
+    from .skills import SKILL_REGISTRY
+
+    SKILL_REGISTRY.reload()
+    skills = SKILL_REGISTRY.all()
+    if not skills:
+        print("ronin: no skills loaded")
+        print(f"  drop *.md files into {SKILL_REGISTRY.kind}/ to add them:")
+        from .loader import builtin_root, config_dir
+
+        print(f"    builtin: {builtin_root() / 'skills'}")
+        print(f"    user:    {config_dir() / 'skills'}")
+        return 0
+
+    print(f"ronin · skills ({len(skills)} loaded)")
+    print()
+    name_w = max(len(s.name) for s in skills)
+    total_tokens = sum(s.estimated_tokens for s in skills)
+    for skill in skills:
+        source = SKILL_REGISTRY.source_of(skill.name) or "?"
+        tokens = skill.estimated_tokens
+        print(f"  {skill.name:<{name_w}}  {source:>7}  ~{tokens:>5} tokens")
+        if skill.description:
+            # Soft-wrap the description to a comfortable column width
+            desc = skill.description
+            indent = " " * (4 + name_w)
+            max_w = 80 - len(indent)
+            while desc:
+                if len(desc) <= max_w:
+                    print(f"{indent}{desc}")
+                    break
+                # Break at the last space before max_w
+                cut = desc.rfind(" ", 0, max_w)
+                if cut < 0:
+                    cut = max_w
+                print(f"{indent}{desc[:cut]}")
+                desc = desc[cut:].lstrip()
+        print()
+    print(f"  {len(skills)} skills · ~{total_tokens:,} tokens total")
+    return 0
+
+
+def cmd_tools(args: argparse.Namespace) -> int:
+    """List every registered tool (built-in + user) with source.
+
+    Phase 6 scaffold: the tool registry exists, the @tool decorator
+    works, but no tools are actually wired into the chat (no agent
+    loop yet). This command shows what would be available when the
+    agent loop lands.
+    """
+    from .tools import TOOL_REGISTRY
+
+    TOOL_REGISTRY.reload()
+    tools = TOOL_REGISTRY.all()
+    if not tools:
+        print("ronin: no tools registered")
+        print("  the agent loop is not yet wired (phase 6+).")
+        from .loader import builtin_root, config_dir
+
+        print(f"  builtin: {builtin_root() / 'tools'}")
+        print(f"  user:    {config_dir() / 'tools'}")
+        return 0
+
+    print(f"ronin · tools ({len(tools)} registered)")
+    print()
+    name_w = max(len(t.name) for t in tools)
+    for tool in tools:
+        source = TOOL_REGISTRY.source_of(tool.name) or "?"
+        print(f"  {tool.name:<{name_w}}  {source:>7}")
+        if tool.description:
+            indent = " " * (4 + name_w)
+            print(f"{indent}{tool.description}")
+        print()
     return 0
 
 
@@ -229,6 +349,7 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
         rows=args.rows,
         cols=args.cols,
         theme_name=args.theme,
+        display_mode=args.display_mode,
         density_name=args.density,
         scenario=args.scenario,
     )
@@ -333,6 +454,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_doctor = sub.add_parser("doctor", help="terminal capability check")
     p_doctor.set_defaults(func=cmd_doctor)
 
+    p_skills = sub.add_parser(
+        "skills",
+        help="list loaded skills (markdown frontmatter format)",
+    )
+    p_skills.set_defaults(func=cmd_skills)
+
+    p_tools = sub.add_parser(
+        "tools",
+        help="list registered tools (phase 6 scaffold — not yet wired)",
+    )
+    p_tools.set_defaults(func=cmd_tools)
+
     p_bench = sub.add_parser("bench", help="renderer benchmark (no TTY required)")
     p_bench.add_argument("--frames", type=int, default=300, help="number of frames")
     p_bench.add_argument("--rows", type=int, default=40, help="grid rows")
@@ -345,10 +478,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_snapshot.add_argument("--rows", type=int, default=30, help="grid rows")
     p_snapshot.add_argument("--cols", type=int, default=100, help="grid cols")
+    # Theme is intentionally NOT a choices= list — it's resolved against
+    # the live registry at run time so user-installed themes work without
+    # editing argparse. Validation happens inside chat_demo_snapshot,
+    # which falls back to the default theme if the name is unknown.
     p_snapshot.add_argument(
-        "--theme", default="dark",
-        choices=["dark", "light", "forge"],
-        help="color theme",
+        "--theme", default="steel",
+        help="color theme name (any registered theme — see `rn doctor`)",
+    )
+    p_snapshot.add_argument(
+        "--display-mode", default="dark",
+        choices=["dark", "light"],
+        help="display mode within the chosen theme",
     )
     p_snapshot.add_argument(
         "--density", default="normal",

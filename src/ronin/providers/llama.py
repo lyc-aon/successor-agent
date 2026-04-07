@@ -302,7 +302,13 @@ class LlamaCppClient:
     are intentionally generous because Lycaon's local Qwen3.5 setup
     runs at 256K context — never apologize for token cost on local
     inference.
+
+    Conforms structurally to `providers.base.ChatProvider`. The
+    `provider_type` class attribute is used by `make_provider` to
+    construct an instance from a profile's provider config dict.
     """
+
+    provider_type = "llamacpp"
 
     def __init__(
         self,

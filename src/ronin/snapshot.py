@@ -61,7 +61,8 @@ def chat_demo_snapshot(
     *,
     rows: int = 30,
     cols: int = 100,
-    theme_name: str = "dark",
+    theme_name: str = "steel",
+    display_mode: str = "dark",
     density_name: str = "normal",
     scenario: str = "showcase",
 ) -> Grid:
@@ -79,6 +80,10 @@ def chat_demo_snapshot(
     chat App is constructed without entering its terminal context, so
     no TTY is required. Useful for screenshots, documentation, and
     headless tests.
+
+    The (theme_name, display_mode) pair is now ORTHOGONAL — theme picks
+    the visual identity, display_mode picks dark vs light. Same theme
+    in both modes is the typical "switch dark/light" snapshot pair.
     """
     # Imports here to avoid pulling chat into module-level when only
     # snapshot helpers are needed.
@@ -88,15 +93,18 @@ def chat_demo_snapshot(
         SLASH_COMMANDS,
         find_slash_command,
     )
-    from .render.theme import find_theme
+    from .render.theme import get_theme, normalize_display_mode
     from .demos.chat import find_density
 
     chat = RoninChat()
 
-    target_theme = find_theme(theme_name)
+    target_theme = get_theme(theme_name)
     if target_theme is not None:
         chat.theme = target_theme
         chat._theme_from = None
+
+    chat.display_mode = normalize_display_mode(display_mode)
+    chat._mode_from = None
 
     target_density = find_density(density_name)
     if target_density is not None:

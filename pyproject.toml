@@ -22,3 +22,6 @@ rn = "ronin.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"ronin.builtin" = ["themes/*.json", "profiles/*.json", "skills/*.md"]

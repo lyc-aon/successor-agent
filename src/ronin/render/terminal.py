@@ -83,18 +83,55 @@ class Terminal:
         self.alt_screen = alt_screen
         self.bracketed_paste = bracketed_paste
         self.mouse_reporting = mouse_reporting
-        self.fd = sys.stdout.fileno()
-        self._stdin_fd = sys.stdin.fileno()
+        # File descriptors are resolved LAZILY. Eager resolution would
+        # crash under pytest (which replaces sys.stdin with a fileno-less
+        # capture object) and under any other "construct without
+        # actually entering the terminal" use case — most importantly
+        # the headless snapshot path used by tests and `rn snapshot`.
+        # Each fd setter handles the failure path independently so a
+        # missing stdin doesn't prevent stdout writes and vice versa.
+        self._fd: int | None = None
+        self._stdin_fd_cache: int | None = None
         self._saved_termios: list | None = None
         self._resize_pending = True  # initial layout pass counts as a "resize"
         self._installed = False
+
+    @property
+    def fd(self) -> int:
+        """The stdout fileno, resolved on first access.
+
+        Returns -1 if stdout has no real file descriptor (e.g. under
+        pytest capture). Callers must guard against -1 if they're in
+        a code path that might be exercised headlessly. The renderer
+        proper (Layer 5: diff.py and friends) does NOT call this
+        directly — only Terminal.write does, and write is itself only
+        called from inside the App run loop, not from on_tick.
+        """
+        if self._fd is None:
+            try:
+                self._fd = sys.stdout.fileno()
+            except (OSError, ValueError, AttributeError):
+                self._fd = -1
+        return self._fd
+
+    @property
+    def _stdin_fd(self) -> int:
+        if self._stdin_fd_cache is None:
+            try:
+                self._stdin_fd_cache = sys.stdin.fileno()
+            except (OSError, ValueError, AttributeError):
+                self._stdin_fd_cache = -1
+        return self._stdin_fd_cache
 
     # ─── public ───
 
     def get_size(self) -> tuple[int, int]:
         """Return (rows, cols) from the kernel via TIOCGWINSZ."""
+        fd = self.fd
+        if fd < 0:
+            return (24, 80)
         try:
-            data = fcntl.ioctl(self.fd, termios.TIOCGWINSZ, b"\x00" * 8)
+            data = fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\x00" * 8)
             rows, cols, _, _ = struct.unpack("hhhh", data)
             if rows <= 0 or cols <= 0:
                 return (24, 80)
@@ -109,10 +146,17 @@ class Terminal:
         signal-driven exits can't strand half-written ANSI in a Python
         buffer. The diff layer's output is the only thing that should
         ever flow through here.
+
+        No-op when fd is -1 (e.g. headless tests, snapshot rendering).
+        Headless callers paint into a Grid directly and never trigger
+        this code path; the guard exists so a misuse can't crash.
         """
         if not data:
             return
-        os.write(self.fd, data.encode("utf-8"))
+        fd = self.fd
+        if fd < 0:
+            return
+        os.write(fd, data.encode("utf-8"))
 
     def consume_resize(self) -> bool:
         """Return True at most once per SIGWINCH delivery.
