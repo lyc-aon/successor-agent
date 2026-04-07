@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "successor"
-version = "0.1.0"
+version = "0.1.1"
 description = "Terminal chat harness for local llama.cpp models with a custom cell-based renderer, async bash tool dispatch, and live compaction"
 readme = "README.md"
 license = { text = "Apache-2.0" }

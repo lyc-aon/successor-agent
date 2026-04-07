@@ -194,7 +194,7 @@ pytest
 
 The suite is hermetic. Each test gets its own `SUCCESSOR_CONFIG_DIR`,
 and bash dispatch tests use real shell builtins (no mocks). There are
-826 tests at the time of writing.
+864 tests at the time of writing.
 
 ## Architecture
 
