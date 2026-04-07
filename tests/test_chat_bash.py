@@ -316,3 +316,60 @@ def test_dangerous_command_in_stream_shows_refusal() -> None:
     # And a synthetic 'refused' note
     synthetic = [m for m in chat.messages if m.synthetic and "refused" in m.raw_text.lower()]
     assert len(synthetic) >= 1
+
+
+def test_yolo_profile_lets_dangerous_command_through_stream() -> None:
+    """When profile.tool_config[bash].allow_dangerous is True, the
+    classifier's refusal is SKIPPED and the command runs for real.
+
+    We use `eval ""` as a hermetic proxy for a dangerous command —
+    it trips the classifier but doesn't actually do anything. The
+    test verifies the refusal path is bypassed in yolo mode.
+    """
+    from successor.profiles import Profile
+    chat = SuccessorChat()
+    chat.profile = Profile(
+        name="yolobro",
+        tool_config={"bash": {"allow_dangerous": True}},
+    )
+    chat.messages = []
+    chat._stream_bash_detector = BashStreamDetector()
+    chat._stream = _FakeStream([
+        _content('```bash\neval ""\n```\n'),
+        _stream_end(),
+    ])
+    chat._pump_stream()
+    tool_msgs = [m for m in chat.messages if m.tool_card is not None]
+    assert len(tool_msgs) == 1
+    # Critically: the card EXECUTED (has an exit_code) instead of
+    # being a refusal preview
+    assert tool_msgs[0].tool_card.executed
+    # No 'refused' synthetic message this time
+    synthetic = [m for m in chat.messages if m.synthetic and "refused" in m.raw_text.lower()]
+    assert synthetic == []
+
+
+def test_read_only_profile_blocks_mutating_command_in_stream() -> None:
+    """With allow_mutating=False, mkdir/touch/etc. are refused and
+    the refusal hint points at the config flag."""
+    from successor.profiles import Profile
+    chat = SuccessorChat()
+    chat.profile = Profile(
+        name="readonly",
+        tool_config={"bash": {"allow_mutating": False}},
+    )
+    chat.messages = []
+    chat._stream_bash_detector = BashStreamDetector()
+    chat._stream = _FakeStream([
+        _content("```bash\nmkdir /tmp/nope-successor\n```\n"),
+        _stream_end(),
+    ])
+    chat._pump_stream()
+    tool_msgs = [m for m in chat.messages if m.tool_card is not None]
+    assert len(tool_msgs) == 1
+    # The refused card is the parse-only card — no exit code
+    assert not tool_msgs[0].tool_card.executed
+    assert tool_msgs[0].tool_card.risk == "mutating"
+    # And the refusal hint points at the config path
+    synthetic = [m for m in chat.messages if m.synthetic and "refused" in m.raw_text.lower()]
+    assert any("read-only" in m.raw_text or "allow_mutating" in m.raw_text for m in synthetic)

@@ -15,14 +15,19 @@ import pytest
 from successor.bash import (
     DEFAULT_TIMEOUT_S,
     MAX_OUTPUT_BYTES,
+    BashConfig,
     DangerousCommandRefused,
+    MutatingCommandRefused,
+    RefusedCommand,
     ToolCard,
     classify_risk,
     dispatch_bash,
     parse_bash,
     preview_bash,
+    resolve_bash_config,
 )
 from successor.bash.exec import _truncate_output
+from successor.profiles import Profile
 
 
 # ─── Happy path ───
@@ -228,3 +233,130 @@ def test_dispatch_returns_new_card_does_not_mutate_parser_card() -> None:
     assert dispatched.exit_code == 0
     # Parser card unchanged
     assert parsed.exit_code is None
+
+
+# ─── BashConfig + resolve_bash_config ───
+
+
+def test_resolve_bash_config_none_profile_returns_defaults() -> None:
+    cfg = resolve_bash_config(None)
+    assert cfg == BashConfig()
+    assert cfg.allow_dangerous is False
+    assert cfg.allow_mutating is True
+    assert cfg.timeout_s == DEFAULT_TIMEOUT_S
+    assert cfg.max_output_bytes == MAX_OUTPUT_BYTES
+
+
+def test_resolve_bash_config_empty_tool_config_returns_defaults() -> None:
+    profile = Profile(name="p", tool_config={})
+    cfg = resolve_bash_config(profile)
+    assert cfg == BashConfig()
+
+
+def test_resolve_bash_config_reads_yolo_flags() -> None:
+    profile = Profile(
+        name="yolobro",
+        tool_config={"bash": {"allow_dangerous": True, "allow_mutating": False}},
+    )
+    cfg = resolve_bash_config(profile)
+    assert cfg.allow_dangerous is True
+    assert cfg.allow_mutating is False
+
+
+def test_resolve_bash_config_reads_tuning_flags() -> None:
+    profile = Profile(
+        name="tuned",
+        tool_config={"bash": {"timeout_s": 60.0, "max_output_bytes": 16384}},
+    )
+    cfg = resolve_bash_config(profile)
+    assert cfg.timeout_s == 60.0
+    assert cfg.max_output_bytes == 16384
+
+
+def test_resolve_bash_config_malformed_dict_returns_defaults() -> None:
+    """A hand-edited profile with bad types must not crash the chat."""
+    profile = Profile(
+        name="broken",
+        tool_config={"bash": {"timeout_s": "not a number"}},
+    )
+    cfg = resolve_bash_config(profile)
+    assert cfg == BashConfig()
+
+
+# ─── allow_dangerous flag ───
+
+
+def test_dispatch_dangerous_refused_by_default() -> None:
+    with pytest.raises(DangerousCommandRefused):
+        dispatch_bash("sudo ls")
+
+
+def test_dispatch_dangerous_runs_with_yolo_flag() -> None:
+    """With allow_dangerous=True, the classifier's refusal is skipped.
+
+    We use `eval ""` instead of real dangerous commands so the test
+    is hermetic — eval is still classified as dangerous (exec.py's
+    refusal path fires) but doesn't actually do anything harmful
+    when given an empty string.
+    """
+    card = dispatch_bash('eval ""', allow_dangerous=True)
+    # The card runs — exit code is set either way
+    assert card.executed
+    # Risk stays "dangerous" in the card (the flag bypasses refusal,
+    # not classification — the UI still shows the warn border)
+    assert card.risk == "dangerous"
+
+
+# ─── allow_mutating flag (read-only mode) ───
+
+
+def test_dispatch_mutating_allowed_by_default() -> None:
+    """Default allow_mutating=True — mkdir under /tmp should just run."""
+    with tempfile.TemporaryDirectory() as t:
+        target = os.path.join(t, "new-dir")
+        card = dispatch_bash(f"mkdir {target}")
+        assert card.succeeded
+        assert os.path.isdir(target)
+
+
+def test_dispatch_mutating_refused_in_read_only_mode() -> None:
+    with tempfile.TemporaryDirectory() as t:
+        target = os.path.join(t, "blocked")
+        with pytest.raises(MutatingCommandRefused) as exc_info:
+            dispatch_bash(f"mkdir {target}", allow_mutating=False)
+        # The card on the exception should have the mutating risk
+        assert exc_info.value.card.risk == "mutating"
+        # mkdir was NOT actually run
+        assert not os.path.exists(target)
+
+
+def test_refused_command_base_catches_both() -> None:
+    """RefusedCommand is the shared base for a single-catch path."""
+    with pytest.raises(RefusedCommand):
+        dispatch_bash("sudo ls")
+    with pytest.raises(RefusedCommand):
+        dispatch_bash("touch /tmp/x-refused-test", allow_mutating=False)
+
+
+def test_dispatch_read_only_mode_still_allows_safe_commands() -> None:
+    card = dispatch_bash("echo readonly", allow_mutating=False)
+    assert card.succeeded
+    assert "readonly" in card.output
+
+
+# ─── max_output_bytes override ───
+
+
+def test_dispatch_max_output_bytes_truncates_custom_limit() -> None:
+    # seq 1..1000 produces ~4KB of output. A 64-byte cap should
+    # truncate and set the flag.
+    card = dispatch_bash("seq 1 1000", max_output_bytes=64)
+    assert card.truncated
+    # Output is bounded — the truncation adds a trailing ellipsis
+    assert len(card.output) <= 80  # 64 + the ellipsis suffix
+
+
+def test_dispatch_default_max_output_bytes_lets_small_output_through() -> None:
+    card = dispatch_bash("echo tiny")
+    assert not card.truncated
+    assert "tiny" in card.output

@@ -1418,3 +1418,143 @@ def test_snapshot_tools_overlay_renders(temp_config_dir: Path) -> None:
     assert ("[✓]" in plain) or ("[ ]" in plain)
     # Header of the overlay
     assert "space toggles" in plain
+
+
+# ─── Bash safety flags (yolo mode etc) ───
+
+
+def _force_bash_enabled(menu: SuccessorConfig) -> None:
+    """Helper: ensure the current profile has bash in its tools tuple
+    so the bash_* settings rows become visible."""
+    from dataclasses import replace
+    cur = menu._current_profile()
+    if "bash" not in cur.tools:
+        new = replace(cur, tools=("bash",))
+        menu._working_profiles[menu._profile_cursor] = new
+        menu._initial_profiles[menu._profile_cursor] = new
+
+
+def test_bash_flag_rows_hidden_when_bash_disabled(temp_config_dir: Path) -> None:
+    """bash_* rows only render when bash is in profile.tools."""
+    from dataclasses import replace
+    menu = SuccessorConfig()
+    # Force tools empty
+    cur = menu._current_profile()
+    new = replace(cur, tools=())
+    menu._working_profiles[menu._profile_cursor] = new
+    menu._initial_profiles[menu._profile_cursor] = new
+
+    from successor.render.cells import Grid
+    g = Grid(30, 140)
+    menu.on_tick(g)
+    plain = render_grid_to_plain(g)
+    # The "bash safety" section should NOT appear when bash is off
+    assert "bash safety" not in plain
+    assert "yolo" not in plain.lower()
+
+
+def test_bash_flag_rows_visible_when_bash_enabled(temp_config_dir: Path) -> None:
+    """Turning bash on makes the safety section appear."""
+    menu = SuccessorConfig()
+    _force_bash_enabled(menu)
+
+    from successor.render.cells import Grid
+    # Tall grid so every row fits — the bash safety section is
+    # below provider, extensions, tools
+    g = Grid(42, 160)
+    menu.on_tick(g)
+    plain = render_grid_to_plain(g)
+    assert "bash safety" in plain
+    assert "yolo mode" in plain
+    assert "allow mutating" in plain
+    assert "timeout" in plain
+
+
+def test_bash_yolo_toggle_flips_immediately(temp_config_dir: Path) -> None:
+    """Toggle on the yolo row flips the tool_config entry in the live
+    profile — no overlay needed for TOGGLE fields."""
+    menu = SuccessorConfig()
+    _force_bash_enabled(menu)
+    idx = _field_idx("bash_allow_dangerous")
+    menu._settings_cursor = idx
+
+    # Initial state: default (False)
+    cfg = (menu._current_profile().tool_config or {}).get("bash") or {}
+    assert cfg.get("allow_dangerous", False) is False
+
+    menu._begin_edit()  # TOGGLE fields commit immediately
+    cfg = (menu._current_profile().tool_config or {}).get("bash") or {}
+    assert cfg.get("allow_dangerous") is True
+    # Dirty marker fired
+    assert menu._is_dirty(menu._current_profile().name, "bash_allow_dangerous")
+
+
+def test_bash_read_only_toggle_flips_allow_mutating(temp_config_dir: Path) -> None:
+    menu = SuccessorConfig()
+    _force_bash_enabled(menu)
+    idx = _field_idx("bash_allow_mutating")
+    menu._settings_cursor = idx
+
+    menu._begin_edit()  # toggles from default True → False
+    cfg = (menu._current_profile().tool_config or {}).get("bash") or {}
+    assert cfg.get("allow_mutating") is False
+
+
+def test_bash_timeout_edit_lands_in_tool_config(temp_config_dir: Path) -> None:
+    """Opening the timeout number field and committing writes into
+    tool_config['bash']['timeout_s']."""
+    menu = SuccessorConfig()
+    _force_bash_enabled(menu)
+    idx = _field_idx("bash_timeout_s")
+    menu._settings_cursor = idx
+
+    menu._begin_edit()
+    assert menu._inline_text_edit is not None
+    # Clear and set new buffer
+    edit = menu._inline_text_edit
+    edit.buffer = "90.0"
+    edit.cursor = len(edit.buffer)
+    menu._handle_inline_text_key(KeyEvent(key=Key.ENTER))
+    cfg = (menu._current_profile().tool_config or {}).get("bash") or {}
+    assert cfg.get("timeout_s") == 90.0
+
+
+def test_bash_flag_edits_persist_to_disk(temp_config_dir: Path) -> None:
+    """Save writes the tool_config dict into the JSON file."""
+    menu = SuccessorConfig()
+    _force_bash_enabled(menu)
+    profile_name = menu._current_profile().name
+
+    # Flip yolo on
+    menu._settings_cursor = _field_idx("bash_allow_dangerous")
+    menu._begin_edit()
+
+    menu._save()
+    target = temp_config_dir / "profiles" / f"{profile_name}.json"
+    assert target.exists()
+    payload = json.loads(target.read_text())
+    bash_cfg = payload.get("tool_config", {}).get("bash", {})
+    assert bash_cfg.get("allow_dangerous") is True
+
+
+def test_toggling_tools_off_snaps_cursor_off_bash_rows(temp_config_dir: Path) -> None:
+    """If the cursor sits on a bash_* row and bash gets toggled off,
+    the cursor snaps to a still-visible row instead of being stranded."""
+    menu = SuccessorConfig()
+    _force_bash_enabled(menu)
+    menu._settings_cursor = _field_idx("bash_allow_dangerous")
+    assert menu._settings_cursor == _field_idx("bash_allow_dangerous")
+
+    # Open tools overlay and toggle bash off
+    tools_idx = _field_idx("tools")
+    # Save cursor state before opening tools overlay
+    menu._settings_cursor = tools_idx
+    menu._begin_edit()
+    # The space toggle lives in _handle_tools_edit_key
+    menu._handle_tools_edit_key(KeyEvent(char=" "))  # toggle bash off
+    menu._handle_tools_edit_key(KeyEvent(key=Key.ENTER))  # commit
+
+    # bash_allow_dangerous is now hidden — visible indices must not
+    # contain it
+    visible = menu._editable_visible_indices()
+    assert _field_idx("bash_allow_dangerous") not in visible

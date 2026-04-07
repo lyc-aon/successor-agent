@@ -35,7 +35,8 @@ import os
 import shlex
 import subprocess
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from typing import Any
 
 from .cards import Risk, ToolCard
 from .parser import parse_bash
@@ -48,19 +49,104 @@ DEFAULT_TIMEOUT_S: float = 30.0
 MAX_OUTPUT_BYTES: int = 8192
 
 
-# ─── Refusal exception ───
+# ─── Per-profile bash configuration ───
+#
+# Lives in `profile.tool_config["bash"]` as a plain dict so profiles
+# stay JSON-round-trippable. `resolve_bash_config(profile)` folds the
+# raw dict over the defaults below and returns a frozen dataclass
+# the executor can consume directly.
+#
+# Three axes of control:
+#
+#   allow_dangerous  — OFF by default. Flip on for yolo mode. When
+#                      True, the classifier's "dangerous" refusal is
+#                      SKIPPED — rm -rf /, sudo, curl|sh, etc. will
+#                      all run. There is no middle ground: if this
+#                      is on, the user has explicitly opted in to
+#                      running whatever the model emits.
+#
+#   allow_mutating   — ON by default. Flip off for READ-ONLY mode,
+#                      which refuses anything the classifier tags
+#                      as "mutating" (mkdir, touch, rm in cwd, mv,
+#                      cp, git add, sed -i, package-manager installs,
+#                      file redirects). Useful for letting the agent
+#                      explore a repo without touching it.
+#
+#   timeout_s        — subprocess timeout. Default 30s.
+#   max_output_bytes — output truncation limit. Default 8KB.
+#
+# New flags always default to the existing hard-coded behavior so
+# old profiles without tool_config["bash"] keep working unchanged.
 
 
-class DangerousCommandRefused(Exception):
-    """Raised when a dangerous command is dispatched without
-    allow_dangerous=True. Carries the card so the caller can show
-    the user what was refused and why.
+@dataclass(frozen=True, slots=True)
+class BashConfig:
+    """Resolved per-profile bash execution configuration.
+
+    Built by `resolve_bash_config(profile)` — callers should not
+    construct this directly from raw dict data. The frozen dataclass
+    guarantees the executor sees consistent defaults regardless of
+    what was in the profile JSON.
     """
+
+    allow_dangerous: bool = False
+    allow_mutating: bool = True
+    timeout_s: float = DEFAULT_TIMEOUT_S
+    max_output_bytes: int = MAX_OUTPUT_BYTES
+
+
+def resolve_bash_config(profile: Any) -> BashConfig:
+    """Fold a profile's `tool_config["bash"]` dict over the defaults.
+
+    `profile` is typed Any to avoid a circular import with profiles.
+    A None/missing profile or a profile with no tool_config entry for
+    bash returns the pure defaults. Extra keys in the dict are ignored
+    so future additions stay backwards-compatible.
+    """
+    if profile is None:
+        return BashConfig()
+    tool_config = getattr(profile, "tool_config", None) or {}
+    raw = tool_config.get("bash") or {}
+    try:
+        return BashConfig(
+            allow_dangerous=bool(raw.get("allow_dangerous", False)),
+            allow_mutating=bool(raw.get("allow_mutating", True)),
+            timeout_s=float(raw.get("timeout_s", DEFAULT_TIMEOUT_S)),
+            max_output_bytes=int(raw.get("max_output_bytes", MAX_OUTPUT_BYTES)),
+        )
+    except (TypeError, ValueError):
+        # Malformed JSON — fall back to pure defaults rather than
+        # crash the chat. The config menu validates on write but a
+        # hand-edited profile could still land bad types.
+        return BashConfig()
+
+
+# ─── Refusal exceptions ───
+
+
+class RefusedCommand(Exception):
+    """Base for any command refused before execution. Carries the
+    pre-execution card so the UI can show what was blocked and why."""
 
     def __init__(self, card: ToolCard, reason: str) -> None:
         self.card = card
         self.reason = reason
-        super().__init__(f"refused dangerous command: {reason}")
+        super().__init__(f"refused command: {reason}")
+
+
+class DangerousCommandRefused(RefusedCommand):
+    """Raised when a dangerous command is dispatched without
+    allow_dangerous=True. Existing callers catch this specifically;
+    new refusal types inherit from RefusedCommand so a single catch
+    can handle them all if desired.
+    """
+
+
+class MutatingCommandRefused(RefusedCommand):
+    """Raised when a mutating command is dispatched against a profile
+    running in read-only mode (allow_mutating=False). Used when the
+    user wants the agent to explore a repo without touching it.
+    """
 
 
 # ─── Output truncation ───
@@ -93,7 +179,9 @@ def dispatch_bash(
     command: str,
     *,
     allow_dangerous: bool = False,
+    allow_mutating: bool = True,
     timeout: float = DEFAULT_TIMEOUT_S,
+    max_output_bytes: int = MAX_OUTPUT_BYTES,
     cwd: str | None = None,
     env: dict[str, str] | None = None,
 ) -> ToolCard:
@@ -104,8 +192,17 @@ def dispatch_bash(
             substitutions all work because we run with shell=True.
         allow_dangerous: if False (default), commands classified as
             dangerous raise DangerousCommandRefused before execution.
+            Flip to True in the profile's tool_config to enable yolo
+            mode (rm -rf /, sudo, curl|sh, etc. will all run).
+        allow_mutating: if False, commands classified as mutating
+            raise MutatingCommandRefused before execution. Default
+            True. Flip to False in the profile's tool_config for a
+            read-only mode.
         timeout: subprocess timeout in seconds. On timeout the
             returned card has exit_code=-1 and partial output.
+        max_output_bytes: stdout+stderr truncation ceiling. Output
+            beyond this is replaced with an ellipsis and the card's
+            truncated flag is set.
         cwd: working directory. None means the current process's cwd.
         env: subprocess environment. None means inherit from parent.
 
@@ -126,11 +223,18 @@ def dispatch_bash(
     # Build a card with the elevated risk in case we refuse
     gated_card = replace(parsed, risk=final_risk)
 
-    # 4. Refuse dangerous commands unless explicitly allowed
+    # 4a. Refuse dangerous commands unless explicitly allowed
     if final_risk == "dangerous" and not allow_dangerous:
         raise DangerousCommandRefused(
             gated_card,
             classifier_reason or "command pattern flagged as dangerous",
+        )
+
+    # 4b. Refuse mutating commands when the profile is in read-only mode
+    if final_risk == "mutating" and not allow_mutating:
+        raise MutatingCommandRefused(
+            gated_card,
+            classifier_reason or "mutating command refused in read-only mode",
         )
 
     # 5. Run the command. shell=True is intentional — we WANT pipes,
@@ -165,8 +269,8 @@ def dispatch_bash(
     duration_ms = (time.monotonic() - start) * 1000.0
 
     # 6. Truncate output so a runaway command doesn't blow up the chat
-    truncated_out, was_truncated_out = _truncate_output(stdout)
-    truncated_err, was_truncated_err = _truncate_output(stderr)
+    truncated_out, was_truncated_out = _truncate_output(stdout, max_bytes=max_output_bytes)
+    truncated_err, was_truncated_err = _truncate_output(stderr, max_bytes=max_output_bytes)
 
     return replace(
         gated_card,

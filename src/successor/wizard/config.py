@@ -252,12 +252,57 @@ _SETTINGS_TREE: tuple[_SettingField, ...] = (
         name="tools", label="tools", section="",
         kind=FieldKind.TOOLS_TOGGLE,
     ),
+    # ── Bash tool flags ─────────────────────────────────────────────
+    # These are per-tool knobs stored under
+    # profile.tool_config["bash"]. They only render when bash is in
+    # profile.tools — otherwise the rows hide themselves at paint
+    # time (see `_bash_rows_visible`).
+    _SettingField(
+        name="bash_allow_dangerous", label="yolo mode", section="bash safety",
+        kind=FieldKind.TOGGLE,
+        options_getter=lambda: [False, True],
+    ),
+    _SettingField(
+        name="bash_allow_mutating", label="allow mutating", section="",
+        kind=FieldKind.TOGGLE,
+        options_getter=lambda: [True, False],
+    ),
+    _SettingField(
+        name="bash_timeout_s", label="timeout (s)", section="",
+        kind=FieldKind.NUMBER, number_kind="float",
+    ),
+    _SettingField(
+        name="bash_max_output_bytes", label="max output bytes", section="",
+        kind=FieldKind.NUMBER, number_kind="int",
+    ),
 )
 
 # Indices into _SETTINGS_TREE that ARE editable (used for cursor jumps)
 _EDITABLE_INDICES = tuple(
     i for i, f in enumerate(_SETTINGS_TREE) if f.kind != FieldKind.READONLY
 )
+
+
+def _field_visible_for_profile(profile: Profile, field: _SettingField) -> bool:
+    """Return True if this field should be shown for the given profile.
+
+    Some fields are conditional on what else the profile has enabled.
+    Right now the only conditional group is the bash_* fields: they
+    only make sense when bash is in profile.tools, otherwise they're
+    just noise. Adding a new tool with its own per-tool knobs later
+    will extend this function — no other paint code needs to change.
+    """
+    if field.name.startswith("bash_"):
+        return "bash" in (profile.tools or ())
+    return True
+
+
+def _visible_field_indices(profile: Profile) -> tuple[int, ...]:
+    """All field indices visible for this profile, in tree order."""
+    return tuple(
+        i for i, f in enumerate(_SETTINGS_TREE)
+        if _field_visible_for_profile(profile, f)
+    )
 
 
 # ─── Focus state ───
@@ -510,29 +555,45 @@ class SuccessorConfig(App):
         idx = max(0, min(self._settings_cursor, len(_SETTINGS_TREE) - 1))
         return _SETTINGS_TREE[idx]
 
+    def _editable_visible_indices(self) -> tuple[int, ...]:
+        """Editable field indices visible for the current profile.
+
+        Dynamic because some fields (bash_* flags) only show when
+        bash is in the profile's tools list. When the user toggles
+        bash on/off the set of navigable rows changes with it.
+        """
+        profile = self._current_profile()
+        return tuple(
+            i for i in _EDITABLE_INDICES
+            if _field_visible_for_profile(profile, _SETTINGS_TREE[i])
+        )
+
     def _first_editable_at_or_after(self, start_idx: int) -> int:
         """Find the first editable row index at or after start_idx."""
-        for i in range(start_idx, len(_SETTINGS_TREE)):
-            if _SETTINGS_TREE[i].kind != FieldKind.READONLY:
+        editable = self._editable_visible_indices() or _EDITABLE_INDICES
+        for i in editable:
+            if i >= start_idx:
                 return i
         # Wrap
-        for i in range(0, start_idx):
-            if _SETTINGS_TREE[i].kind != FieldKind.READONLY:
-                return i
-        return 0
+        return editable[0] if editable else 0
 
     def _settings_move(self, delta: int) -> None:
         """Move the settings cursor by delta, skipping read-only rows."""
-        if not _EDITABLE_INDICES:
+        editable = self._editable_visible_indices()
+        if not editable:
             return
-        # Find current position in the editable indices list
         current = self._settings_cursor
+        # If the cursor is on a now-hidden row, snap it to the
+        # nearest visible one before moving
+        if current not in editable:
+            self._settings_cursor = editable[0]
+            current = editable[0]
         try:
-            cur_pos = _EDITABLE_INDICES.index(current)
+            cur_pos = editable.index(current)
         except ValueError:
             cur_pos = 0
-        new_pos = (cur_pos + delta) % len(_EDITABLE_INDICES)
-        self._settings_cursor = _EDITABLE_INDICES[new_pos]
+        new_pos = (cur_pos + delta) % len(editable)
+        self._settings_cursor = editable[new_pos]
         self._section_reveal_at = self.elapsed
 
     def _profile_value_for_field(self, profile: Profile, field: _SettingField) -> Any:
@@ -551,6 +612,15 @@ class SuccessorConfig(App):
             if not profile.tools:
                 return "(none — chat only)"
             return ", ".join(profile.tools)
+        if field.name.startswith("bash_"):
+            raw = self._profile_value_for_field_raw(profile, field)
+            if field.name == "bash_allow_dangerous":
+                return "⚠ YOLO" if raw else "off (safe)"
+            if field.name == "bash_allow_mutating":
+                return "on" if raw else "read-only"
+            if raw is None:
+                return "(default)"
+            return str(raw)
 
         raw = self._profile_value_for_field_raw(profile, field)
 
@@ -585,6 +655,18 @@ class SuccessorConfig(App):
             new_profile = replace(old_profile, system_prompt=new_value)
         elif field.name == "tools":
             new_profile = replace(old_profile, tools=tuple(new_value))
+        elif field.name.startswith("bash_"):
+            # Write into a fresh tool_config dict so the compare with
+            # the initial snapshot is clean.
+            key = field.name.removeprefix("bash_")
+            new_tool_config = {
+                k: dict(v) if isinstance(v, dict) else v
+                for k, v in (old_profile.tool_config or {}).items()
+            }
+            bash_cfg = dict(new_tool_config.get("bash") or {})
+            bash_cfg[key] = new_value
+            new_tool_config["bash"] = bash_cfg
+            new_profile = replace(old_profile, tool_config=new_tool_config)
         elif field.name.startswith("provider_"):
             key = field.name.removeprefix("provider_")
             new_provider = dict(old_profile.provider) if old_profile.provider else {}
@@ -604,9 +686,14 @@ class SuccessorConfig(App):
             self._dirty.add((new_profile.name, field.name))
 
         # If we're editing the profile that's currently displayed in
-        # the preview, sync the preview chat
+        # the preview, sync the preview chat AND make sure the cursor
+        # isn't stranded on a row that's now hidden (e.g. the bash_*
+        # flags disappear when bash is toggled off).
         if profile_idx == self._profile_cursor:
             self._sync_preview()
+            visible = self._editable_visible_indices()
+            if visible and self._settings_cursor not in visible:
+                self._settings_cursor = visible[0]
 
     def _profile_value_for_field_raw(self, profile: Profile, field: _SettingField) -> Any:
         """Read the RAW value of a field — no truncation, no masking.
@@ -626,6 +713,26 @@ class SuccessorConfig(App):
             return profile.system_prompt
         if field.name == "tools":
             return tuple(profile.tools)
+        if field.name.startswith("bash_"):
+            # Pull from profile.tool_config["bash"] with defaults
+            # mirrored from BashConfig. Missing entries mean "default"
+            # so the dirty-compare vs initial is stable.
+            from ..bash.exec import (
+                BashConfig,
+                DEFAULT_TIMEOUT_S,
+                MAX_OUTPUT_BYTES,
+            )
+            bash_cfg = (profile.tool_config or {}).get("bash") or {}
+            key = field.name.removeprefix("bash_")
+            if key == "allow_dangerous":
+                return bool(bash_cfg.get("allow_dangerous", False))
+            if key == "allow_mutating":
+                return bool(bash_cfg.get("allow_mutating", True))
+            if key == "timeout_s":
+                return float(bash_cfg.get("timeout_s", DEFAULT_TIMEOUT_S))
+            if key == "max_output_bytes":
+                return int(bash_cfg.get("max_output_bytes", MAX_OUTPUT_BYTES))
+            return None
         if field.name.startswith("provider_"):
             key = field.name.removeprefix("provider_")
             if profile.provider:
@@ -1599,6 +1706,11 @@ class SuccessorConfig(App):
         label_col_w = max(len(f.label) for f in _SETTINGS_TREE)
 
         for idx, fld in enumerate(_SETTINGS_TREE):
+            # Skip fields not applicable to this profile (e.g. bash_*
+            # flags when bash isn't enabled)
+            if not _field_visible_for_profile(profile, fld):
+                continue
+
             # Section header
             if fld.section and fld.section != last_section:
                 if cur_y >= y + h - 1:

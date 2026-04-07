@@ -104,12 +104,16 @@ from .agent import (
 )
 from .agent.bash_stream import BashStreamDetector
 from .bash import (
+    BashConfig,
     DangerousCommandRefused,
+    MutatingCommandRefused,
+    RefusedCommand,
     ToolCard,
     dispatch_bash,
     measure_tool_card_height,
     paint_tool_card,
     preview_bash,
+    resolve_bash_config,
 )
 from .tools_registry import (
     AVAILABLE_TOOLS,
@@ -2199,19 +2203,29 @@ class SuccessorChat(App):
                 f"`{command}`",
                 synthetic=True,
             ))
+            bash_cfg = resolve_bash_config(self.profile)
             try:
-                card = dispatch_bash(command)
-            except DangerousCommandRefused as exc:
+                card = dispatch_bash(
+                    command,
+                    allow_dangerous=bash_cfg.allow_dangerous,
+                    allow_mutating=bash_cfg.allow_mutating,
+                    timeout=bash_cfg.timeout_s,
+                    max_output_bytes=bash_cfg.max_output_bytes,
+                )
+            except RefusedCommand as exc:
                 # Show the refused card (preview-only, no execution)
-                # so the user sees WHY it was refused
+                # so the user sees WHY it was refused. RefusedCommand
+                # covers both DangerousCommandRefused and
+                # MutatingCommandRefused — the reason string already
+                # explains which.
                 self.messages.append(_Message(
                     "tool", "",
                     tool_card=exc.card,
                 ))
+                hint = self._refusal_hint(exc, bash_cfg)
                 self.messages.append(_Message(
                     "successor",
-                    f"refused: {exc.reason}. To run anyway, you'd need to "
-                    f"override the gate (not yet wired in v0).",
+                    f"refused: {exc.reason}. {hint}",
                     synthetic=True,
                 ))
                 self._scroll_to_bottom()
@@ -3109,27 +3123,37 @@ class SuccessorChat(App):
 
         Each block becomes its own _Message with a tool_card attached.
         Cards stack BELOW the assistant message that produced them.
-        Dangerous commands are auto-refused — the refused card is
-        still appended so the user sees what was blocked.
+        Dangerous/mutating refusals (when safety flags are restrictive)
+        still append a refused card so the user sees what was blocked.
 
-        Failures other than DangerousCommandRefused are caught and
-        logged as a synthetic message — bash dispatch should never
-        crash the chat path.
+        Safety flags come from `profile.tool_config["bash"]` resolved
+        once per batch via `resolve_bash_config`. That means the yolo
+        toggle, read-only toggle, timeout, and max output all flow
+        from the profile config menu to the live dispatch path with
+        zero extra plumbing.
         """
         if not blocks:
             return
+        bash_cfg = resolve_bash_config(self.profile)
         for command in blocks:
             try:
-                card = dispatch_bash(command)
-            except DangerousCommandRefused as exc:
+                card = dispatch_bash(
+                    command,
+                    allow_dangerous=bash_cfg.allow_dangerous,
+                    allow_mutating=bash_cfg.allow_mutating,
+                    timeout=bash_cfg.timeout_s,
+                    max_output_bytes=bash_cfg.max_output_bytes,
+                )
+            except RefusedCommand as exc:
                 # Show the refused (preview) card so the user sees
                 # what was blocked and why
                 self.messages.append(_Message(
                     "tool", "", tool_card=exc.card,
                 ))
+                hint = self._refusal_hint(exc, bash_cfg)
                 self.messages.append(_Message(
                     "successor",
-                    f"refused: {exc.reason}.",
+                    f"refused: {exc.reason}. {hint}",
                     synthetic=True,
                 ))
                 continue
@@ -3143,6 +3167,33 @@ class SuccessorChat(App):
             self.messages.append(_Message(
                 "tool", "", tool_card=card,
             ))
+
+    def _refusal_hint(
+        self, exc: RefusedCommand, bash_cfg: BashConfig,
+    ) -> str:
+        """One-line hint directing the user to the safety flag that
+        would have let the command through.
+
+        We point at the config menu path (`/config` → settings →
+        tools → bash flags) rather than naming an env var so users
+        have a single place to look. Future: a one-shot per-command
+        override via confirmation modal.
+        """
+        if isinstance(exc, DangerousCommandRefused):
+            if bash_cfg.allow_dangerous:
+                # Shouldn't happen; the dispatch path wouldn't raise.
+                # Still safe to fall through.
+                return "enable bash.allow_dangerous in the profile to run."
+            return (
+                "enable bash.allow_dangerous in the profile to opt in "
+                "(yolo mode) — /config → tools → bash."
+            )
+        if isinstance(exc, MutatingCommandRefused):
+            return (
+                "profile is in read-only mode. Enable bash.allow_mutating "
+                "in /config → tools → bash to run this."
+            )
+        return ""
 
     # ─── Layout helpers ───
 

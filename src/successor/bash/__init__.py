@@ -43,9 +43,13 @@ from .risk import classify_risk  # noqa: E402
 from .exec import (  # noqa: E402
     DEFAULT_TIMEOUT_S,
     MAX_OUTPUT_BYTES,
+    BashConfig,
     DangerousCommandRefused,
+    MutatingCommandRefused,
+    RefusedCommand,
     dispatch_bash,
     preview_bash,
+    resolve_bash_config,
 )
 
 # Renderer (kept inside the bash package so paint.py stays generic)
@@ -57,10 +61,13 @@ from .render import (  # noqa: E402
 
 
 __all__ = [
+    "BashConfig",
     "DEFAULT_MAX_OUTPUT_LINES",
     "DEFAULT_TIMEOUT_S",
     "DangerousCommandRefused",
     "MAX_OUTPUT_BYTES",
+    "MutatingCommandRefused",
+    "RefusedCommand",
     "Risk",
     "ToolCard",
     "bash_parser",
@@ -73,4 +80,5 @@ __all__ = [
     "parse_bash",
     "preview_bash",
     "registered_commands",
+    "resolve_bash_config",
 ]
