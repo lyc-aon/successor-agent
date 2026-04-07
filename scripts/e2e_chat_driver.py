@@ -199,14 +199,18 @@ def settle_chat_with_capture(
     snapshot_dir: Path | None,
     snapshot_prefix: str,
 ) -> tuple[bool, float, int]:
-    """Drive `_pump_stream` until the chat is fully settled — no
-    stream in flight AND the agent-loop turn counter has dropped
-    back to 0 (meaning continuation has finished or halted).
+    """Drive the chat's pumps until it's fully settled: no stream in
+    flight, no pending agent turn, AND no in-flight bash runners.
 
-    While streaming, capture a frame every MID_STREAM_SNAPSHOT_INTERVAL_S
-    so we can audit the live render evolution after the fact. Frames
-    are written to `snapshot_dir/{prefix}_NNN_{plain,ansi}.txt`. Pass
-    snapshot_dir=None to disable mid-stream capture.
+    The runner check is critical — with async dispatch, _pump_stream
+    can return after a StreamEnded while BashRunners are still
+    executing in background threads. The chat's tick loop needs to
+    keep polling them until they complete and their cards finalize.
+
+    While the chat is busy, capture a frame every
+    MID_STREAM_SNAPSHOT_INTERVAL_S so we can audit the live render
+    evolution after the fact. Pass snapshot_dir=None to disable
+    mid-stream capture.
 
     Returns (settled_cleanly, elapsed_seconds, frames_captured).
     """
@@ -215,8 +219,13 @@ def settle_chat_with_capture(
     frames = 0
 
     while True:
-        # Settled?
-        if chat._stream is None and chat._agent_turn == 0:
+        # Fully settled: stream done + no continuation queued + no
+        # runners still executing.
+        if (
+            chat._stream is None
+            and chat._agent_turn == 0
+            and not chat._running_tools
+        ):
             return True, time.monotonic() - start, frames
 
         # Mid-stream capture
@@ -228,17 +237,27 @@ def settle_chat_with_capture(
                 _capture_frame(chat, snapshot_dir, snapshot_prefix, frames)
 
         chat._pump_stream()
+        chat._pump_running_tools()
 
         if time.monotonic() - start > timeout_s:
-            # Timeout — try to clean up cleanly so the next turn can
-            # still proceed. Close any in-flight stream.
+            # Timeout — clean up so the next prompt can still start.
             if chat._stream is not None:
                 try:
                     chat._stream.close()
                 except Exception:
                     pass
                 chat._stream = None
+            if chat._running_tools:
+                for msg in list(chat._running_tools):
+                    if msg.running_tool is not None:
+                        msg.running_tool.cancel()
+                # Drain one more pass so cancellations propagate
+                deadline = time.monotonic() + 1.5
+                while chat._running_tools and time.monotonic() < deadline:
+                    chat._pump_running_tools()
+                    time.sleep(TICK_SLEEP_S)
             chat._agent_turn = 0
+            chat._pending_continuation = False
             return False, time.monotonic() - start, frames
 
         time.sleep(TICK_SLEEP_S)

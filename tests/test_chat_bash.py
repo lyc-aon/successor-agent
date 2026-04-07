@@ -12,6 +12,7 @@ shell builtins (echo, true, pwd) so no mocks.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -52,6 +53,24 @@ def _stream_end() -> StreamEnded:
     return StreamEnded(finish_reason="stop")
 
 
+def _drain_runners(chat: SuccessorChat, max_ticks: int = 500) -> None:
+    """Pump _pump_running_tools until every in-flight bash runner has
+    completed and its preview card has been replaced with the final
+    enriched ToolCard. Used by tests that dispatch via /bash or via
+    _pump_stream and need to wait for the subprocess to finish before
+    asserting on card.exit_code / card.output / etc.
+    """
+    import time as _time
+    for _ in range(max_ticks):
+        if not chat._running_tools:
+            return
+        chat._pump_running_tools()
+        _time.sleep(0.005)
+    raise AssertionError(
+        f"_drain_runners exceeded {max_ticks} ticks — runners did not finish"
+    )
+
+
 # ─── /bash slash command ───
 
 
@@ -60,6 +79,7 @@ def test_bash_command_appends_tool_message(temp_config_dir: Path) -> None:
     chat.messages = []
     chat.input_buffer = "/bash echo hello"
     chat._submit()
+    _drain_runners(chat)
 
     # Should have appended: synthetic user echo + tool message
     tool_msgs = [m for m in chat.messages if m.tool_card is not None]
@@ -345,6 +365,7 @@ def test_yolo_profile_lets_dangerous_command_through_stream() -> None:
         _stream_end(),
     ])
     chat._pump_stream()
+    _drain_runners(chat)
     tool_msgs = [m for m in chat.messages if m.tool_card is not None]
     assert len(tool_msgs) == 1
     # Critically: the card EXECUTED (has an exit_code) instead of
@@ -394,6 +415,7 @@ def test_heredoc_file_write_produces_one_card_and_writes_file(tmp_path) -> None:
         _stream_end(),
     ])
     chat._pump_stream()
+    _drain_runners(chat)
 
     # EXACTLY one tool card should land — not one per heredoc line
     tool_msgs = [m for m in chat.messages if m.tool_card is not None]
@@ -432,6 +454,7 @@ def test_multi_line_script_dispatches_as_one_block(tmp_path) -> None:
         _stream_end(),
     ])
     chat._pump_stream()
+    _drain_runners(chat)
     tool_msgs = [m for m in chat.messages if m.tool_card is not None]
     assert len(tool_msgs) == 1
     # All three echoes in the output
@@ -500,16 +523,27 @@ class _MockClient:
         return self._streams.pop(0)
 
 
-def _drive_until_idle(chat: SuccessorChat, max_ticks: int = 100) -> int:
-    """Drive chat._pump_stream until the chat is idle (no stream OR
-    no pending agent turn). Returns the number of ticks consumed.
+def _drive_until_idle(chat: SuccessorChat, max_ticks: int = 1000) -> int:
+    """Drive chat._pump_stream + chat._pump_running_tools until the
+    chat is fully idle: no stream in flight, no pending agent turn,
+    AND no in-flight bash runners. Returns the number of ticks
+    consumed.
 
-    Hard-capped at `max_ticks` to catch runaway loops in tests.
+    Hard-capped at `max_ticks` (with 5ms sleep between ticks, that's
+    a 5-second wall-clock budget — generous enough for real runners
+    against real subprocess but tight enough to catch hangs).
     """
+    import time as _time
     for tick in range(max_ticks):
-        if chat._stream is None and chat._agent_turn == 0:
+        if (
+            chat._stream is None
+            and chat._agent_turn == 0
+            and not chat._running_tools
+        ):
             return tick
         chat._pump_stream()
+        chat._pump_running_tools()
+        _time.sleep(0.005)
     raise AssertionError(
         f"_drive_until_idle exceeded {max_ticks} ticks — loop did not settle"
     )
@@ -864,6 +898,7 @@ def test_native_tool_call_dispatches_via_pump(temp_config_dir: Path) -> None:
         call_id="call_native_42",
     )
     chat._pump_stream()
+    _drain_runners(chat)
 
     tool_msgs = [m for m in chat.messages if m.tool_card is not None]
     assert len(tool_msgs) == 1
@@ -1094,3 +1129,229 @@ def test_provider_finalize_handles_invalid_json_gracefully() -> None:
     assert len(final) == 1
     assert final[0]["arguments"] == {}
     assert final[0]["raw_arguments"] == '{"command": "ls'
+
+
+# ─── Async runner integration with the chat tick loop ───
+#
+# These tests cover the async dispatch path: BashRunner spawned per
+# tool call, _Message.running_tool tracks the in-flight runner, the
+# chat's _pump_running_tools polls each tick, and finalization
+# replaces the preview card with the enriched card. Continuation
+# stream fires only after the LAST runner in a batch completes.
+
+
+def test_bash_dispatch_spawns_running_message_immediately(
+    temp_config_dir: Path,
+) -> None:
+    """The /bash slash command spawns an async runner. Right after
+    _submit() returns, before draining, the message exists with
+    running_tool set and tool_card is the PREVIEW (no exit_code yet)."""
+    chat = SuccessorChat()
+    chat.messages = []
+    chat.input_buffer = "/bash echo immediate"
+    chat._submit()
+
+    tool_msgs = [m for m in chat.messages if m.tool_card is not None]
+    assert len(tool_msgs) == 1
+    msg = tool_msgs[0]
+    # The runner should still be in flight (or just barely done)
+    assert msg.tool_card is not None
+    assert msg.tool_card.verb == "print-text"
+    # Until the runner finishes, exit_code is None on the preview
+    if msg.running_tool is not None:
+        assert msg.tool_card.exit_code is None
+    assert chat._running_tools, "runner should be registered for polling"
+
+    # Now drain — the runner should complete and the card finalize
+    _drain_runners(chat)
+    assert msg.running_tool is None
+    assert msg.tool_card.exit_code == 0
+    assert "immediate" in msg.tool_card.output
+    assert chat._running_tools == []
+
+
+def test_running_tool_pulse_does_not_block_tick(
+    temp_config_dir: Path,
+) -> None:
+    """While a runner is in flight, repeated calls to on_tick must
+    return promptly even though the subprocess is sleeping. Proves
+    the tick loop is unblocked by async dispatch."""
+    from successor.render.cells import Grid
+    chat = SuccessorChat()
+    chat.messages = []
+    chat.input_buffer = "/bash sleep 0.15 && echo done"
+    chat._submit()
+
+    g = Grid(20, 80)
+    tick_count = 0
+    t0 = time.monotonic()
+    while chat._running_tools and time.monotonic() - t0 < 1.0:
+        chat.on_tick(g)
+        tick_count += 1
+    # Final drain in case the runner finished between iterations
+    chat._pump_running_tools()
+    elapsed = time.monotonic() - t0
+
+    # Subprocess slept ~150ms; we should have ticked many times
+    assert tick_count >= 10, (
+        f"only {tick_count} ticks during {elapsed:.3f}s of subprocess "
+        f"runtime — tick loop may be blocking on dispatch"
+    )
+    # The card finalized
+    cards = [m for m in chat.messages if m.tool_card is not None]
+    assert cards
+    assert cards[0].tool_card.exit_code == 0
+
+
+def test_running_tool_renders_with_spinner_glyph(
+    temp_config_dir: Path,
+) -> None:
+    """While a runner is in flight, the chat paint should produce
+    rows that DON'T match the static path. Specifically the running
+    state uses a Braille spinner glyph instead of the verb-class
+    glyph (▸ ✎ ⌕)."""
+    from successor.render.cells import Grid
+    from successor.snapshot import render_grid_to_plain
+    chat = SuccessorChat()
+    chat.messages = []
+    chat.input_buffer = "/bash sleep 0.2"
+    chat._submit()
+
+    # Paint immediately while runner is in flight
+    g = Grid(20, 100)
+    chat.on_tick(g)
+    plain = render_grid_to_plain(g)
+
+    # Spinner frames are Braille chars from the canonical sequence.
+    # At least one of them should appear in the rendered output.
+    spinner_chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    assert any(c in plain for c in spinner_chars), (
+        f"expected a Braille spinner glyph in running card paint, "
+        f"got: {plain[:500]}"
+    )
+    # Status footer should say "running"
+    assert "running" in plain.lower()
+
+    _drain_runners(chat)
+
+
+def test_continuation_fires_only_after_last_runner_completes(
+    temp_config_dir: Path,
+) -> None:
+    """When the model emits two tool calls in one stream, the
+    continuation should fire only AFTER both runners complete, not
+    after the first one. This is the batch-aware continue-loop."""
+    from successor.profiles import Profile
+
+    chat = SuccessorChat()
+    chat.profile = Profile(
+        name="yolo",
+        tools=("bash",),
+        tool_config={"bash": {"allow_dangerous": True, "allow_mutating": True}},
+    )
+    chat.messages = []
+
+    # Mock client that returns two streams
+    chat.client = _MockClient(streams=[
+        # Turn 1: emit two tool calls in one stream
+        _FakeStream([
+            StreamEnded(
+                finish_reason="tool_calls",
+                usage=None,
+                timings=None,
+                full_reasoning="",
+                full_content="",
+                tool_calls=(
+                    {
+                        "id": "call_a",
+                        "name": "bash",
+                        "arguments": {"command": "echo a"},
+                        "raw_arguments": '{"command": "echo a"}',
+                    },
+                    {
+                        "id": "call_b",
+                        "name": "bash",
+                        "arguments": {"command": "echo b"},
+                        "raw_arguments": '{"command": "echo b"}',
+                    },
+                ),
+            ),
+        ]),
+        # Turn 2: text-only acknowledgment
+        _FakeStream([
+            _content("both done"),
+            _stream_end(),
+        ]),
+    ])
+
+    chat.input_buffer = "do two things"
+    chat._submit()
+    _drive_until_idle(chat)
+
+    # Two cards landed, both executed
+    tool_msgs = [m for m in chat.messages if m.tool_card is not None]
+    assert len(tool_msgs) == 2
+    assert all(m.tool_card.exit_code == 0 for m in tool_msgs)
+    assert "a" in tool_msgs[0].tool_card.output
+    assert "b" in tool_msgs[1].tool_card.output
+    # Continuation produced the final assistant message
+    final = [
+        m for m in chat.messages
+        if m.role == "successor" and not m.synthetic and "both done" in m.raw_text
+    ]
+    assert len(final) == 1
+    # Both client calls were consumed
+    assert chat.client.call_count == 2
+
+
+def test_cancel_running_tools_terminates_in_flight_runner(
+    temp_config_dir: Path,
+) -> None:
+    """_cancel_running_tools should kill any in-flight subprocess and
+    surface its card with the cancellation marker in stderr."""
+    chat = SuccessorChat()
+    chat.messages = []
+    chat.input_buffer = "/bash sleep 5"
+    chat._submit()
+    assert chat._running_tools
+
+    chat._cancel_running_tools()
+    _drain_runners(chat)
+
+    cards = [m for m in chat.messages if m.tool_card is not None]
+    assert len(cards) == 1
+    final = cards[0].tool_card
+    # Subprocess was killed, exit_code is the negative signal
+    assert final.exit_code is not None
+    assert final.exit_code < 0
+    # Cancellation marker is preserved in stderr
+    assert "cancelled" in final.stderr.lower()
+
+
+def test_new_submit_cancels_previous_runners(
+    temp_config_dir: Path,
+) -> None:
+    """If the user submits a new message while runners are still in
+    flight from a previous turn, those runners should be cancelled
+    so the new turn can start with a clean slate."""
+    chat = SuccessorChat()
+    chat.messages = []
+    chat.input_buffer = "/bash sleep 5"
+    chat._submit()
+    assert chat._running_tools
+
+    # User submits a new message — should cancel the running runner
+    chat.input_buffer = "/bash echo new"
+    chat._submit()
+
+    _drain_runners(chat)
+
+    cards = [m for m in chat.messages if m.tool_card is not None]
+    assert len(cards) == 2
+    # First card was cancelled
+    first = cards[0].tool_card
+    assert first.exit_code is not None and first.exit_code < 0
+    # Second card ran cleanly
+    second = cards[1].tool_card
+    assert second.exit_code == 0
+    assert "new" in second.output

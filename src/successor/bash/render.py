@@ -34,6 +34,8 @@ the parser was unsure.
 
 from __future__ import annotations
 
+import math
+
 from ..render.cells import (
     ATTR_BOLD,
     ATTR_DIM,
@@ -48,10 +50,24 @@ from ..render.paint import (
     paint_box,
     paint_text,
 )
+from ..render.text import lerp_rgb
 from ..render.theme import ThemeVariant
 from .cards import Risk, ToolCard
 from .prepared_output import OutputLine, OutputSpan, PreparedToolOutput
 from .verbclass import VerbClass, glyph_for_class, verb_class_for
+
+
+# Spinner frames shared with the chat's "thinking" indicator. Imported
+# locally so the bash module stays independent from chat.py — copy of
+# the canonical sequence, not a re-import.
+_RUNNER_SPINNER_FRAMES: tuple[str, ...] = (
+    "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
+)
+_RUNNER_SPINNER_FPS: float = 12.0
+# Border pulse frequency for the running state (Hz). 0.6 Hz is a
+# slow breathing cadence — fast enough to read as alive, slow enough
+# to not feel anxious. Matches the compaction settled-phase pulse.
+_RUNNER_PULSE_HZ: float = 0.6
 
 
 # ─── Constants ───
@@ -408,3 +424,285 @@ def paint_tool_card(
 
 
 # Output wrapping moved to prepared_output.PreparedToolOutput.layout
+
+
+# ─── Running-state painter ───
+#
+# Used while a BashRunner is in flight. Mirrors paint_tool_card's
+# layout but adds three live elements:
+#
+#   1. Border color pulses at _RUNNER_PULSE_HZ between bg_input and
+#      accent_warm via lerp_rgb. Reads as a slow breathing animation
+#      — calm but unmistakable that something is alive.
+#
+#   2. Verb glyph in the header rotates through _RUNNER_SPINNER_FRAMES
+#      at _RUNNER_SPINNER_FPS, replacing the static verb-class glyph.
+#      The verb text itself stays — only the prefix glyph animates.
+#
+#   3. Status footer reads `running Xs · N lines` and ticks live as
+#      the elapsed time increases and stdout grows. The line count
+#      gives the user a concrete signal of progress for verbose
+#      commands (find, grep, ls -la /usr/lib).
+#
+# Output streams in from the runner's live stdout/stderr buffers.
+# Each new line just appears on the next paint frame because the
+# painter reads `runner.stdout` directly — no caching, no diffing,
+# the renderer's existing per-frame paint loop is the streaming
+# mechanism.
+
+
+def measure_tool_card_running_height(
+    preview_card: ToolCard,
+    *,
+    width: int,
+    runner_stdout: str,
+    runner_stderr: str,
+) -> int:
+    """Compute the row height a running tool card will consume.
+
+    Mirrors `measure_tool_card_height` but takes the runner's live
+    output text directly instead of reading from card.output. The
+    box height is fixed (verb header + params + raw command border)
+    and the output region grows with the number of wrapped lines.
+    """
+    if width < 20:
+        return 0
+    n_params = max(1, len(preview_card.params)) if preview_card.params else 1
+    box_h = 2 + n_params
+
+    avail = max(20, width - OUTPUT_INDENT - 2)
+    n_out_lines = _count_running_output_lines(
+        runner_stdout, runner_stderr, avail,
+    )
+    return box_h + n_out_lines + 1  # +1 for status footer
+
+
+def _count_running_output_lines(
+    stdout: str, stderr: str, width: int,
+) -> int:
+    """Cheap line count for height measurement — matches the wrap
+    behavior of paint_running_output_lines below."""
+    lines = 0
+    for src in (stdout, stderr):
+        if not src:
+            continue
+        for raw in src.split("\n"):
+            if not raw and src.endswith(raw):
+                continue
+            lines += max(1, (len(raw) + width - 1) // width)
+    return lines if lines > 0 else 1  # always reserve one row
+
+
+def paint_tool_card_running(
+    grid: Grid,
+    preview_card: ToolCard,
+    *,
+    x: int,
+    y: int,
+    w: int,
+    theme: ThemeVariant,
+    runner_stdout: str,
+    runner_stderr: str,
+    elapsed_s: float,
+    now: float,
+) -> int:
+    """Paint a tool card in the LIVE / RUNNING state.
+
+    `preview_card` is the immutable parsed metadata (verb, params,
+    raw_command, risk, tool_call_id). Output text is read live from
+    `runner_stdout` / `runner_stderr` so the card appears to grow as
+    the subprocess produces output.
+
+    Returns rows consumed.
+    """
+    if w < 20 or y >= grid.rows:
+        return 0
+
+    # ─── Pulsing border color ───
+    base_border = _border_color(preview_card.risk, theme)
+    pulse_t = 0.5 + 0.5 * math.sin(now * 2 * math.pi * _RUNNER_PULSE_HZ)
+    pulse_t = pulse_t * 0.55 + 0.20  # bias toward accent_warm
+    border = lerp_rgb(theme.bg_input, theme.accent_warm, pulse_t)
+
+    # ─── Compute box dimensions ───
+    n_params = max(1, len(preview_card.params)) if preview_card.params else 1
+    box_h = 2 + n_params
+    box_w = w
+
+    # ─── Box border + interior fill ───
+    border_style = Style(fg=border, bg=theme.bg, attrs=ATTR_BOLD)
+    inner_style = Style(fg=theme.fg, bg=theme.bg_input)
+    paint_box(
+        grid, x, y, box_w, box_h,
+        style=border_style,
+        fill_style=inner_style,
+        chars=BOX_ROUND,
+    )
+
+    # ─── Header pill — verb + spinner ───
+    verb_text = preview_card.verb
+    spinner_idx = int(now * _RUNNER_SPINNER_FPS) % len(_RUNNER_SPINNER_FRAMES)
+    spinner = _RUNNER_SPINNER_FRAMES[spinner_idx]
+    confidence_badge = " ?" if preview_card.confidence < 0.7 else ""
+    header_text = f" {spinner} {verb_text}{confidence_badge} "
+    max_header_w = box_w - 4
+    if len(header_text) > max_header_w:
+        header_text = header_text[: max(0, max_header_w - 1)] + "…"
+    header_x = x + 3
+    if 0 <= y < grid.rows and header_x < x + box_w - 1:
+        paint_text(
+            grid, header_text, header_x, y,
+            style=Style(fg=theme.bg, bg=border, attrs=ATTR_BOLD),
+        )
+
+    # ─── Param rows inside the box ───
+    label_w = min(
+        MAX_LABEL_WIDTH,
+        max((len(k) for k, _ in preview_card.params), default=0),
+    )
+    body_x = x + CARD_INNER_PAD_X
+    body_y = y + 1
+    body_w = box_w - 2 * CARD_INNER_PAD_X
+
+    if not preview_card.params:
+        if body_y < grid.rows:
+            paint_text(
+                grid, "(no parameters)", body_x + 1, body_y,
+                style=Style(
+                    fg=theme.fg_subtle, bg=theme.bg_input,
+                    attrs=ATTR_DIM | ATTR_ITALIC,
+                ),
+            )
+    else:
+        for i, (key, value) in enumerate(preview_card.params):
+            row_y = body_y + i
+            if row_y >= y + box_h - 1 or row_y >= grid.rows:
+                break
+            label = key.rjust(label_w)
+            paint_text(
+                grid, label, body_x + 1, row_y,
+                style=Style(fg=theme.fg_dim, bg=theme.bg_input, attrs=ATTR_DIM),
+            )
+            value_x = body_x + 1 + label_w + 2
+            value_max = body_w - (value_x - body_x) - 1
+            value_text = str(value)
+            if len(value_text) > value_max:
+                value_text = value_text[: max(0, value_max - 1)] + "…"
+            paint_text(
+                grid, value_text, value_x, row_y,
+                style=Style(fg=theme.fg, bg=theme.bg_input, attrs=ATTR_BOLD),
+            )
+
+    # ─── Raw command on the bottom border ───
+    raw_first, extra_line_count = _first_line_of_raw_command(preview_card.raw_command)
+    if extra_line_count > 0:
+        raw_label = f" $ {raw_first}  (+{extra_line_count} lines) "
+    else:
+        raw_label = f" $ {raw_first} "
+    max_raw = box_w - 4
+    if len(raw_label) > max_raw:
+        raw_label = raw_label[: max(0, max_raw - 1)] + "…"
+    bot_y = y + box_h - 1
+    raw_x = x + 3
+    if 0 <= bot_y < grid.rows and raw_x < x + box_w - 1:
+        paint_text(
+            grid, raw_label, raw_x, bot_y,
+            style=Style(
+                fg=theme.fg_dim, bg=theme.bg, attrs=ATTR_DIM | ATTR_ITALIC,
+            ),
+        )
+
+    cur_y = y + box_h
+
+    # ─── Live output rows ───
+    avail = max(20, w - OUTPUT_INDENT - 2)
+    out_x = x + OUTPUT_INDENT
+    n_lines = 0
+    cur_y = _paint_running_output_lines(
+        grid, runner_stdout, runner_stderr,
+        x=x, y=cur_y, w=w, avail=avail, out_x=out_x, theme=theme,
+    )
+    n_lines = cur_y - (y + box_h)
+    if n_lines == 0 and cur_y < grid.rows:
+        # Reserve one empty row so the status footer doesn't sit
+        # flush against the box border before any output arrives.
+        fill_region(
+            grid, x + 1, cur_y, w - 2, 1,
+            style=Style(bg=theme.bg_input),
+        )
+        cur_y += 1
+        n_lines = 1
+
+    # ─── Status footer — live elapsed time + line count ───
+    if cur_y < grid.rows:
+        if elapsed_s < 1.0:
+            elapsed_text = f"{elapsed_s * 1000:.0f}ms"
+        else:
+            elapsed_text = f"{elapsed_s:.1f}s"
+        # Count newlines in the buffers as a rough "lines so far" hint.
+        line_count = (runner_stdout.count("\n") + runner_stderr.count("\n"))
+        if line_count > 0:
+            status_text = f"  ↳ {spinner} running {elapsed_text} · {line_count} lines"
+        else:
+            status_text = f"  ↳ {spinner} running {elapsed_text}"
+        paint_text(
+            grid, status_text, x + OUTPUT_INDENT, cur_y,
+            style=Style(
+                fg=theme.accent_warm, bg=theme.bg, attrs=ATTR_DIM | ATTR_BOLD,
+            ),
+        )
+        cur_y += 1
+
+    return cur_y - y
+
+
+def _paint_running_output_lines(
+    grid: Grid,
+    stdout: str,
+    stderr: str,
+    *,
+    x: int,
+    y: int,
+    w: int,
+    avail: int,
+    out_x: int,
+    theme: ThemeVariant,
+) -> int:
+    """Paint live runner stdout + stderr lines without going through
+    PreparedToolOutput. We don't want the verb-class-aware parsing
+    here — the running state should show the raw output as it streams,
+    so the user sees exactly what the subprocess produced moment-by-
+    moment. Wraps long lines greedily at the available width.
+    """
+    cur_y = y
+
+    def paint_block(text: str, kind: str) -> None:
+        nonlocal cur_y
+        if not text:
+            return
+        if kind == "stderr":
+            style = Style(
+                fg=theme.accent_warn, bg=theme.bg_input, attrs=ATTR_DIM,
+            )
+        else:
+            style = Style(fg=theme.fg, bg=theme.bg_input)
+        for raw in text.split("\n"):
+            if not raw:
+                continue
+            # Greedy wrap for very long lines
+            offset = 0
+            while offset < len(raw):
+                if cur_y >= grid.rows:
+                    return
+                fragment = raw[offset:offset + avail]
+                fill_region(
+                    grid, x + 1, cur_y, w - 2, 1,
+                    style=Style(bg=theme.bg_input),
+                )
+                paint_text(grid, fragment, out_x, cur_y, style=style)
+                offset += avail
+                cur_y += 1
+
+    paint_block(stdout, "stdout")
+    paint_block(stderr, "stderr")
+    return cur_y

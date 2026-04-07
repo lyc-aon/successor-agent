@@ -118,6 +118,17 @@ from .bash import (
     resolve_bash_config,
 )
 from .bash.prepared_output import PreparedToolOutput
+from .bash.render import (
+    measure_tool_card_running_height,
+    paint_tool_card_running,
+)
+from .bash.runner import (
+    BashRunner,
+    OutputLine as RunnerOutputLine,
+    RunnerCompleted,
+    RunnerErrored,
+    RunnerStarted,
+)
 from .tools_registry import (
     AVAILABLE_TOOLS,
     build_system_prompt_tools_section,
@@ -735,7 +746,7 @@ class _Message:
 
     __slots__ = (
         "role", "raw_text", "_display_text", "body", "created_at",
-        "synthetic", "tool_card",
+        "synthetic", "tool_card", "running_tool",
         "is_boundary", "is_summary", "boundary_meta",
         "_token_count",
         "_prepared_tool_output",
@@ -749,6 +760,7 @@ class _Message:
         *,
         synthetic: bool = False,
         tool_card: ToolCard | None = None,
+        running_tool: object | None = None,
         is_boundary: bool = False,
         is_summary: bool = False,
         boundary_meta: object | None = None,
@@ -774,6 +786,15 @@ class _Message:
         # markers, and summary messages are all forced synthetic.
         self.synthetic = synthetic or (tool_card is not None) or is_boundary or is_summary
         self.tool_card = tool_card
+        # In-flight BashRunner companion. While set, the chat's
+        # _pump_running_tools() polls the runner's queue each tick
+        # and the renderer paints `tool_card` as the LIVE preview
+        # via paint_tool_card_running. When the runner completes,
+        # the chat replaces tool_card with the final enriched card
+        # and clears running_tool. None for static cards (legacy
+        # synchronous dispatch path, /bash slash command after
+        # completion, refused cards, etc.).
+        self.running_tool = running_tool
         self.is_boundary = is_boundary
         self.is_summary = is_summary
         # The BoundaryMarker dataclass from agent.log, holding pre/post
@@ -1408,6 +1429,19 @@ class SuccessorChat(App):
         # the model can react to its own tool output. Hard-capped
         # at MAX_AGENT_TURNS to bound runaway loops.
         self._agent_turn: int = 0
+        # In-flight BashRunner instances. Each entry is a _Message
+        # whose `running_tool` field points at a BashRunner that
+        # hasn't completed yet. on_tick polls this list every frame,
+        # finalizes any runners that have completed, and (if the
+        # batch came from an agent-loop turn) fires the continuation
+        # stream when the last runner in the batch is done.
+        self._running_tools: list[_Message] = []
+        # When True, the most recently-completed agent stream queued
+        # tool calls and the chat is waiting for them to finish before
+        # opening the continuation stream. Set in _pump_stream's
+        # StreamEnded handler whenever runners are spawned, cleared
+        # in _pump_running_tools when continuation fires.
+        self._pending_continuation: bool = False
 
         # ─── Scrollback state ───
         self.scroll_offset: int = 0
@@ -1706,6 +1740,17 @@ class SuccessorChat(App):
             # Ctrl+G to abort an in-flight stream (interrupt)
             if event.char == "g" and self._stream is not None:
                 self._stream.close()
+                # Also cancel any in-flight bash runners — the user
+                # is taking control back, the runners shouldn't keep
+                # eating CPU/wall-time after the stream they belong
+                # to is dead.
+                self._cancel_running_tools()
+                self._pending_continuation = False
+                return
+            # Ctrl+G to abort in-flight bash runners (no stream)
+            if event.char == "g" and self._running_tools:
+                self._cancel_running_tools()
+                self._pending_continuation = False
                 return
             # Ctrl+G to abort an in-flight compaction
             if event.char == "g" and self._compaction_worker is not None:
@@ -2297,6 +2342,15 @@ class SuccessorChat(App):
             self._cache_warmer.close()
             self._cache_warmer = None
 
+        # Cancel any in-flight bash runners from a previous turn. The
+        # user starting a new turn voids the continuation queue —
+        # whatever the previous turn was doing, the new message takes
+        # over. Runners will surface as cancelled cards on the next
+        # tick via _pump_running_tools.
+        if self._running_tools:
+            self._cancel_running_tools()
+            self._pending_continuation = False
+
         if text in ("/quit", "/exit", "/q"):
             self.stop()
             return
@@ -2312,10 +2366,12 @@ class SuccessorChat(App):
         # /bash <command> — run a bash command client-side and render
         # it as a structured tool card. The user message preserves the
         # /bash command verbatim; a tool-message follows with the parsed
-        # ToolCard. The model never sees this exchange (both messages
-        # are synthetic by construction). When the agent loop lands the
-        # SAME dispatch_bash() will be called from the tool-call path —
-        # this is the v0 proof.
+        # ToolCard. Dispatch goes through the SAME async runner path
+        # as the agent loop's tool calls so the user gets the live
+        # animated execution UX even for manual commands. The /bash
+        # path doesn't queue a continuation (no agent turn is in
+        # flight), so the runner finishes and the card settles
+        # without firing a model call.
         if text.startswith("/bash"):
             parts = text.split(maxsplit=1)
             if len(parts) < 2 or not parts[1].strip():
@@ -2337,38 +2393,7 @@ class SuccessorChat(App):
                 synthetic=True,
             ))
             bash_cfg = resolve_bash_config(self.profile)
-            try:
-                card = dispatch_bash(
-                    command,
-                    allow_dangerous=bash_cfg.allow_dangerous,
-                    allow_mutating=bash_cfg.allow_mutating,
-                    timeout=bash_cfg.timeout_s,
-                    max_output_bytes=bash_cfg.max_output_bytes,
-                    cwd=bash_cfg.working_directory,
-                )
-            except RefusedCommand as exc:
-                # Show the refused card (preview-only, no execution)
-                # so the user sees WHY it was refused. RefusedCommand
-                # covers both DangerousCommandRefused and
-                # MutatingCommandRefused — the reason string already
-                # explains which.
-                self.messages.append(_Message(
-                    "tool", "",
-                    tool_card=exc.card,
-                ))
-                hint = self._refusal_hint(exc, bash_cfg)
-                self.messages.append(_Message(
-                    "successor",
-                    f"refused: {exc.reason}. {hint}",
-                    synthetic=True,
-                ))
-                self._scroll_to_bottom()
-                return
-            self.messages.append(_Message(
-                "tool", "",
-                tool_card=card,
-            ))
-            self._scroll_to_bottom()
+            self._spawn_bash_runner(command, bash_cfg=bash_cfg)
             return
 
         # /budget — show context fill % + token usage stats
@@ -3465,21 +3490,26 @@ class SuccessorChat(App):
 
                 # Dispatch native tool calls first (they carry the
                 # model-provided ids), then any legacy bash blocks the
-                # detector caught from raw text.
-                #
-                # The `_agent_turn > 0` guard is important: tests drive
-                # `_pump_stream` directly with a pre-installed fake
-                # stream WITHOUT going through `_submit`, so they never
-                # increment the counter. Only user-initiated submissions
-                # trigger continuation; synthetic test streams don't.
+                # detector caught from raw text. Both paths now spawn
+                # async runners — they don't block the tick loop. The
+                # continuation stream fires from _pump_running_tools
+                # when the LAST runner in this batch completes.
                 any_ran = False
                 if native_calls:
                     any_ran |= self._dispatch_native_tool_calls(native_calls)
                 if legacy_blocks:
                     any_ran |= self._dispatch_streamed_bash_blocks(legacy_blocks)
 
+                # The `_agent_turn > 0` guard is important: tests drive
+                # `_pump_stream` directly with a pre-installed fake
+                # stream WITHOUT going through `_submit`, so they never
+                # increment the counter. Only user-initiated submissions
+                # trigger continuation; synthetic test streams don't.
                 if any_ran and self._agent_turn > 0:
-                    self._begin_agent_turn()
+                    # Mark this batch as needing a continuation. The
+                    # actual _begin_agent_turn call happens once all
+                    # runners in self._running_tools finish.
+                    self._pending_continuation = True
                     return
 
                 # No tool calls OR nothing successfully ran — turn
@@ -3505,83 +3535,120 @@ class SuccessorChat(App):
                 # for a stream that'll never come back.
                 self._agent_turn = 0
 
+    def _spawn_bash_runner(
+        self,
+        command: str,
+        *,
+        bash_cfg: BashConfig,
+        tool_call_id: str | None = None,
+    ) -> bool:
+        """Build a preview card, classify risk, and either:
+
+          - append a REFUSED card synchronously (no runner spawned), OR
+          - create a BashRunner, register it in self._running_tools,
+            and start it. The chat's tick loop polls it from then on.
+
+        Returns True iff a runner was started (the agent loop should
+        continue when the batch completes). Refused-only batches return
+        False so the continue-loop dead-ends and the user can resolve.
+        """
+        from dataclasses import replace as _replace
+        from .bash.parser import parse_bash
+        from .bash.risk import classify_risk, max_risk
+
+        # Build the preview card from parser + classifier WITHOUT
+        # executing. Same logic as bash/exec.py:dispatch_bash up to
+        # the refusal gate, then we hand off to a runner.
+        try:
+            parsed = parse_bash(command)
+        except Exception as exc:
+            self.messages.append(_Message(
+                "successor",
+                f"bash parse failed for {command!r}: {exc}",
+                synthetic=True,
+            ))
+            return False
+
+        classifier_risk, classifier_reason = classify_risk(command)
+        final_risk = max_risk(parsed.risk, classifier_risk)
+
+        # Resolve a stable id once so refusal cards and execution
+        # cards both carry the same value.
+        from .bash.exec import _new_tool_call_id  # noqa: PLC0415
+        resolved_call_id = tool_call_id or _new_tool_call_id()
+        preview = _replace(parsed, risk=final_risk, tool_call_id=resolved_call_id)
+
+        # Refusal gate — synchronous, no runner spawned
+        if final_risk == "dangerous" and not bash_cfg.allow_dangerous:
+            refused = DangerousCommandRefused(
+                preview,
+                classifier_reason or "command pattern flagged as dangerous",
+            )
+            self.messages.append(_Message("tool", "", tool_card=refused.card))
+            hint = self._refusal_hint(refused, bash_cfg)
+            self.messages.append(_Message(
+                "successor",
+                f"refused: {refused.reason}. {hint}",
+                synthetic=True,
+            ))
+            return False
+        if final_risk == "mutating" and not bash_cfg.allow_mutating:
+            refused = MutatingCommandRefused(
+                preview,
+                classifier_reason or "mutating command refused in read-only mode",
+            )
+            self.messages.append(_Message("tool", "", tool_card=refused.card))
+            hint = self._refusal_hint(refused, bash_cfg)
+            self.messages.append(_Message(
+                "successor",
+                f"refused: {refused.reason}. {hint}",
+                synthetic=True,
+            ))
+            return False
+
+        # Spawn the runner — execution happens on a worker thread,
+        # the chat's tick loop polls it via _pump_running_tools.
+        runner = BashRunner(
+            command,
+            cwd=bash_cfg.working_directory,
+            timeout=bash_cfg.timeout_s,
+            max_output_bytes=bash_cfg.max_output_bytes,
+            tool_call_id=resolved_call_id,
+        )
+        msg = _Message(
+            "tool",
+            "",
+            tool_card=preview,
+            running_tool=runner,
+        )
+        self.messages.append(msg)
+        self._running_tools.append(msg)
+        runner.start()
+        self._scroll_to_bottom()
+        return True
+
     def _dispatch_streamed_bash_blocks(self, blocks: list[str]) -> bool:
-        """Execute each bash block detected during streaming and append
-        the resulting tool cards to self.messages.
-
-        Returns True if at least one block ran to completion (regardless
-        of exit code — exit 1 is a valid result the model should react
-        to). Returns False if every block was refused or errored at
-        dispatch-layer (no subprocess started). The caller uses this
-        to decide whether to continue the agent loop — refused-only
-        batches dead-end so the user can resolve, whereas runs (even
-        failed ones) deserve a follow-up model turn.
-
-        Each block becomes its own _Message with a tool_card attached.
-        Cards stack BELOW the assistant message that produced them.
-        Dangerous/mutating refusals (when safety flags are restrictive)
-        still append a refused card so the user sees what was blocked.
-
-        Safety flags come from `profile.tool_config["bash"]` resolved
-        once per batch via `resolve_bash_config`. That means the yolo
-        toggle, read-only toggle, timeout, and max output all flow
-        from the profile config menu to the live dispatch path with
-        zero extra plumbing.
+        """Spawn a BashRunner for each fenced bash block detected by
+        the legacy stream parser. Returns True if at least one runner
+        was spawned (so the caller can wire continuation), False if
+        every block was refused.
         """
         if not blocks:
             return False
         bash_cfg = resolve_bash_config(self.profile)
         any_ran = False
         for command in blocks:
-            try:
-                card = dispatch_bash(
-                    command,
-                    allow_dangerous=bash_cfg.allow_dangerous,
-                    allow_mutating=bash_cfg.allow_mutating,
-                    timeout=bash_cfg.timeout_s,
-                    max_output_bytes=bash_cfg.max_output_bytes,
-                    cwd=bash_cfg.working_directory,
-                )
-            except RefusedCommand as exc:
-                # Show the refused (preview) card so the user sees
-                # what was blocked and why
-                self.messages.append(_Message(
-                    "tool", "", tool_card=exc.card,
-                ))
-                hint = self._refusal_hint(exc, bash_cfg)
-                self.messages.append(_Message(
-                    "successor",
-                    f"refused: {exc.reason}. {hint}",
-                    synthetic=True,
-                ))
-                continue
-            except Exception as exc:
-                self.messages.append(_Message(
-                    "successor",
-                    f"bash dispatch failed for {command!r}: {exc}",
-                    synthetic=True,
-                ))
-                continue
-            self.messages.append(_Message(
-                "tool", "", tool_card=card,
-            ))
-            any_ran = True
+            if self._spawn_bash_runner(command, bash_cfg=bash_cfg):
+                any_ran = True
         return any_ran
 
     def _dispatch_native_tool_calls(self, tool_calls: list[dict]) -> bool:
-        """Execute each native tool call from the model's structured
-        `delta.tool_calls` stream and append the resulting tool cards.
-
-        Each tool_call dict has shape `{"id", "name", "arguments",
-        "raw_arguments"}` where `arguments` is the parsed JSON object
-        and `id` is the model-provided call id we propagate into the
-        ToolCard so api_messages can link the tool result back to the
-        assistant turn.
-
-        Only `name == "bash"` is recognized in v0; unknown function
-        names append a synthetic error message and don't run anything.
-        Refusal/error semantics mirror `_dispatch_streamed_bash_blocks`.
-        Returns True if any call ran (regardless of exit code).
+        """Spawn a BashRunner for each native tool_call from the
+        model's structured `delta.tool_calls` stream. Mirrors the
+        legacy path but propagates the model-provided call id onto
+        the spawned runner so the next api_messages serialization
+        can link the tool result back to the originating assistant
+        turn coherently.
         """
         if not tool_calls:
             return False
@@ -3602,9 +3669,6 @@ class SuccessorChat(App):
 
             command = args.get("command") if isinstance(args, dict) else ""
             if not command:
-                # Malformed tool call — treat as a no-op error so the
-                # next turn can recover. The card has no preceding
-                # bash to run, so we don't enter dispatch_bash.
                 self.messages.append(_Message(
                     "successor",
                     f"bash tool call had no command (raw_arguments={tc.get('raw_arguments','')!r})",
@@ -3612,39 +3676,104 @@ class SuccessorChat(App):
                 ))
                 continue
 
-            try:
-                card = dispatch_bash(
-                    command,
-                    allow_dangerous=bash_cfg.allow_dangerous,
-                    allow_mutating=bash_cfg.allow_mutating,
-                    timeout=bash_cfg.timeout_s,
-                    max_output_bytes=bash_cfg.max_output_bytes,
-                    cwd=bash_cfg.working_directory,
-                    tool_call_id=call_id,
-                )
-            except RefusedCommand as exc:
-                self.messages.append(_Message(
-                    "tool", "", tool_card=exc.card,
-                ))
-                hint = self._refusal_hint(exc, bash_cfg)
-                self.messages.append(_Message(
-                    "successor",
-                    f"refused: {exc.reason}. {hint}",
-                    synthetic=True,
-                ))
-                continue
-            except Exception as exc:
-                self.messages.append(_Message(
-                    "successor",
-                    f"bash dispatch failed for {command!r}: {exc}",
-                    synthetic=True,
-                ))
-                continue
-            self.messages.append(_Message(
-                "tool", "", tool_card=card,
-            ))
-            any_ran = True
+            if self._spawn_bash_runner(
+                command, bash_cfg=bash_cfg, tool_call_id=call_id,
+            ):
+                any_ran = True
         return any_ran
+
+    def _pump_running_tools(self) -> None:
+        """Drain output deltas from in-flight runners. When a runner
+        completes, finalize its card (replace the preview with the
+        full enriched ToolCard) and clear running_tool. When the LAST
+        runner in a pending continuation batch completes, fire the
+        next agent-loop turn.
+
+        Called from on_tick on every frame, right after _pump_stream.
+        Cheap when there are no runners (single len() check).
+        """
+        if not self._running_tools:
+            return
+
+        completed_msgs: list[_Message] = []
+        for msg in self._running_tools:
+            runner = msg.running_tool
+            if runner is None:
+                completed_msgs.append(msg)
+                continue
+            # Drain the runner's queue. We don't strictly need the
+            # events for state — runner.stdout / runner.stderr are
+            # the source of truth — but draining keeps the queue
+            # bounded and lets future code react to specific events
+            # (e.g., per-line fade-in animations).
+            runner.drain()
+            # Force a fresh paint each frame while running so the
+            # spinner/border pulse and live output stream visibly.
+            msg._card_rows_cache_key = None
+            msg._card_rows_cache = None
+            if runner.is_done():
+                self._finalize_runner(msg)
+                completed_msgs.append(msg)
+
+        for msg in completed_msgs:
+            try:
+                self._running_tools.remove(msg)
+            except ValueError:
+                pass
+
+        # If we just finished the last runner in a continuation batch,
+        # fire the next agent-loop turn so the model can react.
+        if (
+            self._pending_continuation
+            and not self._running_tools
+            and self._agent_turn > 0
+            and self._stream is None
+        ):
+            self._pending_continuation = False
+            self._begin_agent_turn()
+
+    def _finalize_runner(self, msg: "_Message") -> None:
+        """Replace the preview tool_card on `msg` with the final
+        enriched card built from the runner's accumulated stdout,
+        stderr, exit code, and duration. Clears running_tool so the
+        renderer falls through to the static paint path.
+        """
+        from dataclasses import replace as _replace
+        runner = msg.running_tool
+        preview = msg.tool_card
+        if runner is None or preview is None:
+            return
+        stdout = runner.stdout
+        stderr = runner.stderr
+        # If the worker errored before Popen succeeded (FileNotFoundError
+        # etc.), exit_code may be None — surface as -1.
+        exit_code = runner.exit_code if runner.exit_code is not None else -1
+        # Cancellation / timeout → preserve the error in stderr so the
+        # next model turn can read what happened.
+        if runner.error:
+            if stderr and not stderr.endswith("\n"):
+                stderr = stderr + "\n"
+            stderr = (stderr or "") + f"[{runner.error}]"
+        final_card = _replace(
+            preview,
+            output=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            duration_ms=runner.elapsed() * 1000.0,
+            truncated=runner.truncated,
+        )
+        msg.tool_card = final_card
+        msg.running_tool = None
+        msg._card_rows_cache_key = None
+        msg._card_rows_cache = None
+
+    def _cancel_running_tools(self) -> None:
+        """Signal every in-flight runner to terminate. Used by Ctrl+G
+        and by _submit when the user starts a new turn while previous
+        runners are still in flight."""
+        for msg in self._running_tools:
+            if msg.running_tool is not None:
+                msg.running_tool.cancel()
 
     def _refusal_hint(
         self, exc: RefusedCommand, bash_cfg: BashConfig,
@@ -3699,6 +3828,11 @@ class SuccessorChat(App):
 
         # Drain any pending llama.cpp stream events.
         self._pump_stream()
+
+        # Drain any in-flight bash runners. When the LAST runner in
+        # a continuation batch finishes, this fires the next agent
+        # turn so the model can react to its tool output.
+        self._pump_running_tools()
 
         # Poll the compaction worker. If it's done, apply the result
         # and transition the animation from waiting → materialize.
@@ -4542,22 +4676,29 @@ class SuccessorChat(App):
         """Pre-paint a ToolCard into a sub-grid and convert each row
         into a _RenderedRow with prepainted_cells set.
 
-        The chat's row-based scroll model expects each visible line to
-        correspond to one entry in a flat list. paint_tool_card writes
-        directly into a Grid, so we render it into a temporary sub-grid
-        of (height x body_width), then walk row-by-row, snapshotting
-        each row's cells into a tuple that the painter copies verbatim.
+        Two paint paths:
 
-        Pretext-shaped caching: the PreparedToolOutput is built ONCE per
-        _Message on first paint and cached on the message (the card is
-        frozen so the output never changes). The final list of pre-
-        painted rows is cached keyed by (body_width, theme_name,
-        display_mode) — as long as the user doesn't resize or swap
-        theme/mode, re-paints are a list lookup, zero work.
+          1. RUNNING — msg.running_tool is set. The renderer reads the
+             runner's live stdout/stderr each frame and paints via
+             paint_tool_card_running. The pulsing border + spinner +
+             elapsed-time footer animate every tick. NO caching:
+             every frame is fresh because the underlying state is
+             changing (animations + new output lines).
+
+          2. STATIC — runner has finished (or never had one). Existing
+             cached path: build PreparedToolOutput once, cache the
+             rendered rows by (width, theme), reuse on subsequent
+             paints. Resize / theme swap invalidates.
         """
         card = msg.tool_card
         if card is None:
             return []
+
+        runner = msg.running_tool
+        if runner is not None:
+            return self._render_running_tool_card_rows(
+                msg, body_width, theme, runner,
+            )
 
         # Build the PreparedToolOutput once per message. Immutable
         # (card is frozen dataclass), so it never needs to invalidate.
@@ -4615,6 +4756,68 @@ class SuccessorChat(App):
 
         msg._card_rows_cache_key = cache_key
         msg._card_rows_cache = rows
+        return rows
+
+    def _render_running_tool_card_rows(
+        self,
+        msg: "_Message",
+        body_width: int,
+        theme: ThemeVariant,
+        runner: BashRunner,
+    ) -> list[_RenderedRow]:
+        """Pre-paint a LIVE tool card (running state) into a sub-grid
+        and convert each row into a _RenderedRow.
+
+        No caching here — every frame is a fresh paint because:
+          - the spinner glyph rotates per frame
+          - the border color pulses per frame
+          - new output lines may have arrived since last frame
+          - the elapsed-time counter ticks per frame
+
+        At 30 FPS for one card the cost is dominated by the small
+        sub-grid alloc + the row snapshot loop, which is sub-millisecond
+        for typical card heights (5-15 rows × 80-160 cols).
+        """
+        preview = msg.tool_card
+        if preview is None:
+            return []
+
+        now = time.monotonic()
+        stdout = runner.stdout
+        stderr = runner.stderr
+
+        height = measure_tool_card_running_height(
+            preview, width=body_width,
+            runner_stdout=stdout, runner_stderr=stderr,
+        )
+        if height <= 0:
+            return []
+
+        sub = Grid(height, body_width)
+        paint_tool_card_running(
+            sub, preview, x=0, y=0, w=body_width, theme=theme,
+            runner_stdout=stdout, runner_stderr=stderr,
+            elapsed_s=runner.elapsed(now),
+            now=now,
+        )
+
+        rows: list[_RenderedRow] = []
+        for sy in range(height):
+            cells: list[Cell] = []
+            for sx in range(body_width):
+                cells.append(sub.at(sy, sx))
+            rows.append(
+                _RenderedRow(
+                    leading_text="",
+                    leading_attrs=0,
+                    leading_color_kind="accent",
+                    body_spans=(),
+                    base_color=theme.fg,
+                    line_tag="tool_card",
+                    body_indent=0,
+                    prepainted_cells=tuple(cells),
+                )
+            )
         return rows
 
     def _render_md_lines_with_search(
