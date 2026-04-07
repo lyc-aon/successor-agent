@@ -562,6 +562,187 @@ def test_handle_compact_cmd_is_non_blocking(temp_config_dir: Path) -> None:
     assert chat._compaction_anim.result_arrived_at is not None
 
 
+# ─── Cache warmer ───
+
+
+class _SlowWarmingClient:
+    """Mock client whose stream_chat takes a controlled delay before
+    returning. Used to test warmer cancellation."""
+    def __init__(self, delay_s: float = 0.0):
+        self.delay_s = delay_s
+        self.call_count = 0
+        self.last_max_tokens = None
+        self.base_url = "http://mock"
+
+    def stream_chat(self, messages, *, max_tokens=None, temperature=None,
+                    timeout=None, extra=None):
+        from successor.providers.llama import (
+            ContentChunk, StreamEnded, StreamStarted,
+        )
+        self.call_count += 1
+        self.last_max_tokens = max_tokens
+        if self.delay_s:
+            time.sleep(self.delay_s)
+        return _MockStream(events=[
+            StreamStarted(),
+            ContentChunk(text="ok"),
+            StreamEnded(finish_reason="stop", usage=None, timings=None),
+        ])
+
+
+def test_warmer_starts_returns_immediately(temp_config_dir: Path) -> None:
+    from successor.chat import _CacheWarmer
+    client = _SlowWarmingClient(delay_s=0.5)
+    warmer = _CacheWarmer(messages=[{"role": "user", "content": "x"}], client=client)
+    t0 = time.monotonic()
+    warmer.start()
+    elapsed = time.monotonic() - t0
+    assert elapsed < 0.05, f"start() took {elapsed:.3f}s"
+    # Wait for completion
+    deadline = time.monotonic() + 5.0
+    while warmer.is_running() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert warmer.is_done()
+
+
+def test_warmer_uses_max_tokens_one(temp_config_dir: Path) -> None:
+    """The warmer must use max_tokens=1 to keep generation cost minimal."""
+    from successor.chat import _CacheWarmer
+    client = _SlowWarmingClient()
+    warmer = _CacheWarmer(messages=[{"role": "user", "content": "x"}], client=client)
+    warmer.start()
+    deadline = time.monotonic() + 5.0
+    while warmer.is_running() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert client.last_max_tokens == 1
+
+
+def test_warmer_close_aborts_in_flight(temp_config_dir: Path) -> None:
+    """close() before completion should set the stop event and the
+    warmer should exit promptly without storing a result."""
+    from successor.chat import _CacheWarmer
+    client = _SlowWarmingClient(delay_s=0.5)
+    warmer = _CacheWarmer(messages=[{"role": "user", "content": "x"}], client=client)
+    warmer.start()
+    time.sleep(0.05)  # let it start running
+    warmer.close()
+    # Should be marked done quickly (worker thread sees stop event)
+    deadline = time.monotonic() + 2.0
+    while not warmer.is_done() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert warmer.is_done()
+
+
+def test_warmer_silent_failure_on_exception(temp_config_dir: Path) -> None:
+    """Warming is best-effort — exceptions should not propagate."""
+    from successor.chat import _CacheWarmer
+
+    class _BrokenClient:
+        base_url = "http://mock"
+        def stream_chat(self, *args, **kwargs):
+            raise RuntimeError("intentional break")
+
+    warmer = _CacheWarmer(
+        messages=[{"role": "user", "content": "x"}],
+        client=_BrokenClient(),
+    )
+    warmer.start()
+    deadline = time.monotonic() + 2.0
+    while not warmer.is_done() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert warmer.is_done()
+    # No exception was raised — warming silently failed
+
+
+def test_warmer_spawned_after_compaction(temp_config_dir: Path) -> None:
+    """When _poll_compaction_worker applies a successful result, it
+    should spawn a _CacheWarmer for the post-compact prefix."""
+    from successor.agent import TokenCounter
+    chat = SuccessorChat()
+    chat.client = _MockCompactClient(delay_s=0.05)
+    chat._cached_token_counter = TokenCounter()
+    chat.messages = []
+    for i in range(8):
+        chat.messages.append(_Message("user", f"q{i}"))
+        chat.messages.append(_Message("successor", f"a{i}"))
+
+    chat.input_buffer = "/compact"
+    chat._submit()
+
+    # Tick until worker completes
+    deadline = time.monotonic() + 5.0
+    while chat._compaction_worker is not None and time.monotonic() < deadline:
+        chat._poll_compaction_worker()
+        time.sleep(0.05)
+
+    # Warmer should have been spawned
+    assert chat._cache_warmer is not None
+    # Wait for warmer to finish
+    deadline = time.monotonic() + 5.0
+    while chat._cache_warmer is not None and not chat._cache_warmer.is_done() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert chat._cache_warmer is not None  # not yet cleared by on_tick
+    assert chat._cache_warmer.is_done()
+
+
+def test_submit_cancels_in_flight_warmer(temp_config_dir: Path) -> None:
+    """_submit must cancel any in-flight cache warmer because the
+    user's message takes priority."""
+    from successor.chat import _CacheWarmer
+    chat = SuccessorChat()
+    chat.client = _SlowWarmingClient(delay_s=2.0)  # slow enough to abort
+    chat.messages = []
+
+    # Manually arm a warmer (simulating post-compaction state)
+    chat._cache_warmer = _CacheWarmer(
+        messages=[{"role": "user", "content": "x"}],
+        client=chat.client,
+    )
+    chat._cache_warmer.start()
+    time.sleep(0.05)  # let it start
+    assert chat._cache_warmer.is_running()
+
+    # User sends a message
+    chat.input_buffer = "hello"
+    # Mock the stream so _submit doesn't try to actually call the model
+    # We just need to verify the warmer was canceled
+    saved_warmer = chat._cache_warmer
+    try:
+        chat._submit()
+    except Exception:
+        pass  # we don't care about the rest of _submit's behavior
+
+    # The warmer should be canceled (close() was called)
+    assert chat._cache_warmer is None
+    # The original warmer should be marked done after the close
+    deadline = time.monotonic() + 1.0
+    while not saved_warmer.is_done() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert saved_warmer.is_done()
+
+
+def test_footer_warming_indicator(temp_config_dir: Path) -> None:
+    """When the warmer is running, the static footer shows a small
+    'warming' indicator next to the context bar."""
+    from successor.chat import _CacheWarmer
+    from successor.agent import TokenCounter
+    chat = SuccessorChat()
+    chat.messages = []
+    chat._cached_token_counter = TokenCounter()
+    chat._cache_warmer = _CacheWarmer(
+        messages=[{"role": "user", "content": "x"}],
+        client=_SlowWarmingClient(delay_s=2.0),
+    )
+    chat._cache_warmer.start()
+
+    g = Grid(20, 110)
+    chat.on_tick(g)
+    plain = render_grid_to_plain(g)
+    footer = plain.split("\n")[-1]
+    assert "warming" in footer
+    chat._cache_warmer.close()
+
+
 def test_boundary_message_in_chat_renders_divider(temp_config_dir: Path) -> None:
     chat = SuccessorChat()
     chat.messages = []

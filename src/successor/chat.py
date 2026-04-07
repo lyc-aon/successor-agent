@@ -843,6 +843,129 @@ class _CompactionResult:
     error: str | None  # error message, None on success
 
 
+class _CacheWarmer:
+    """Worker thread that pre-warms llama.cpp's KV cache for the
+    post-compact prefix.
+
+    After compaction completes, the chat's `self.messages` becomes
+    [boundary][summary][last_N_kept_rounds]. The next user message
+    will send `[sys][boundary][summary][...kept...][new_user]`.
+
+    llama.cpp's KV cache currently holds the OLD chat structure
+    plus the compaction summarization request — none of which
+    matches the new prefix. The next user message would pay a full
+    ~40s cache miss to evaluate the post-compact prefix from scratch.
+
+    The warmer fires a `max_tokens=1` chat completion against the
+    post-compact prefix. The prompt eval populates the cache; the
+    1-token generation is essentially free. After warming completes,
+    the next REAL user message hits a warm cache and prompt eval is
+    near-instant.
+
+    Cancellable via close():
+      1. Sets the worker's stop event
+      2. Closes the underlying ChatStream so the worker thread
+         unblocks from its drain loop
+      3. The warmer thread exits without storing a result
+
+    The warmer is a TRANSPARENT optimization — it has no observable
+    effect on chat behavior beyond making the next message faster.
+    Failure modes are silent (we just don't get the speedup).
+
+    Why max_tokens=1: the smallest legal generation. We don't care
+    about the generated content — we only want the model to evaluate
+    the prompt and populate the cache. One token of generation costs
+    ~20ms which is negligible.
+    """
+
+    __slots__ = (
+        "_messages", "_client",
+        "_thread", "_stream", "_stop", "_done",
+        "_started_at", "_ended_at",
+    )
+
+    def __init__(
+        self,
+        *,
+        messages: list[dict],
+        client,  # CompactionClient / LlamaCppClient
+    ) -> None:
+        self._messages = messages
+        self._client = client
+        self._thread = None  # threading.Thread
+        self._stream = None  # ChatStream — held so close() can abort it
+        self._stop = None  # threading.Event
+        self._done = False
+        self._started_at: float = 0.0
+        self._ended_at: float = 0.0
+
+    def start(self) -> None:
+        """Spawn the warmer thread. Returns immediately."""
+        import threading
+        self._stop = threading.Event()
+        self._started_at = time.monotonic()
+        self._thread = threading.Thread(
+            target=self._run, daemon=True,
+            name="successor-cache-warmer",
+        )
+        self._thread.start()
+
+    def is_done(self) -> bool:
+        return self._done
+
+    def is_running(self) -> bool:
+        return self._thread is not None and not self._done
+
+    def elapsed(self) -> float:
+        end = self._ended_at if self._ended_at else time.monotonic()
+        return end - self._started_at if self._started_at else 0.0
+
+    def close(self) -> None:
+        """Signal the warmer to stop ASAP. Discards any pending result."""
+        if self._stop is not None:
+            self._stop.set()
+        if self._stream is not None:
+            try:
+                self._stream.close()
+            except Exception:
+                pass
+
+    def _run(self) -> None:
+        """The worker body — opens a stream, drains it to completion,
+        sets _done. Catches all exceptions silently because warming
+        is a transparent optimization that should never crash the chat."""
+        from .providers.llama import (
+            ContentChunk, ReasoningChunk,
+            StreamEnded, StreamError, StreamStarted,
+        )
+        try:
+            self._stream = self._client.stream_chat(
+                self._messages,
+                max_tokens=1,        # smallest legal generation
+                temperature=0.0,
+            )
+            # Drain to completion (or until stop event)
+            deadline = time.monotonic() + 1800.0  # 30 min hard cap
+            while time.monotonic() < deadline:
+                if self._stop is not None and self._stop.is_set():
+                    return  # canceled
+                events = self._stream.drain()
+                done = False
+                for ev in events:
+                    if isinstance(ev, (StreamEnded, StreamError)):
+                        done = True
+                        break
+                if done:
+                    break
+                time.sleep(0.05)
+        except Exception:
+            # Warming is best-effort — silent failure
+            pass
+        finally:
+            self._ended_at = time.monotonic()
+            self._done = True
+
+
 class _CompactionWorker:
     """Worker thread that runs compact() in the background.
 
@@ -1152,6 +1275,13 @@ class SuccessorChat(App):
         # applies the new log and the animation transitions from
         # WAITING → MATERIALIZE.
         self._compaction_worker: _CompactionWorker | None = None
+
+        # Cache pre-warming worker — fires after compaction completes
+        # to populate llama.cpp's KV cache with the post-compact prefix.
+        # Without this, the next user message after compaction pays a
+        # ~40s cache miss. With it, the next message is near-instant.
+        # Auto-canceled by _submit when the user types a real message.
+        self._cache_warmer: _CacheWarmer | None = None
 
         # Cached TokenCounter for the agent log adapter — lazy-init
         # on first /budget or /compact so we don't pay the construction
@@ -1990,6 +2120,15 @@ class SuccessorChat(App):
         text = self.input_buffer.strip()
         self.input_buffer = ""
 
+        # Cancel any in-flight cache warmer — the user's message takes
+        # priority over background warming. If we let the warmer keep
+        # running, the user's request would queue behind it on the
+        # llama.cpp slot and they'd wait LONGER than if we'd never
+        # warmed at all.
+        if self._cache_warmer is not None:
+            self._cache_warmer.close()
+            self._cache_warmer = None
+
         if text in ("/quit", "/exit", "/q"):
             self.stop()
             return
@@ -2743,6 +2882,38 @@ class SuccessorChat(App):
         self._compaction_anim.summary_text = result.boundary.summary_text
         self._compaction_anim.result_arrived_at = time.monotonic()
 
+        # Fire cache pre-warming for the post-compact prefix. This
+        # populates llama.cpp's KV cache so the next user message
+        # is near-instant instead of paying ~40s of cache miss.
+        # Runs in parallel with the materialize/reveal/toast animation.
+        # Auto-canceled by _submit when the user types a message.
+        try:
+            post_compact_messages = result.new_log.api_messages()
+            if post_compact_messages:
+                # llama.cpp's chat completion endpoint rejects prompts
+                # that end on an assistant message when thinking mode
+                # is enabled (HTTP 400: "Assistant response prefill is
+                # incompatible with enable_thinking"). The post-compact
+                # log ends on the last kept assistant turn, so we
+                # append a synthetic user message to make the prompt
+                # valid. The cache match against this prepended user
+                # message will fail when the REAL user sends their
+                # next message, but that's fine — the cache match for
+                # everything BEFORE that synthetic message (which is
+                # the post-compact prefix proper) is what we want.
+                warmer_messages = list(post_compact_messages)
+                if warmer_messages and warmer_messages[-1].get("role") == "assistant":
+                    warmer_messages.append({"role": "user", "content": "."})
+                self._cache_warmer = _CacheWarmer(
+                    messages=warmer_messages,
+                    client=self.client,
+                )
+                self._cache_warmer.start()
+        except Exception:
+            # Warming is best-effort — never block the chat on a
+            # warmer construction failure
+            self._cache_warmer = None
+
     def _pump_stream(self) -> None:
         """Drain any pending stream events and update accumulators."""
         if self._stream is None:
@@ -2806,6 +2977,13 @@ class SuccessorChat(App):
         # Poll the compaction worker. If it's done, apply the result
         # and transition the animation from waiting → materialize.
         self._poll_compaction_worker()
+
+        # Clear the cache warmer reference once the worker thread
+        # has finished. We don't need to do anything with the result —
+        # the side effect (populated KV cache in llama.cpp) is what
+        # we care about.
+        if self._cache_warmer is not None and self._cache_warmer.is_done():
+            self._cache_warmer = None
 
         # Resolve the active theme variant for THIS frame. Combines the
         # (theme, display_mode) state into one ThemeVariant. If either
@@ -4437,7 +4615,15 @@ class SuccessorChat(App):
             state_badge = " ◉ COMPACT "
         elif state == "blocking":
             state_badge = " ⚠ BLOCKED "
-        right_label = f"{state_badge} {pct * 100:5.2f}%  {self.client.model[:20]} "
+        # Warming indicator: tiny spinner when the cache pre-warmer is
+        # running in the background. Quiet but visible — tells the user
+        # "the harness is doing background work that will make the next
+        # message faster".
+        warming_badge = ""
+        if self._cache_warmer is not None and self._cache_warmer.is_running():
+            spinner_idx = int(self.elapsed * 10) % len(SPINNER_FRAMES)
+            warming_badge = f" {SPINNER_FRAMES[spinner_idx]} warming "
+        right_label = f"{warming_badge}{state_badge} {pct * 100:5.2f}%  {self.client.model[:20]} "
         label_style = Style(fg=theme.fg_dim, bg=theme.bg_footer, attrs=ATTR_DIM)
 
         # Right-label color depends on state — warm in autocompact, warn in blocking

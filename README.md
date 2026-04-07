@@ -71,7 +71,7 @@ scripts/                 # Manual swap scripts (qwopus ↔ A3B for compaction st
     tools/read_file.py
     intros/successor/{00..10}-*.txt
 docs/                    # rendering-superpowers, concepts, plan, llamacpp, changelog
-tests/                   # 645 tests, hermetic via SUCCESSOR_CONFIG_DIR
+tests/                   # 652 tests, hermetic via SUCCESSOR_CONFIG_DIR
 ```
 
 ## Install
