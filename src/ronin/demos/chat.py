@@ -50,6 +50,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+from ..config import load_chat_config, save_chat_config
 from ..input.keys import (
     InputEvent,
     Key,
@@ -172,6 +173,53 @@ def blend_densities(a: Density, b: Density, t: float) -> Density:
 # How long density transitions take. Snappier than theme transitions
 # because the only thing actually animating is content width.
 DENSITY_TRANSITION_S = 0.25
+
+# How long the help overlay takes to fade in.
+HELP_FADE_IN_S = 0.18
+
+# How many chars of reasoning to show in the live preview lane below
+# the thinking spinner. Trimmed to fit the body width and clamped to
+# the most-recent text.
+_REASONING_PREVIEW_CHARS = 80
+
+# ─── Help content ───
+#
+# Tuples of (key combination, description). Grouped sections render as
+# clusters in the overlay. Adding a new keybinding here makes it appear
+# automatically in the help screen — keep this in sync as features land.
+
+_HELP_SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+    ("editing", (
+        ("Enter",       "submit message"),
+        ("Backspace",   "delete previous character"),
+        ("Ctrl+C",      "quit ronin"),
+        ("Ctrl+G",      "interrupt streaming reply"),
+    )),
+    ("scroll", (
+        ("↑ ↓",          "scroll one line"),
+        ("PgUp PgDn",   "scroll one page"),
+        ("Home End",    "jump to top / bottom"),
+        ("Ctrl+B Ctrl+F", "vim-style page up / down"),
+        ("Ctrl+P Ctrl+N", "vim-style line up / down"),
+        ("Ctrl+E Ctrl+Y", "vim-style end / top"),
+    )),
+    ("look & feel", (
+        ("Ctrl+T",      "cycle theme (dark → light → forge)"),
+        ("Ctrl+]",      "cycle density (compact / normal / spacious)"),
+        ("Alt+= Alt+-", "step density up / down"),
+    )),
+    ("slash commands", (
+        ("/",           "open the command palette"),
+        ("↑ ↓",          "navigate suggestions"),
+        ("Tab",         "accept highlighted suggestion"),
+        ("Enter",       "accept and submit"),
+        ("Esc",         "dismiss the dropdown"),
+    )),
+    ("misc", (
+        ("?",           "show this help overlay"),
+        ("Esc / any",   "dismiss the help overlay"),
+    )),
+)
 
 
 # Sentinel value for "no content-width cap" used by the compact density.
@@ -513,7 +561,7 @@ class RoninChat(App):
         self,
         *,
         client: LlamaCppClient | None = None,
-        theme: Theme = DARK_THEME,
+        theme: Theme | None = None,
     ) -> None:
         super().__init__(
             target_fps=30.0,
@@ -522,19 +570,34 @@ class RoninChat(App):
         )
         self.client = client if client is not None else LlamaCppClient()
 
+        # ─── Persisted preferences ───
+        # Loaded from ~/.config/ronin/chat.json on startup. Saved on
+        # every change to theme/density/mouse so the user's choices
+        # survive between `rn chat` invocations.
+        self._config = load_chat_config()
+
         # ─── Theme state ───
-        # `theme` is the committed target. `_theme_from` and `_theme_t0`
-        # drive a smooth lerp transition when the user switches themes.
-        self.theme: Theme = theme
+        # Resolve initial theme: explicit constructor arg → persisted
+        # config → DARK_THEME default.
+        initial_theme = theme
+        if initial_theme is None:
+            saved_name = self._config.get("theme")
+            if isinstance(saved_name, str):
+                initial_theme = find_theme(saved_name)
+        if initial_theme is None:
+            initial_theme = DARK_THEME
+        self.theme: Theme = initial_theme
         self._theme_from: Theme | None = None
         self._theme_t0: float = 0.0
 
         # ─── Density state ───
-        # Layout density (compact / normal / spacious) — the "font size
-        # feel" widget. The terminal owns the actual font; this controls
-        # how Ronin uses cells. Transitions lerp the max_content_width
-        # over DENSITY_TRANSITION_S so the text smoothly slides in/out.
-        self.density: Density = NORMAL
+        initial_density = NORMAL
+        saved_density_name = self._config.get("density")
+        if isinstance(saved_density_name, str):
+            found = find_density(saved_density_name)
+            if found is not None:
+                initial_density = found
+        self.density: Density = initial_density
         self._density_from: Density | None = None
         self._density_t0: float = 0.0
 
@@ -544,7 +607,7 @@ class RoninChat(App):
         # The trade-off: native click-drag selection requires holding
         # Shift while mouse reporting is on. Default is OFF so users
         # who never opt in keep their normal selection behavior.
-        self._mouse_enabled: bool = False
+        self._mouse_enabled: bool = bool(self._config.get("mouse", False))
         # Hit boxes recorded each frame by the painters. Cleared at
         # the start of on_tick and refilled as widgets are painted.
         self._hit_boxes: list[_HitBox] = []
@@ -563,12 +626,26 @@ class RoninChat(App):
         # the moment the user starts engaging again.
         self._autocomplete_dismissed: bool = False
 
+        # ─── Help overlay state ───
+        # When True, a centered modal listing all keybindings + slash
+        # commands appears over the chat. Press '?' to open, any key
+        # (including Esc) to dismiss. Fades in over HELP_FADE_IN_S.
+        self._help_open: bool = False
+        self._help_opened_at: float = 0.0
+
+        # If we just finished restoring mouse from config, push the
+        # escape sequence to the terminal so reporting matches the flag.
+        # (We do this AFTER super().__init__ so self.term exists.)
+        if self._mouse_enabled:
+            # Defer until __enter__ runs (see below)
+            self.term.mouse_reporting = True
+
         # Probe the server immediately so we can show a useful greeting.
         server_up = self.client.health()
         if server_up:
             greeting = (
                 f"I am ronin. The forge is hot — {self.client.model} stands ready. "
-                f"Speak freely. Ctrl+C or /quit to leave."
+                f"Speak freely. Ctrl+C, /quit, or `?` for help."
             )
         else:
             greeting = (
@@ -629,6 +706,11 @@ class RoninChat(App):
         dispatch to the same handlers the keyboard shortcuts use.
         Other buttons are ignored for v0.
         """
+        # When help overlay is open, any click dismisses it.
+        if self._help_open and event.button == MouseButton.LEFT and event.pressed:
+            self._help_open = False
+            return
+
         # Scroll wheel — always navigate the chat history.
         if event.button == MouseButton.WHEEL_UP:
             self._scroll_lines(WHEEL_SCROLL_LINES)
@@ -675,6 +757,14 @@ class RoninChat(App):
                 return
 
     def _handle_key_event(self, event: KeyEvent) -> None:
+        # ─── Help overlay dismiss ───
+        # When the help overlay is open, ANY keypress dismisses it
+        # (Esc, any letter, any arrow). The dismissed key is consumed —
+        # we don't pass it through to the normal handlers.
+        if self._help_open:
+            self._help_open = False
+            return
+
         # ─── Bracketed paste boundaries ───
         if event.key == Key.PASTE_START:
             self._in_paste = True
@@ -682,6 +772,15 @@ class RoninChat(App):
         if event.key == Key.PASTE_END:
             self._in_paste = False
             return
+
+        # ─── Help open (?) ───
+        # Only opens when the input buffer is empty so '?' inside a
+        # message stays as a literal char.
+        if event.is_char and event.char == "?" and not event.is_ctrl and not event.is_alt:
+            if not self.input_buffer:
+                self._help_open = True
+                self._help_opened_at = time.monotonic()
+                return
 
         # ─── Theme cycle (always available, even mid-stream) ───
         if event.is_ctrl and event.char == "t":
@@ -873,6 +972,7 @@ class RoninChat(App):
         self._theme_from = self._current_theme()
         self.theme = new_theme
         self._theme_t0 = time.monotonic()
+        self._persist_preferences()
 
     def _cycle_theme(self) -> None:
         self._set_theme(next_theme(self.theme))
@@ -885,6 +985,7 @@ class RoninChat(App):
         self._density_from = self._current_density()
         self.density = new_density
         self._density_t0 = time.monotonic()
+        self._persist_preferences()
 
     def _density_step(self, delta: int) -> None:
         """Step density by +1 (toward spacious) or -1 (toward compact)."""
@@ -924,12 +1025,26 @@ class RoninChat(App):
             return
         self.term.set_mouse_reporting(True)
         self._mouse_enabled = True
+        self._persist_preferences()
 
     def _disable_mouse(self) -> None:
         if not self._mouse_enabled:
             return
         self.term.set_mouse_reporting(False)
         self._mouse_enabled = False
+        self._persist_preferences()
+
+    def _persist_preferences(self) -> None:
+        """Save user-toggleable preferences to ~/.config/ronin/chat.json.
+
+        Failures are silent — persistence is best-effort. The user keeps
+        their session preferences even if the file write fails; they
+        just won't carry over to the next launch.
+        """
+        self._config["theme"] = self.theme.name
+        self._config["density"] = self.density.name
+        self._config["mouse"] = self._mouse_enabled
+        save_chat_config(self._config)
 
     # ─── Slash command autocomplete ───
 
@@ -1368,6 +1483,12 @@ class RoninChat(App):
         # space) restores everything on the next frame's diff.
         self._paint_autocomplete(grid, theme, input_y)
 
+        # ─── Help overlay ───
+        # Painted EVEN LATER so it overlays everything else, including
+        # the autocomplete dropdown. Centered modal with a fade-in.
+        if self._help_open:
+            self._paint_help_overlay(grid, theme)
+
     # ─── Region painters ───
 
     def _paint_chat_area(
@@ -1664,7 +1785,12 @@ class RoninChat(App):
         out: list[_RenderedRow] = [_RenderedRow(base_color=theme.accent)]
 
         if not content_so_far:
-            # Thinking phase — single line with spinner + char counter
+            # Thinking phase — show spinner + char counter on the
+            # ronin line, plus a live reasoning preview underneath
+            # showing the last few words of the model's internal
+            # reasoning. Makes the wait feel productive instead of
+            # opaque. Other harnesses can't show this because they
+            # don't separate the reasoning channel.
             if self._stream_reasoning_chars > 0:
                 text = f"{spinner} thinking… ({self._stream_reasoning_chars} chars)"
             else:
@@ -1678,6 +1804,37 @@ class RoninChat(App):
                     base_color=theme.accent,
                 )
             )
+
+            # Live reasoning preview lane — show the last ~80 chars of
+            # the model's reasoning_content as a dim italic indented
+            # line under the spinner. Updates every frame as new chars
+            # arrive.
+            reasoning_text = self._stream.reasoning_so_far
+            if reasoning_text:
+                tail = reasoning_text[-_REASONING_PREVIEW_CHARS:]
+                # Collapse internal whitespace runs to a single space
+                # so the preview reads as a continuous flow.
+                tail = " ".join(tail.split())
+                if tail:
+                    # Account for the leading "  ↳ " prefix when wrapping.
+                    avail_w = max(1, body_width - _PREFIX_W - 4)
+                    if len(tail) > avail_w:
+                        # Show only the END of the tail (most recent text)
+                        tail = "…" + tail[-(avail_w - 1):]
+                    out.append(
+                        _RenderedRow(
+                            leading_text=" " * _PREFIX_W + "  ↳ ",
+                            leading_color_kind="fg_dim",
+                            leading_attrs=ATTR_DIM,
+                            body_spans=(
+                                LaidOutSpan(
+                                    text=tail,
+                                    attrs=ATTR_DIM | ATTR_ITALIC,
+                                ),
+                            ),
+                            base_color=theme.fg_subtle,
+                        )
+                    )
             return out
 
         # Content streaming — render the live text as markdown.
@@ -1959,6 +2116,132 @@ class RoninChat(App):
                 style=Style(fg=fg, bg=theme.bg_input, attrs=ATTR_DIM),
             )
 
+    # ─── Help overlay ───
+
+    def _paint_help_overlay(self, grid: Grid, theme: Theme) -> None:
+        """Centered modal showing every keybinding + slash command.
+
+        Faded in over HELP_FADE_IN_S using lerp_rgb on every color so
+        the modal smoothly arrives over the existing UI. Dismissed
+        by any keypress.
+        """
+        rows, cols = grid.rows, grid.cols
+        if rows < 8 or cols < 50:
+            return
+
+        # ─── Compute box dimensions ───
+        # Two columns: key, description. Pad each column for alignment.
+        key_col_w = max(
+            max(len(key) for key, _ in entries)
+            for _, entries in _HELP_SECTIONS
+        )
+        desc_col_w = max(
+            max(len(desc) for _, desc in entries)
+            for _, entries in _HELP_SECTIONS
+        )
+        title_text = "ronin · keybindings"
+        # Inner content width = key + 3 + desc, plus inner padding (4)
+        inner_w = max(key_col_w + 3 + desc_col_w, len(title_text) + 4)
+        box_w = min(inner_w + 6, cols - 4)
+
+        # Inner content height: 1 for title, 1 for blank, then sections
+        # (1 header row + N entry rows + 1 blank row each), then a
+        # final 1 hint row.
+        sections_h = 0
+        for _, entries in _HELP_SECTIONS:
+            sections_h += 1 + len(entries) + 1  # header + entries + spacer
+        # Drop the last spacer
+        sections_h -= 1
+        inner_h = 1 + 1 + sections_h + 1 + 1  # title, blank, sections, blank, hint
+        box_h = min(inner_h + 2, rows - 2)
+
+        box_x = max(0, (cols - box_w) // 2)
+        box_y = max(0, (rows - box_h) // 2)
+
+        # ─── Fade-in lerp ───
+        elapsed = time.monotonic() - self._help_opened_at
+        fade_t = ease_out_cubic(min(1.0, elapsed / HELP_FADE_IN_S))
+
+        def fade(target: int) -> int:
+            return lerp_rgb(theme.bg, target, fade_t)
+
+        # ─── Backdrop dim — slightly darken the chat behind the modal ───
+        # Skip for v0; the modal's solid bg is enough visual separation.
+
+        # ─── Draw the box ───
+        border_color = fade(theme.accent)
+        border_style = Style(fg=border_color, bg=theme.bg_input, attrs=ATTR_BOLD)
+        fill_style = Style(fg=fade(theme.fg), bg=theme.bg_input)
+        paint_box(
+            grid, box_x, box_y, box_w, box_h,
+            style=border_style, fill_style=fill_style,
+        )
+
+        # ─── Title ───
+        title_y = box_y + 1
+        if title_y < box_y + box_h - 1:
+            tx = box_x + (box_w - len(title_text)) // 2
+            paint_text(
+                grid, title_text, tx, title_y,
+                style=Style(fg=fade(theme.accent), bg=theme.bg_input, attrs=ATTR_BOLD),
+            )
+
+        # ─── Sections ───
+        cur_y = title_y + 2  # blank row after title
+        section_header_color = fade(theme.fg_dim)
+        key_color = fade(theme.accent_warm)
+        desc_color = fade(theme.fg)
+
+        for section_idx, (section_name, entries) in enumerate(_HELP_SECTIONS):
+            if cur_y >= box_y + box_h - 2:
+                break
+            # Section header
+            paint_text(
+                grid, f"  {section_name}",
+                box_x + 2, cur_y,
+                style=Style(
+                    fg=section_header_color,
+                    bg=theme.bg_input,
+                    attrs=ATTR_DIM,
+                ),
+            )
+            cur_y += 1
+
+            for key, desc in entries:
+                if cur_y >= box_y + box_h - 2:
+                    break
+                # Key column (right-aligned to its width)
+                key_padded = key.rjust(key_col_w)
+                paint_text(
+                    grid, key_padded,
+                    box_x + 4, cur_y,
+                    style=Style(fg=key_color, bg=theme.bg_input, attrs=ATTR_BOLD),
+                )
+                # Description column
+                paint_text(
+                    grid, desc,
+                    box_x + 4 + key_col_w + 3, cur_y,
+                    style=Style(fg=desc_color, bg=theme.bg_input),
+                )
+                cur_y += 1
+
+            if section_idx < len(_HELP_SECTIONS) - 1:
+                cur_y += 1  # blank row between sections
+
+        # ─── Hint row (always at the last interior row) ───
+        hint_y = box_y + box_h - 2
+        if box_y + 1 <= hint_y < box_y + box_h - 1:
+            hint = "press any key to close"
+            hx = box_x + (box_w - len(hint)) // 2
+            paint_text(
+                grid, hint, hx, hint_y,
+                style=Style(
+                    fg=fade(theme.fg_subtle),
+                    bg=theme.bg_input,
+                    attrs=ATTR_DIM,
+                ),
+            )
+
     # ─── Static footer ───
 
     def _paint_static_footer(
@@ -2051,6 +2334,34 @@ class RoninChat(App):
             last_line = wrapped[-1] if wrapped else ""
             last_y = y + min(len(wrapped) - 1, height - 1)
             cursor_x = min(width - 1, PROMPT_WIDTH + len(last_line))
+
+            # ─── Inline argument ghost text ───
+            # When the user has typed a slash command + space and is
+            # ready for args, show the args_hint as dim text right
+            # after the cursor (Copilot-style ghost text). As they type
+            # the arg, the hint is hidden by their input. Disappears
+            # entirely once the input contains a non-whitespace arg.
+            ghost_text = self._compute_ghost_text()
+            if ghost_text and cursor_x < width:
+                ghost_x = cursor_x
+                # Reserve a cell for the cursor itself if visible.
+                cursor_visible = (int(time.monotonic() * CURSOR_BLINK_HZ * 2) % 2) == 0
+                if cursor_visible:
+                    ghost_x += 1  # ghost starts after the cursor cell
+                avail = max(0, width - ghost_x)
+                if avail > 0:
+                    paint_text(
+                        grid,
+                        ghost_text[:avail],
+                        ghost_x,
+                        last_y,
+                        style=Style(
+                            fg=theme.fg_subtle,
+                            bg=theme.bg_input,
+                            attrs=ATTR_DIM | ATTR_ITALIC,
+                        ),
+                    )
+
             visible = (int(time.monotonic() * CURSOR_BLINK_HZ * 2) % 2) == 0
             if visible:
                 cursor_cell = Cell(" ", Style(fg=theme.bg_input, bg=theme.fg))
@@ -2064,3 +2375,28 @@ class RoninChat(App):
                 y,
                 style=Style(fg=theme.fg_dim, bg=theme.bg_input, attrs=ATTR_DIM),
             )
+
+    def _compute_ghost_text(self) -> str:
+        """Inline ghost-text hint shown after the input cursor.
+
+        Triggered when the user has typed a slash command name and a
+        trailing space (i.e., they're about to type arguments). The
+        ghost shows the command's args_hint until the user types a
+        non-whitespace character.
+
+        Returns the empty string when no ghost should be shown.
+        """
+        text = self.input_buffer
+        if not text.startswith("/"):
+            return ""
+        rest = text[1:]
+        if " " not in rest:
+            return ""
+        cmd_name, _, arg_partial = rest.partition(" ")
+        cmd = find_slash_command(cmd_name)
+        if cmd is None or not cmd.args_hint:
+            return ""
+        # If the user has already started typing args, hide the ghost.
+        if arg_partial.strip():
+            return ""
+        return cmd.args_hint
