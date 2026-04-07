@@ -169,7 +169,15 @@ class ChatStream:
                 },
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=connect_timeout) as resp:
+            # NB: urllib's `timeout` parameter governs *all* socket I/O on
+            # the connection, not just the initial connect. We use the
+            # larger `timeout` value (the streaming deadline) so that
+            # long prompt-processing windows on big contexts don't get
+            # cut off by the connect deadline. The connect_timeout is
+            # kept as a parameter for the future when we move to a real
+            # HTTP client that separates connect from read timeouts.
+            socket_timeout = max(timeout, connect_timeout)
+            with urllib.request.urlopen(req, timeout=socket_timeout) as resp:
                 self._queue.put(StreamStarted())
                 self._read_sse(resp, timeout)
         except urllib.error.HTTPError as e:

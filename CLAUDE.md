@@ -64,6 +64,15 @@ src/successor/bash/          bash-masking subsystem — parse model bash → str
   exec.py                dispatch_bash() — parse + classify + run, refuse dangerous
   render.py              paint_tool_card() — pure paint function for the cards
   patterns/              one file per command family (ls, cat, grep, find, git, ...)
+src/successor/agent/         agent loop + compaction subsystem
+  log.py                 ApiRound + MessageLog + BoundaryMarker (compaction-ready data shape)
+  events.py              ChatEvent ADT (StreamStarted, Compacted, ToolCompleted, ...)
+  tokens.py              TokenCounter — /tokenize endpoint + char heuristic + LRU cache
+  budget.py              ContextBudget + CircuitBreaker + RecompactChain + BudgetTracker
+  microcompact.py        time-based stale tool result clearing (pure function)
+  compact.py             autocompact via llama.cpp summarization + PTL retry loop
+  bash_stream.py         BashStreamDetector — fenced ```bash detection across stream chunks
+  loop.py                QueryLoop — tick-driven state machine, the agent loop core
 src/successor/wizard/        successor setup wizard with live preview pane (the showcase)
 
 src/successor/builtin/       package-shipped data files loaded by the registries
@@ -84,7 +93,7 @@ src/successor/recorder.py    record/replay session traces
 src/successor/cli.py         argparse subcommand dispatch (`successor` binary)
 src/successor/__main__.py    `python -m successor` entry point
 
-tests/                   pytest suite — 487 tests, hermetic via SUCCESSOR_CONFIG_DIR
+tests/                   pytest suite — 602 tests, hermetic via SUCCESSOR_CONFIG_DIR
   conftest.py            temp_config_dir fixture
   test_loader.py         Registry pattern tests
   test_theme.py          color parsing, variant resolver, blend math, registry
@@ -99,6 +108,17 @@ tests/                   pytest suite — 487 tests, hermetic via SUCCESSOR_CONF
   test_bash_exec.py      dispatch_bash, refusal, truncation, timeout, preview
   test_bash_render.py    paint_tool_card per-risk visual + measure consistency
   test_chat_bash.py      /bash slash command + tool message integration
+  test_agent_log.py      MessageLog/ApiRound/BoundaryMarker shapes
+  test_agent_tokens.py   TokenCounter heuristic + endpoint paths + LRU
+  test_agent_budget.py   thresholds + circuit breaker + recompact chain
+  test_agent_microcompact.py  count + time-based stale tool result clearing
+  test_agent_compact.py  full compaction with mocked stream + PTL retry
+  test_bash_stream.py    fenced ```bash detection across stream fragments
+  test_agent_loop.py     QueryLoop state machine + transitions + error paths
+
+scripts/                 manual-run scripts (no auto-execution)
+  swap_to_a3b.sh         swap qwopus → A3B at 50K context for compaction stress test
+  swap_to_qwopus.sh      restore qwopus at 262K context (Nyx + ChetGPT depend on it)
 
 docs/                    architectural docs (read these)
   rendering-plan.md      original five-layer architecture decisions
@@ -127,7 +147,10 @@ Available subcommands (use either `successor` or `sx`):
 successor              help
 successor -V           version
 successor chat         chat interface (real llama.cpp streaming, intro plays first)
-                       — inside chat: /bash <cmd> renders the command as a tool card
+                       — inside chat: /bash <cmd>     run bash, render as tool card
+                                      /budget         show context fill % + thresholds
+                                      /burn N         inject N synthetic tokens (test compaction)
+                                      /compact        manually fire compaction
 successor setup        profile creation wizard with live preview
 successor config       three-pane profile config menu (browse + edit + live preview)
 successor doctor       terminal capabilities + measure samples
@@ -425,10 +448,159 @@ the tool dispatch entry point — no rework.
 5. The user always sees the raw command on the bottom border so they
    can verify the parser's interpretation
 
-**What's NOT yet built**: skill invocation strategy, agent loop
-proper (the `dispatch_bash` entry point exists, but nothing yet
-detects bash blocks in the model's STREAMED content and routes them —
-that's the next phase), context compaction, framework docs.
+## Agent loop + compaction (added 2026-04-07, phase 5.1)
+
+The agent loop, the four-tier compaction pipeline (just two of the
+four are mandatory in our build), and the burn-tested-against-A3B
+proof that semantic continuity survives a 96.9% context reduction.
+Lives in `src/successor/agent/`.
+
+**Architectural decisions cross-checked against free-code's actual
+source** at `~/dev/ai/free-code-main/`:
+
+- Generator-based loop (free-code) → tick-driven state machine (us),
+  because our chat is a sync frame-driven `App` and async generators
+  don't compose with `on_tick` cleanly. Same flow, different plumbing.
+- 4-layer compaction pipeline → 2 layers. Free-code's snipCompact and
+  contextCollapse are feature-gated and compiled-out in external
+  builds; only microcompact + autocompact are mandatory. We mirror
+  the two that matter and skip the optimization layers.
+- CacheSafeParams + cache_edits microcompact → SKIPPED entirely.
+  llama.cpp's KV cache is local and free; there's no remote prompt
+  cache to keep warm.
+- StreamingToolExecutor (concurrent + streaming-during-model-stream)
+  → SYNC tool dispatch in v0. The shape is right, the concurrency
+  isn't wired yet because we don't have an asyncio event loop.
+- FallbackTriggeredError → SKIPPED. We have one model.
+- Reactive compact on prompt-too-long → KEPT. Same trigger semantics.
+- Token thresholds → ours scaled for llama.cpp's larger contexts:
+  `autocompact_buffer = max(4_000, window // 32)` (vs free-code's
+  flat 13K).
+
+**The agent package** (`src/successor/agent/`):
+
+- **`log.py`** — `LogMessage` + `ApiRound` + `MessageLog` +
+  `BoundaryMarker` + `AttachmentRegistry`. Compaction-ready data
+  shape: PTL truncation drops whole `ApiRound`s so the API never
+  sees orphaned tool_results. Boundary markers are first-class
+  entities the renderer can paint as visible dividers. **Critical
+  detail**: `LogMessage.to_api_dict()` converts boundary/summary
+  messages to `role=user` with explicit `[summary…]` prefix because
+  Qwen 3.5's chat template enforces "system message must be at the
+  beginning" and rejects any non-leading system message with a
+  Jinja exception.
+
+- **`events.py`** — frozen `ChatEvent` ADT for everything the loop
+  yields (`StreamStarted`, `BashBlockDetected`, `Compacted`,
+  `BlockingLimitReached`, etc.). The chat consumes via callback;
+  tests assert isinstance + count.
+
+- **`tokens.py`** — `TokenCounter` with two paths: (1) llama.cpp's
+  `POST /tokenize` endpoint for ground-truth counts (verified
+  against the live server: `"hello world"` → 2 tokens), (2) char
+  heuristic at 3.5 chars/token (deliberately conservative to
+  overestimate slightly so compaction fires early). LRU per-string
+  cache (default 1024 entries). Auto-disables endpoint after 3
+  consecutive HTTP failures.
+
+- **`budget.py`** — `ContextBudget` (window + warning/autocompact/
+  blocking buffers + threshold predicates), `CircuitBreaker` (trips
+  after 3 consecutive failures), `RecompactChain` (blocks two
+  compactions within 30s + 3 turns), `BudgetTracker` bundle.
+  `should_attempt_compaction(used, turn)` returns `(decision, reason)`
+  so refusals are diagnostic.
+
+- **`microcompact.py`** — pure stateless function that clears stale
+  tool result content via count-based and time-based triggers. Replaces
+  `tool_card.output` with placeholder while preserving the structural
+  card so chat history stays navigable.
+
+- **`compact.py`** — `compact(log, client, *, counter, ...)`
+  summarizes older rounds into one block via the LLM, keeps the most
+  recent N rounds verbatim. **PTL retry loop**: on prompt-too-long,
+  drops oldest 3 rounds-to-summarize per attempt, up to 3 retries.
+  Default summarization instructions are tuned for Qwen 3.5 distill
+  (explicit about preserving facts/paths/decisions, explicit about
+  discarding reasoning chains).
+
+- **`bash_stream.py`** — `BashStreamDetector`, a state machine that
+  consumes streamed model content character-by-character and detects
+  fenced ```` ```bash ```` blocks even when fence markers split
+  across chunk boundaries. Verified by one-character-at-a-time drip
+  test. Handles `bash` / `sh` / `shell` / `zsh` / `fish` / `console`
+  / `terminal` aliases, comments, blank lines, backslash continuation,
+  multi-block accumulation. `flush()` at end-of-stream to resolve
+  any in-progress fence with no trailing newline.
+
+- **`loop.py`** — `QueryLoop`, the agent loop as a tick-driven state
+  machine. Phases: `IDLE → COMPACTING → STREAMING → EXECUTING_TOOLS
+  → IDLE`. Owns the message log, budget, token counter, current
+  stream, bash detector, pending tool queue. **Reactive compact**
+  fires on PTL stream errors. Events flow OUT through `on_event`
+  callback. Synchronous tool dispatch in v0.
+
+**Chat integration**: rather than rewriting the chat to use
+`MessageLog`, the chat keeps its `_Message` list and uses two
+adapter methods (`_to_agent_log` / `_from_agent_log`) to bridge.
+Three new slash commands wire the agent in:
+
+- **`/budget`** — show context fill % + token counts + threshold
+  state. Calls `_to_agent_log()`, runs `TokenCounter.count_log`,
+  reports stats including `warn @ N`, `autocompact @ N`, `blocking @ N`.
+
+- **`/burn N`** — inject N synthetic tokens of varied content
+  (code blocks, lorem-ipsum padding, fake file paths) so compaction
+  can be tested without burning real model calls. Each round gets
+  realistic timestamps so microcompact's idle logic doesn't fire.
+
+- **`/compact`** — manually fire `compact()` against the chat's
+  current history. Builds the agent log, runs compaction against
+  the live client, writes the result back. Reports the boundary
+  stats as a synthetic message ("✓ compacted: N → M tokens, X%
+  reduction").
+
+**Burn rig results** (live A3B at 50K context, 165 rounds, 4 key
+facts seeded in round 1):
+```
+Pre:   40,052 tokens   165 rounds
+Post:   1,259 tokens     6 rounds
+Reduction: 96.9%  (saved 38,793 tokens)
+Wall time: 40.2s
+Semantic recall: 100% (4/4 facts retrieved correctly)
+```
+
+**The two bugs the burn rig caught** (would have shipped silently
+under unit-test-only discipline):
+
+1. `providers/llama.py` `urlopen(req, timeout=connect_timeout)`
+   sets the socket timeout for ALL I/O on the connection, not just
+   connect. A3B processing a 38K-token prompt took 30+ seconds to
+   emit the first byte; the 5s connect_timeout fired the read.
+   Fixed by `max(timeout, connect_timeout)`.
+2. Boundary + summary messages were emitted with `role=system` but
+   Qwen 3.5's chat template enforces "system message must be at the
+   beginning" and raised a Jinja exception. Fixed by emitting them
+   as `role=user` with explicit `[summary…]` prefix.
+
+**The compact-test profile** (`builtin/profiles/compact-test.json`)
+points at A3B with `context_window: 50000`. Forge theme so the
+chrome visually signals "stress-test mode". Switch in via
+`/profile compact-test` after running `scripts/swap_to_a3b.sh`.
+
+**`scripts/swap_to_a3b.sh` and `scripts/swap_to_qwopus.sh`** —
+manual-run scripts that swap the running llama-server between
+qwopus (production) and A3B (compaction stress testing). Both
+scripts export `LD_LIBRARY_PATH` to the llama.cpp build dir
+because the binary at `/usr/local/bin/llama-server` has unresolved
+shared lib references. Both wait for `/health` before returning.
+Documented Nyx-impact in the script header — qwopus is what the
+Nyx Telegram Relay uses, so swapping to A3B takes it down briefly.
+
+**What's NOT yet built**: visible compaction animation in the chat
+(events fire but the smooth fade-in to the boundary divider needs
+the renderer wiring), title-bar context-fill pill (data is there,
+needs the visual), concurrent tool execution, streaming tool
+execution (tools start AFTER stream commits in v0), framework docs.
 
 See [`docs/changelog.md`](docs/changelog.md) for the per-phase notes.
 

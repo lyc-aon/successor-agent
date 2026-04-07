@@ -10,10 +10,13 @@ skills/tools scaffolding, setup wizard, three-pane config menu, multi-line
 prompt editor with soft wrap + selection + OSC 52 clipboard, bundled
 emergence intro) + Phase 5.0 bash-masking subsystem (parser + risk
 classifier + executor + structured tool card renderer + `/bash` slash
-command). The agent loop proper is the next piece — but the
-`dispatch_bash` entry point is already in place, so wiring it into
-streaming model output will be incremental. 487 tests passing, all
-hermetic.
+command) + Phase 5.1 agent loop + compaction subsystem (tick-driven
+QueryLoop state machine, token counter via llama.cpp `/tokenize`,
+context budget tracker + circuit breaker + recompact chain detection,
+microcompact + autocompact via LLM summarization with PTL retry,
+streaming bash block detector, `/budget` `/burn` `/compact` slash
+commands, burn-tested live against A3B at 50K context with 96.9%
+reduction and 100% semantic recall). 602 tests passing, all hermetic.
 
 ## Layout
 
@@ -39,6 +42,16 @@ src/successor/
     exec.py              # dispatch_bash — parse + classify + run + truncate
     render.py            # paint_tool_card pure paint function
     patterns/            # 12 pattern files (ls, cat, grep, find, git, ...)
+  agent/                 # Agent loop + compaction subsystem
+    log.py               # ApiRound + MessageLog + BoundaryMarker + AttachmentRegistry
+    events.py            # ChatEvent ADT (StreamStarted, Compacted, ToolCompleted, ...)
+    tokens.py            # TokenCounter — /tokenize endpoint + char heuristic + LRU
+    budget.py            # ContextBudget + CircuitBreaker + RecompactChain + BudgetTracker
+    microcompact.py      # time-based stale tool result clearing
+    compact.py           # autocompact via llama.cpp summarization + PTL retry
+    bash_stream.py       # BashStreamDetector — fenced ```bash detection across stream chunks
+    loop.py              # QueryLoop — tick-driven state machine, the agent loop
+scripts/                 # Manual swap scripts (qwopus ↔ A3B for compaction stress test)
   intros/                # Intro animations played before chat opens
     successor.py         # 11-frame braille emergence with held title portrait
   profiles/              # Profile dataclass + JSON loader + active resolver
@@ -53,7 +66,7 @@ src/successor/
     tools/read_file.py
     intros/successor/{00..10}-*.txt
 docs/                    # rendering-superpowers, concepts, plan, llamacpp, changelog
-tests/                   # 487 tests, hermetic via SUCCESSOR_CONFIG_DIR
+tests/                   # 602 tests, hermetic via SUCCESSOR_CONFIG_DIR
 ```
 
 ## Install
@@ -91,6 +104,9 @@ Inside `successor chat`:
 - `Ctrl+P` — cycle profile · `Ctrl+T` cycle theme · `Alt+D` toggle dark/light · `Ctrl+]` cycle density
 - `/bash <command>` — run a bash command and render it as a structured tool card
   (parse + risk classify + execute + paint, dangerous commands refused with explanation)
+- `/budget` — show current context fill % + token usage stats
+- `/burn N` — inject N synthetic tokens (stress-test the compaction pipeline)
+- `/compact` — manually fire compaction against the current chat history
 
 ## Why a custom renderer
 

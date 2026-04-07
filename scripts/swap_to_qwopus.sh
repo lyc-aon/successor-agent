@@ -19,6 +19,9 @@ QWOPUS_MODEL="/home/lycaon/models/Qwen3.5-27B-Opus-Distilled-v2-Q4_K_M.gguf"
 PORT=8080
 CONTEXT=262144
 LOG_FILE="/tmp/llama-server-qwopus.log"
+# llama-server needs its shared libs from the build dir
+LLAMA_LIB_DIR="/home/lycaon/dev/tools/llama.cpp/build/bin"
+export LD_LIBRARY_PATH="$LLAMA_LIB_DIR:${LD_LIBRARY_PATH:-}"
 
 if [[ ! -f "$QWOPUS_MODEL" ]]; then
   echo "ERROR: qwopus model not found at $QWOPUS_MODEL"

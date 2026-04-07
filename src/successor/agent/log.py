@@ -84,7 +84,33 @@ class LogMessage:
 
         Tool cards become assistant messages with the raw command and
         the captured output appended (because llama.cpp doesn't know
-        about our structured cards — it just sees text)."""
+        about our structured cards — it just sees text).
+
+        Boundary markers and summary messages are emitted as USER
+        messages with a clear `[compaction]` / `[summary]` prefix.
+        We can't use role=system for them because Qwen3.5's chat
+        template (and several other models') enforce "system message
+        must be at the beginning" and reject any non-leading system
+        messages with a Jinja exception. Wrapping the summary in a
+        labeled user message preserves the information without
+        violating the template's constraints — the model sees a
+        clearly-marked context block from the harness rather than
+        a real user turn.
+        """
+        if self.is_boundary:
+            return {
+                "role": "user",
+                "content": f"[earlier conversation compacted] {self.content}",
+            }
+        if self.is_summary:
+            return {
+                "role": "user",
+                "content": (
+                    "[summary of earlier conversation, provided by the harness "
+                    "after compaction — treat as authoritative context, not a "
+                    "user turn]\n\n" + self.content
+                ),
+            }
         if self.tool_card is not None:
             card = self.tool_card
             body_lines = [f"$ {card.raw_command}"]

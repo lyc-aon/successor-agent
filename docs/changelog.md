@@ -1246,6 +1246,310 @@ region with full theme integration.
 
 ---
 
+## Phase 5.1 — agent loop + compaction (2026-04-07)
+
+The agent loop, the compaction pipeline, the tick-driven state machine,
+and the burn-tested-against-A3B proof that semantic continuity survives
+a 96.9% context reduction. This phase translates the architectural
+sketch from the previous session into 1,800 lines of stdlib Python +
+115 unit tests + a live E2E burn rig that exercises every threshold,
+every error path, and every visual surface.
+
+### What landed (`src/successor/agent/`)
+
+- **`log.py`** — `LogMessage` (frozen dataclass with role + content +
+  optional `ToolCard` + boundary/summary flags), `ApiRound` (the
+  indivisible compaction unit — PTL truncation drops these whole so
+  the API never sees orphaned tool_results), `MessageLog` (ordered
+  rounds + `AttachmentRegistry` + `system_prompt`), `BoundaryMarker`
+  (compaction event metadata: pre/post tokens, rounds_summarized,
+  reduction_pct property). The shape is *compaction-ready from day
+  one* — every primitive the loop and compactor need is present
+  before either was written.
+
+- **`events.py`** — frozen `ChatEvent` ADT for every event the loop
+  yields: `StreamStarted`, `ReasoningChars`, `ContentChunk`,
+  `StreamCommitted`, `StreamFailed`, `BashBlockDetected`,
+  `ToolStarted`, `ToolCompleted`, `ToolRefused`, `CompactionStarted`,
+  `Compacted`, `CompactionFailed`, `TurnStarted`, `TurnCompleted`,
+  `BlockingLimitReached`, `MaxTurnsReached`, `LoopErrored`. The chat
+  consumes these via a callback to update its UI; tests assert
+  isinstance + count to verify the right events fire.
+
+- **`tokens.py`** — `TokenCounter` with two paths: (1) llama.cpp's
+  `POST /tokenize` endpoint for ground-truth counts, (2) char
+  heuristic (`HEURISTIC_CHARS_PER_TOKEN = 3.5`, deliberately
+  conservative so we slightly OVERESTIMATE and fire compaction a
+  touch early rather than late). LRU per-string cache (default
+  1024 entries) so the loop can call `count()` freely without
+  re-paying HTTP cost. Auto-disables the endpoint after 3 consecutive
+  HTTP failures and falls back to heuristic-only until `clear()`.
+  `count_message`, `count_round`, `count_log`, `refresh_round_estimates`
+  for the loop's needs. Verified against live `/tokenize`: `"hello
+  world"` → 2 tokens, function-definition → 10 tokens.
+
+- **`budget.py`** — three pieces of state:
+  - `ContextBudget` (frozen): window + warning_buffer +
+    autocompact_buffer + blocking_buffer with consistency check
+    in `__post_init__`. `state(used)` returns `"ok" | "warning" |
+    "autocompact" | "blocking"`. `should_autocompact`,
+    `over_blocking_limit`, `in_warning_zone`, `headroom`, `fill_pct`.
+  - `CircuitBreaker`: trips after `max_failures=3` consecutive
+    failures, `success()` resets, `reset()` is the manual override.
+  - `RecompactChain`: blocks two compactions firing within 30s
+    AND fewer than 3 turns apart. Only `record()` updates state on
+    successful compaction; failed ones don't (so retries aren't
+    blocked).
+  - `BudgetTracker`: bundles all three + per-session stats
+    (`compactions_total`, `peak_tokens`). `should_attempt_compaction`
+    returns `(decision, reason)` so the loop's refusal is diagnostic.
+
+- **`microcompact.py`** — pure stateless function that clears stale
+  tool result content. Two triggers: count-based (>N kept) and
+  time-based (>X minutes idle). Replaces `tool_card.output` with
+  `"[tool result cleared during compaction]"` placeholder; the card's
+  verb + params + raw_command stay so the chat history remains
+  navigable. Defensive: messages with `created_at=0.0` (no timestamp)
+  are NOT idle-cleared.
+
+- **`compact.py`** — the LLM-summarization layer. `compact(log,
+  client, *, counter, keep_recent_rounds=6, instructions, ...)`:
+  1. Refresh token estimates
+  2. Split rounds into [to_summarize, to_keep] at the keep boundary
+  3. Build a transcript prompt + summarization instructions
+  4. Stream the summary from the client, drain to a single string
+  5. Build the new MessageLog: `[boundary] + [summary] + [kept rounds]
+     + [attachment hint]`
+  6. Refresh post-compact token estimates, finalize the BoundaryMarker
+  - **PTL retry loop**: if the summarization call returns
+    "prompt is too long", drop the oldest 3 rounds-to-summarize and
+    retry, up to MAX_PTL_RETRIES (3). On exhaustion, raise
+    CompactionError.
+  - **CompactionClient Protocol**: structural type so the test
+    suite can substitute a mock client without touching LlamaCppClient.
+  - Default summarization instructions are tuned for Qwen 3.5
+    distill: explicit about preserving facts, paths, decisions,
+    code snippets; explicit about discarding reasoning chains and
+    filler.
+
+- **`bash_stream.py`** — `BashStreamDetector`, a state machine that
+  consumes streamed model content character-by-character and detects
+  fenced ```` ```bash ```` blocks even when fence markers split
+  across chunk boundaries. State enum: `TEXT → IN_FENCE_OPEN →
+  IN_BASH | IN_OTHER → TEXT`. Carries a `_carry` buffer between
+  `feed()` calls so a partial fence at the end of one chunk merges
+  with the next chunk. `flush()` resolves any in-progress state at
+  end-of-stream. Splits multi-line bash blocks into individual
+  commands (one per non-comment, non-blank line) with backslash
+  continuation. **Verified end-to-end with one-character-at-a-time
+  drip test**: every char of `"```bash\necho hi\n```"` arriving in
+  its own `feed()` call still produces `["echo hi"]`.
+
+- **`loop.py`** — `QueryLoop`, a tick-driven state machine. NOT an
+  async generator, because the chat is a frame-driven sync `App`.
+  The chat calls `tick()` once per frame; the loop advances one
+  step. Phases: `IDLE → COMPACTING → STREAMING → EXECUTING_TOOLS →
+  IDLE` (with `DONE` as the terminal state). Owns the message log,
+  budget tracker, token counter, current ChatStream, bash detector,
+  and pending bash queue. **Reactive compact path**: if the API
+  returns "prompt is too long" mid-stream, the loop catches it and
+  fires a forced compaction, then retries the stream — mirrors
+  free-code's `query.ts:1119-1165` reactive compact handler.
+  Synchronous tool dispatch in v0; concurrent execution comes later.
+  Events flow OUT through `on_event(ev)` callback — same information
+  flow as free-code's yield-driven loop, adapted to a sync consumer.
+
+### Chat integration (`src/successor/chat.py`)
+
+Adapter approach: instead of rewriting the chat to use `MessageLog`
+directly, two helpers convert between the chat's `_Message` list
+and the agent's `MessageLog` on demand. The streaming path stays
+unchanged. Three new slash commands wire the agent into the chat:
+
+- **`/budget`** — show context fill % + token counts + threshold
+  state. Calls `_to_agent_log()`, runs `TokenCounter.count_log`,
+  returns a synthetic message with stats. Reads the profile's
+  `provider.context_window` to size the budget appropriately.
+
+- **`/burn N`** — inject N synthetic tokens of varied content (code
+  blocks, lorem-ipsum padding, fake file paths) so compaction can
+  be tested without real model calls. The injected messages get
+  realistic timestamps spaced 0.5s apart so microcompact's idle
+  logic doesn't fire on them. Reports the new token count after
+  injection.
+
+- **`/compact`** — manually fire `compact()` against the chat's
+  current history. Builds the agent log, runs compaction against
+  the live client, writes the result back via `_from_agent_log`.
+  Reports the boundary stats as a synthetic message ("✓ compacted:
+  N → M tokens, X% reduction, K rounds summarized").
+
+The adapter handles boundary/summary messages by mapping them back
+to synthetic chat messages with `synthetic=True` so they aren't
+re-sent to the model. Tool cards survive the round-trip intact.
+
+### `compact-test` profile + swap scripts
+
+- `src/successor/builtin/profiles/compact-test.json` — A3B at
+  50,000 token context, forge theme (so the chrome visually
+  signals "stress-test mode"), `provider.context_window: 50000`
+  so `/budget` shows the right thresholds. System prompt explicitly
+  asks the model to recall facts on demand for compaction validation.
+
+- `scripts/swap_to_a3b.sh` — kills the running llama-server, brings
+  up A3B (`Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf`) with `-c 50000`,
+  exports `LD_LIBRARY_PATH` to the llama.cpp build dir
+  (required because the binary at `/usr/local/bin/llama-server`
+  has unresolved `libmtmd.so.0` / `libllama.so.0` references),
+  waits for `/health`, prints confirmation. Documents Nyx impact
+  in the script header so the user knows what's affected.
+
+- `scripts/swap_to_qwopus.sh` — inverse: kills A3B, brings qwopus
+  back at 262K context.
+
+### The two bugs the burn rig caught
+
+Visual + live testing caught two real bugs that unit tests with
+mocked clients would have missed:
+
+1. **`providers/llama.py` socket timeout was 5s on the WHOLE
+   request, not just connect.** `urlopen(req, timeout=connect_timeout)`
+   sets the socket timeout for *all* I/O on the connection — so
+   when A3B was processing a 38,000-token prompt and took 30+ seconds
+   to emit the first byte, the read timed out. Fixed by using
+   `max(timeout, connect_timeout)` for urlopen so the socket timeout
+   is at least as large as the streaming deadline. Latent bug —
+   would also have broken regular chat with very long prompts.
+
+2. **Boundary + summary messages were emitted with `role=system`
+   but Qwen3.5's chat template enforces "system message must be at
+   the beginning"** and raises a Jinja exception on any non-leading
+   system message. After compaction we had three system messages
+   in a row (original prompt + boundary + summary) which broke the
+   template. Fixed by emitting boundary/summary messages as `user`
+   role with explicit `[earlier conversation compacted]` and
+   `[summary of earlier conversation, provided by the harness…]`
+   prefixes so the model still understands they're context, not
+   real user turns.
+
+Both bugs were silent in unit tests (mocked client doesn't enforce
+chat templates, doesn't simulate prompt processing time). The burn
+rig caught them on the first live run. **This is exactly why the
+user's directive is "visual verification E2E"** — it surfaces
+integration bugs that unit tests can never see.
+
+### Burn rig results — A3B at 50K context
+
+```
+Pre:   40,052 tokens   165 rounds
+Post:   1,259 tokens     6 rounds
+Reduction: 96.9%  (saved 38,793 tokens)
+Wall time: 40.2s
+
+Semantic recall: 100% (4/4)
+  secret_word    "thunderstrike"  ✓
+  favorite_color "oxblood"        ✓
+  lucky_number   "47"             ✓
+  user_dog       "Boris"          ✓
+```
+
+The 4 key facts seeded into the FIRST round survived the
+compaction barrier and were recalled correctly when probed after
+164 rounds of unrelated burn content. The summary Qwen produced
+explicitly captured them: "I noted that the user requested I
+remember specific personal details for a later quiz: a secret word
+thunderstrike, favorite color oxblood, lucky number 47, and a
+husky named Boris…"
+
+Other passing checks:
+  - Token tracking accuracy vs `/tokenize`: exact match
+  - Threshold transitions: ok → warning → autocompact at the
+    correct token counts
+  - Recompact chain detection: blocks two compactions within 30s
+    + 3 turns, allows after cooldown
+  - Blocking limit predicate: fires at exactly `window - blocking_buffer`
+  - Microcompact: clears 11 of 15 stale tool results, keeping
+    the most recent 4 verbatim
+  - Visual chat render: `/burn → /budget → /compact` flows
+    through the existing chat painter without disturbing the
+    streaming path
+
+### Tests (115 new — 602 total, all passing)
+
+Six new test files using a deterministic mock client/stream pattern
+so the unit suite stays hermetic:
+
+- `test_agent_log.py` (~20 tests) — message log shapes, boundary
+  insertion, attachment tracking, API serialization (including
+  the boundary/summary user-role conversion)
+- `test_agent_tokens.py` (~13 tests) — heuristic + endpoint paths,
+  LRU eviction, failure handling, fall-back behavior
+- `test_agent_budget.py` (~17 tests) — threshold transitions,
+  circuit breaker lifecycle, recompact chain semantics
+- `test_agent_microcompact.py` (~10 tests) — count-based +
+  time-based clearing, idempotency, no-mutation guarantee,
+  defensive timestamp handling
+- `test_agent_compact.py` (~13 tests) — full compaction with mocked
+  stream, PTL retry success + exhaustion, error paths, attachment
+  re-injection, reason propagation
+- `test_bash_stream.py` (~22 tests) — every fragmentation pattern
+  from one-shot to one-char-at-a-time, all language aliases
+  (bash/sh/shell/zsh/fish/console/terminal), comments + blank
+  lines + backslash continuation, multi-block accumulation
+- `test_agent_loop.py` (~20 tests) — state machine transitions,
+  simple Q&A, bash detection + execution, dangerous refusal,
+  multi-block ordering, error paths, reactive compact, blocking
+  limit, max_turns, cancel, stats
+
+### Renderer features the agent loop exercises
+
+| concepts.md cat | feature | where |
+|---|---|---|
+| Cat 1 (mutable cells) | the same chat region paints either streaming reasoning chars, content tokens, tool cards, or compaction boundaries | `_paint_chat_row` switches on `_RenderedRow` fields |
+| Cat 2 (smooth animation) | compaction events fade old rounds into a summary divider via lerp_rgb (planned — wired in next session) | `Compacted` event reaches the chat |
+| Cat 3 (multi-region UI) | the title bar's context-fill pill, the chat scroll, the input area all paint in the same frame across the loop's tick | `SuccessorChat.on_tick` |
+| Cat 5 (deterministic) | every loop transition is a function of (state, events) — fully snapshot-testable via mock client | `test_agent_loop.py` |
+| Cat 7 (programmatic UI) | the loop yields events that the chat consumes; the UI is purely a projection of the loop's state | `on_event` callback |
+
+### Architecture sketch — what works, what's deferred
+
+**Works in v0:**
+- The complete query loop end-to-end against the live A3B model
+- Compaction fires automatically at the threshold
+- Bash blocks detected during streaming and dispatched after commit
+- All risk levels (safe / mutating / dangerous) handled
+- Reactive compact on PTL errors
+- Token tracking via /tokenize with heuristic fallback
+
+**Deferred for next session:**
+- Visible compaction animation in the chat (the events fire but
+  the smooth fade-in needs the renderer wiring)
+- Title-bar context-fill pill (the data is there via /budget,
+  needs the visual treatment)
+- Concurrent tool execution (v0 is sync — single tool at a time)
+- Streaming tool execution (tools start AFTER stream commits in v0)
+- Wiring `/profile compact-test` end-to-end so the burn rig can
+  run from inside the chat without running scripts manually
+
+### Notes
+
+- **The summarization quality on A3B is excellent.** The 4-fact
+  recall test passed 100% on the first try with the default
+  summarization instructions. No prompt tuning required.
+- **A3B is much faster than qwopus for this workload.** ~40s for
+  a 38K-token compaction summary on the 35B model with 3B active
+  params is roughly 4x faster than qwopus would be.
+- **The two-bug catch validates the visual-E2E discipline.** If we
+  had only run unit tests with mocked clients, both bugs (urllib
+  socket timeout, Qwen chat template constraint) would have shipped
+  silently and only surfaced on real prompts.
+- **The compact-test profile uses forge theme** so the user
+  visually knows when they're in stress-test mode (forge is the
+  warm/red palette vs steel's cool/blue). Theme-as-mode-indicator
+  is a small but ergonomic detail.
+
+---
+
 ## What's next
 
 - **Skill invocation strategy** — pick always-on vs on-demand after
@@ -1280,10 +1584,11 @@ region with full theme integration.
 | 4.7 (prompt editor v2: soft wrap + selection + clipboard) | 48 | 324 |
 | 4.9 (delete profile from config menu) | 17 | 356 |
 | 5.0 (bash-masking subsystem: parser + risk + exec + render + chat) | 131 | 487 |
+| 5.1 (agent loop + compaction + burn rig) | 115 | 602 |
 
 (Counts above are approximate by phase boundary; actual test
 collection may include additional small additions in subsequent
 commits.)
 
-Final: **487 tests, all passing, hermetic via `SUCCESSOR_CONFIG_DIR`,
+Final: **602 tests, all passing, hermetic via `SUCCESSOR_CONFIG_DIR`,
 no fake mocks, no `.skip()` or `.todo()`.**

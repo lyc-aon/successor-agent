@@ -30,6 +30,9 @@ A3B_MMPROJ="/home/lycaon/models/mmproj-Qwen3.5-35B-A3B-F16.gguf"  # not used her
 PORT=8080
 CONTEXT=50000
 LOG_FILE="/tmp/llama-server-a3b.log"
+# llama-server needs its shared libs from the build dir
+LLAMA_LIB_DIR="/home/lycaon/dev/tools/llama.cpp/build/bin"
+export LD_LIBRARY_PATH="$LLAMA_LIB_DIR:${LD_LIBRARY_PATH:-}"
 
 if [[ ! -f "$A3B_MODEL" ]]; then
   echo "ERROR: A3B model not found at $A3B_MODEL"
