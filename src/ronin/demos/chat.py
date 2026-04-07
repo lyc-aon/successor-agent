@@ -633,6 +633,20 @@ class RoninChat(App):
         self._help_open: bool = False
         self._help_opened_at: float = 0.0
 
+        # ─── Search state ───
+        # When _search_active is True, the input area is replaced with
+        # a search bar. As the user types a query, every match in the
+        # past messages gets highlighted with a different bg color.
+        # n / N (or Ctrl+N / Ctrl+P) jump between matches with smooth
+        # animated scroll. Esc closes the search.
+        self._search_active: bool = False
+        self._search_query: str = ""
+        # Cached matches: list of (message_idx, char_start, char_end)
+        # tuples, ordered top-to-bottom in the conversation.
+        self._search_matches: list[tuple[int, int, int]] = []
+        # Index into _search_matches that's currently focused.
+        self._search_focused: int = 0
+
         # If we just finished restoring mouse from config, push the
         # escape sequence to the terminal so reporting matches the flag.
         # (We do this AFTER super().__init__ so self.term exists.)
@@ -765,6 +779,36 @@ class RoninChat(App):
             self._help_open = False
             return
 
+        # ─── Search mode (when active, intercepts most keys) ───
+        if self._search_active:
+            if event.key == Key.ESC:
+                self._search_close()
+                return
+            if event.key == Key.ENTER:
+                # Enter advances to the next match
+                self._search_jump(+1)
+                return
+            if event.key == Key.UP or (event.is_ctrl and event.char == "p"):
+                self._search_jump(-1)
+                return
+            if event.key == Key.DOWN or (event.is_ctrl and event.char == "n"):
+                self._search_jump(+1)
+                return
+            if event.key == Key.BACKSPACE:
+                if self._search_query:
+                    self._search_query = self._search_query[:-1]
+                    self._search_recompute()
+                return
+            if event.is_char and event.char and not event.is_ctrl:
+                # Add to search query (printable + UTF-8)
+                safe = "".join(c for c in event.char if ord(c) >= 0x20)
+                if safe:
+                    self._search_query += safe
+                    self._search_recompute()
+                return
+            # Unknown key in search mode — swallow.
+            return
+
         # ─── Bracketed paste boundaries ───
         if event.key == Key.PASTE_START:
             self._in_paste = True
@@ -781,6 +825,11 @@ class RoninChat(App):
                 self._help_open = True
                 self._help_opened_at = time.monotonic()
                 return
+
+        # ─── Search open (Ctrl+F) ───
+        if event.is_ctrl and event.char == "f":
+            self._search_open()
+            return
 
         # ─── Theme cycle (always available, even mid-stream) ───
         if event.is_ctrl and event.char == "t":
@@ -1017,6 +1066,105 @@ class RoninChat(App):
             return self.density
         t = ease_out_cubic(elapsed / DENSITY_TRANSITION_S)
         return blend_densities(self._density_from, self.density, t)
+
+    # ─── Search ───
+
+    def _search_open(self) -> None:
+        """Enter search mode. The input area is replaced with a search bar."""
+        self._search_active = True
+        self._search_query = ""
+        self._search_matches = []
+        self._search_focused = 0
+
+    def _search_close(self) -> None:
+        """Exit search mode. The input area returns to its normal state."""
+        self._search_active = False
+        self._search_query = ""
+        self._search_matches = []
+        self._search_focused = 0
+
+    def _search_recompute(self) -> None:
+        """Re-scan all messages for the current query.
+
+        Builds a flat list of (message_idx, char_start, char_end)
+        match tuples in conversation order. Empty queries clear the
+        match list. Reset the focused index to 0.
+        """
+        self._search_matches = []
+        self._search_focused = 0
+        if not self._search_query:
+            return
+        q = self._search_query.lower()
+        if not q:
+            return
+        for msg_idx, msg in enumerate(self.messages):
+            text = msg.raw_text.lower()
+            start = 0
+            while True:
+                found = text.find(q, start)
+                if found < 0:
+                    break
+                self._search_matches.append((msg_idx, found, found + len(q)))
+                start = found + 1
+        # Auto-jump to the LAST match (most recent context)
+        if self._search_matches:
+            self._search_focused = len(self._search_matches) - 1
+            self._search_scroll_to_focused()
+
+    def _search_jump(self, delta: int) -> None:
+        """Move the focused match by delta and scroll to it."""
+        if not self._search_matches:
+            return
+        n = len(self._search_matches)
+        self._search_focused = (self._search_focused + delta) % n
+        self._search_scroll_to_focused()
+
+    def _search_scroll_to_focused(self) -> None:
+        """Scroll the chat so the focused match is visible.
+
+        Computes the line offset of the message containing the focused
+        match and adjusts scroll_offset so that line lands somewhere
+        in the visible chat area. Best-effort — uses the cached
+        message heights from the last frame.
+        """
+        if not self._search_matches:
+            return
+        focused_msg_idx, _, _ = self._search_matches[self._search_focused]
+        # Sum the lines from the focused message to the end of the
+        # conversation. That gives us the offset-from-bottom needed to
+        # land on the focused message's first line.
+        body_width = max(1, self._last_chat_w)
+        lines_from_focused_to_end = 0
+        spacing = self._current_density().message_spacing
+        for i in range(focused_msg_idx, len(self.messages)):
+            msg = self.messages[i]
+            md_height = msg.body.height(max(1, body_width - _PREFIX_W))
+            if md_height == 0:
+                md_height = 1  # empty body still has the prefix line
+            lines_from_focused_to_end += md_height
+            if i < len(self.messages) - 1:
+                lines_from_focused_to_end += spacing
+        # Position the focused message a few lines below the top of
+        # the visible area for context.
+        chat_h = max(1, self._last_chat_h)
+        target_offset = max(0, lines_from_focused_to_end - chat_h + 4)
+        max_off = self._max_scroll()
+        target_offset = min(target_offset, max_off)
+        self.scroll_offset = target_offset
+        self._auto_scroll = (target_offset == 0)
+
+    def _is_search_match(self, msg_idx: int, char_idx: int) -> int:
+        """Return 0 if not a match, 1 if non-focused match, 2 if focused.
+
+        Used by the message painter to apply highlight backgrounds to
+        the cells that overlap a search match.
+        """
+        if not self._search_matches:
+            return 0
+        for i, (mi, start, end) in enumerate(self._search_matches):
+            if mi == msg_idx and start <= char_idx < end:
+                return 2 if i == self._search_focused else 1
+        return 0
 
     # ─── Mouse mode toggle ───
 
@@ -1675,8 +1823,13 @@ class RoninChat(App):
             "header"       — accent fg + bold
             "list_marker"  — accent_warm fg
             "code_lang"    — fg_dim on bg_footer
+            "search_hit"   — accent_warm bg, bg fg (highlight)
         """
         attrs = span.attrs
+        if span.tag == "search_hit":
+            return Style(
+                fg=theme.bg, bg=theme.accent_warm, attrs=attrs | ATTR_BOLD
+            )
         if span.tag == "code":
             return Style(fg=theme.fg, bg=theme.bg_input, attrs=attrs)
         if span.tag == "link":
@@ -1702,6 +1855,10 @@ class RoninChat(App):
         without consulting the message list again. Spans inside rows
         carry semantic tags (code, link, header, etc.) which the
         painter resolves to theme colors at paint time.
+
+        When search is active, spans are split at match boundaries and
+        the matching cells get a highlight background applied via a
+        special tag the painter recognizes.
         """
         out: list[_RenderedRow] = []
         now = time.monotonic()
@@ -1728,6 +1885,21 @@ class RoninChat(App):
 
             prefix = _USER_PREFIX if msg.role == "user" else _RONIN_PREFIX
             md_lines = msg.body.lines(md_width)
+
+            # Search highlighting: collect the spans of this message's
+            # raw_text that match the current query. We pass them to
+            # the row builder so the painter can render highlight cells.
+            msg_matches: list[tuple[int, int, int]] = []
+            if self._search_active and self._search_matches:
+                for mi_focused, start, end in self._search_matches:
+                    if mi_focused == i:
+                        is_focused = (
+                            self._search_matches.index(
+                                (mi_focused, start, end)
+                            ) == self._search_focused
+                        )
+                        msg_matches.append((start, end, 2 if is_focused else 1))
+
             if not md_lines:
                 # Empty body — still emit a single row showing the prefix.
                 out.append(
@@ -1739,28 +1911,134 @@ class RoninChat(App):
                     )
                 )
             else:
-                for line_idx, md_line in enumerate(md_lines):
-                    if line_idx == 0:
-                        leading = prefix
-                    else:
-                        leading = " " * _PREFIX_W
-                    out.append(
-                        _RenderedRow(
-                            leading_text=leading,
-                            leading_attrs=ATTR_BOLD if line_idx == 0 else 0,
-                            leading_color_kind="accent",
-                            body_spans=tuple(md_line.spans),
-                            base_color=base_color,
-                            line_tag=md_line.line_tag,
-                            body_indent=md_line.indent,
-                        )
-                    )
+                # Build the message rows. If search is active, apply
+                # highlight tags to spans whose chars fall in match ranges.
+                rendered_rows = self._render_md_lines_with_search(
+                    md_lines, msg.raw_text, msg_matches, prefix, base_color,
+                )
+                out.extend(rendered_rows)
 
             # Density-driven spacer rows between messages.
             if i < n - 1:
                 for _ in range(spacing):
                     out.append(_RenderedRow(base_color=base_color))
         return out
+
+    def _render_md_lines_with_search(
+        self,
+        md_lines: list[LaidOutLine],
+        msg_raw_text: str,
+        matches: list[tuple[int, int, int]],
+        prefix: str,
+        base_color: int,
+    ) -> list[_RenderedRow]:
+        """Convert markdown lines to _RenderedRows, optionally applying
+        search-match highlights to spans whose text overlaps a match.
+
+        For v0 we use a simple approach: walk through each rendered
+        line's spans, and for each span, check if any chars in its text
+        overlap a match position in the original raw_text. We can't
+        precisely map rendered text back to source positions because
+        markdown reflows; instead we substring-match each span's text
+        against the search query directly. This produces correct
+        highlights for plain text and most paragraphs; code blocks and
+        complex inline syntax may miss highlights at boundary chars.
+        """
+        out: list[_RenderedRow] = []
+        # Simpler heuristic: substring-match each span's text against
+        # the (lowercased) search query. The search_active check is
+        # done by the caller.
+        query = self._search_query.lower() if self._search_active else ""
+        focused_msg_idx, focused_start, focused_end = (
+            self._search_matches[self._search_focused]
+            if self._search_active and self._search_matches
+            else (-1, 0, 0)
+        )
+
+        for line_idx, md_line in enumerate(md_lines):
+            if line_idx == 0:
+                leading = prefix
+                leading_attrs = ATTR_BOLD
+            else:
+                leading = " " * _PREFIX_W
+                leading_attrs = 0
+
+            new_spans: tuple[LaidOutSpan, ...]
+            if query and matches:
+                new_spans = tuple(
+                    self._highlight_spans(md_line.spans, query)
+                )
+            else:
+                new_spans = tuple(md_line.spans)
+
+            out.append(
+                _RenderedRow(
+                    leading_text=leading,
+                    leading_attrs=leading_attrs,
+                    leading_color_kind="accent",
+                    body_spans=new_spans,
+                    base_color=base_color,
+                    line_tag=md_line.line_tag,
+                    body_indent=md_line.indent,
+                )
+            )
+        return out
+
+    def _highlight_spans(
+        self,
+        spans: list[LaidOutSpan],
+        query: str,
+    ) -> list[LaidOutSpan]:
+        """Walk a list of spans and split them at query matches.
+
+        Each match becomes its own span with the special "search_hit"
+        tag, which the painter renders with a highlighted background.
+        Other span attrs (bold, italic, code, etc.) are preserved on
+        both the matched and unmatched portions.
+        """
+        result: list[LaidOutSpan] = []
+        for span in spans:
+            if not query or span.tag == "code_lang":
+                result.append(span)
+                continue
+            text = span.text
+            text_lower = text.lower()
+            i = 0
+            n = len(text)
+            qlen = len(query)
+            while i < n:
+                idx = text_lower.find(query, i)
+                if idx < 0:
+                    # No more matches in this span
+                    result.append(
+                        LaidOutSpan(
+                            text=text[i:],
+                            attrs=span.attrs,
+                            tag=span.tag,
+                            link=span.link,
+                        )
+                    )
+                    break
+                if idx > i:
+                    result.append(
+                        LaidOutSpan(
+                            text=text[i:idx],
+                            attrs=span.attrs,
+                            tag=span.tag,
+                            link=span.link,
+                        )
+                    )
+                # The matched substring becomes a search_hit span
+                result.append(
+                    LaidOutSpan(
+                        text=text[idx:idx + qlen],
+                        attrs=span.attrs,
+                        tag="search_hit",
+                        link=span.link,
+                    )
+                )
+                i = idx + qlen
+        return result
 
     def _build_streaming_lines(
         self,
@@ -2314,6 +2592,11 @@ class RoninChat(App):
         width: int,
         theme: Theme,
     ) -> None:
+        # Search mode replaces the input with a search bar.
+        if self._search_active:
+            self._paint_search_bar(grid, y, width, theme)
+            return
+
         fill_region(grid, 0, y, width, height, style=Style(bg=theme.bg_input))
 
         wrapped = self._input_lines_at_width(width)
@@ -2375,6 +2658,81 @@ class RoninChat(App):
                 y,
                 style=Style(fg=theme.fg_dim, bg=theme.bg_input, attrs=ATTR_DIM),
             )
+
+    def _paint_search_bar(
+        self,
+        grid: Grid,
+        y: int,
+        width: int,
+        theme: Theme,
+    ) -> None:
+        """Render the search bar in place of the input area.
+
+        Layout:
+            🔎 query                              N/M  ↑↓ next  Esc close
+        """
+        fill_region(grid, 0, y, width, 1, style=Style(bg=theme.bg_input))
+
+        # Left side: search prompt + query
+        prompt = "🔎 "
+        # If 🔎 is wide on this terminal, fall back to a plain text marker.
+        # We'll just use plain text to avoid width issues:
+        prompt = "search ▸ "
+        prompt_style = Style(
+            fg=theme.accent_warm,
+            bg=theme.bg_input,
+            attrs=ATTR_BOLD,
+        )
+        paint_text(grid, prompt, 0, y, style=prompt_style)
+
+        query_text = self._search_query
+        query_style = Style(fg=theme.fg, bg=theme.bg_input)
+        paint_text(grid, query_text, len(prompt), y, style=query_style)
+
+        # Cursor at the end of the query
+        cursor_x = min(width - 1, len(prompt) + len(query_text))
+        cursor_visible = (int(time.monotonic() * CURSOR_BLINK_HZ * 2) % 2) == 0
+        if cursor_visible:
+            grid.set(
+                y, cursor_x,
+                Cell(" ", Style(fg=theme.bg_input, bg=theme.fg)),
+            )
+
+        # Right side: match counter + key hints
+        if self._search_matches:
+            counter = (
+                f" {self._search_focused + 1}/{len(self._search_matches)} "
+            )
+            counter_style = Style(
+                fg=theme.bg,
+                bg=theme.accent_warm,
+                attrs=ATTR_BOLD,
+            )
+        else:
+            if self._search_query:
+                counter = " no matches "
+            else:
+                counter = " type to search "
+            counter_style = Style(
+                fg=theme.fg_dim,
+                bg=theme.bg_input,
+                attrs=ATTR_DIM,
+            )
+
+        hint = "  ↑↓ jump  Esc close"
+        hint_style = Style(fg=theme.fg_subtle, bg=theme.bg_input, attrs=ATTR_DIM)
+
+        right_text = counter + hint
+        right_x = max(len(prompt) + len(query_text) + 2, width - len(right_text))
+
+        # Counter pill (with its bg)
+        counter_x = right_x
+        if 0 <= counter_x < width:
+            paint_text(grid, counter, counter_x, y, style=counter_style)
+        # Hint after the counter
+        hint_x = counter_x + len(counter)
+        if 0 <= hint_x < width:
+            paint_text(grid, hint, hint_x, y, style=hint_style)
 
     def _compute_ghost_text(self) -> str:
         """Inline ghost-text hint shown after the input cursor.
