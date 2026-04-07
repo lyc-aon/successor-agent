@@ -159,17 +159,22 @@ class BashStreamDetector:
             if self._at_line_start and self._could_be_fence(text, i):
                 consumed = self._try_consume_fence_close(text, i)
                 if consumed > 0:
-                    # Block closed
+                    # Block closed — yield the ENTIRE block content as
+                    # a single bash command. We deliberately do NOT
+                    # split on newlines: bash itself parses multi-line
+                    # scripts perfectly, including heredocs, quoted
+                    # multi-line strings, if/then/fi blocks, function
+                    # defs, and case statements. A naive line-splitter
+                    # cannot understand any of those — it would turn
+                    # `cat > f.html <<EOF\n<html>...\nEOF` into seven
+                    # separate commands, each failing with
+                    # "command not found". One fenced block = one
+                    # command passed straight to dispatch_bash.
                     if self._state == _State.IN_BASH:
                         block_text = self._block_buffer.strip()
-                        # A multiline bash block may contain several
-                        # commands separated by newlines. We split and
-                        # add each non-empty line as its own command,
-                        # because the model usually means each line as
-                        # a separate action.
-                        for line in self._split_block_into_commands(block_text):
-                            new_completed.append(line)
-                            self._completed.append(line)
+                        if block_text:
+                            new_completed.append(block_text)
+                            self._completed.append(block_text)
                     self._state = _State.TEXT
                     self._block_buffer = ""
                     i += consumed
@@ -213,9 +218,9 @@ class BashStreamDetector:
             if stripped == "```" or stripped.endswith("\n```"):
                 if self._state == _State.IN_BASH:
                     block_text = (self._block_buffer + carry.split("```")[0]).strip()
-                    for line in self._split_block_into_commands(block_text):
-                        new_completed.append(line)
-                        self._completed.append(line)
+                    if block_text:
+                        new_completed.append(block_text)
+                        self._completed.append(block_text)
                 self._state = _State.TEXT
                 self._block_buffer = ""
             else:
@@ -322,48 +327,19 @@ class BashStreamDetector:
         # state for, OR ``` followed by inline content. Reject.
         return 0
 
-    @staticmethod
-    def _split_block_into_commands(block: str) -> list[str]:
-        """Split a multi-line bash block into individual commands.
-
-        Heuristic: each non-empty, non-comment line that doesn't start
-        with whitespace continuation (`>`, `\\`, etc.) becomes its own
-        command. Lines starting with whitespace are appended to the
-        previous command (continuation).
-
-        For v0 we keep it simple: one command per non-empty non-comment
-        non-continuation line. The bash parser/executor handles
-        multi-arg commands fine.
-        """
-        if not block.strip():
-            return []
-        commands: list[str] = []
-        current: list[str] = []
-        for line in block.split("\n"):
-            stripped = line.strip()
-            if not stripped:
-                # Blank line ends the current command
-                if current:
-                    commands.append(" ".join(current))
-                    current = []
-                continue
-            if stripped.startswith("#"):
-                # Comment — flush current command but don't add the comment
-                if current:
-                    commands.append(" ".join(current))
-                    current = []
-                continue
-            # Continuation line (starts with whitespace OR previous line
-            # ended with backslash)
-            if line[0] in (" ", "\t") or (current and current[-1].endswith("\\")):
-                if current and current[-1].endswith("\\"):
-                    current[-1] = current[-1][:-1].rstrip()
-                current.append(stripped)
-                continue
-            # New command — flush previous, start fresh
-            if current:
-                commands.append(" ".join(current))
-            current = [stripped]
-        if current:
-            commands.append(" ".join(current))
-        return [c for c in commands if c]
+    # The old _split_block_into_commands was removed after a bug
+    # report: a heredoc HTML write
+    #     ```bash
+    #     cat > foo.html <<'EOF'
+    #     <!DOCTYPE html>
+    #     <html>...</html>
+    #     EOF
+    #     ```
+    # got split into seven separate "commands" (one per line), each
+    # dispatched independently, each failing with "command not found"
+    # on the HTML tag lines. Root cause: a line-level splitter cannot
+    # understand heredocs, quoted multi-line strings, if/then/fi,
+    # functions, or case statements. bash itself handles all of those
+    # natively via subprocess.run(shell=True, executable="/bin/bash"),
+    # so we now yield the entire fenced block as a single command and
+    # let bash parse it.

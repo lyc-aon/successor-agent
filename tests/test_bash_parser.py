@@ -157,6 +157,44 @@ def test_cat_no_args_is_read_stdin() -> None:
     assert card.verb == "read-stdin"
 
 
+def test_cat_with_redirect_is_write_file() -> None:
+    """`cat > file` is a heredoc write pattern — render as write-file."""
+    card = parse_bash("cat > /tmp/foo.txt")
+    assert card.verb == "write-file"
+    assert dict(card.params)["path"] == "/tmp/foo.txt"
+    assert card.risk == "mutating"
+
+
+def test_cat_with_append_redirect_is_write_file() -> None:
+    card = parse_bash("cat >> /tmp/foo.txt")
+    assert card.verb == "write-file"
+    assert dict(card.params)["path"] == "/tmp/foo.txt"
+    assert card.risk == "mutating"
+
+
+def test_cat_heredoc_full_command_is_write_file() -> None:
+    """The common model pattern for writing a file — cat heredoc with
+    target path and multi-line content."""
+    raw = (
+        "cat > /tmp/successor.html <<'EOF'\n"
+        "<!DOCTYPE html>\n"
+        "<html><body><h1>Hi</h1></body></html>\n"
+        "EOF"
+    )
+    card = parse_bash(raw)
+    assert card.verb == "write-file"
+    assert dict(card.params)["path"] == "/tmp/successor.html"
+    assert card.risk == "mutating"
+
+
+def test_cat_with_glued_redirect_is_write_file() -> None:
+    """`cat >foo.txt` (no space) also works."""
+    # shlex treats this as two tokens `cat` and `>foo.txt`
+    card = parse_bash("cat >/tmp/glued.txt")
+    assert card.verb == "write-file"
+    assert dict(card.params)["path"] == "/tmp/glued.txt"
+
+
 def test_head_with_n_flag() -> None:
     card = parse_bash("head -n 50 file.txt")
     p = dict(card.params)

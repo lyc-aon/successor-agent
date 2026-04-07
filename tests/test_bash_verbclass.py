@@ -134,6 +134,8 @@ def test_danger_glyph_is_warning_symbol() -> None:
     ("touch foo.txt", VerbClass.MUTATE),
     ("cp a.txt b.txt", VerbClass.MUTATE),
     ("mv a.txt b.txt", VerbClass.MUTATE),
+    ("cat > /tmp/foo.html", VerbClass.MUTATE),  # heredoc write
+    ("cat >> /tmp/log.txt", VerbClass.MUTATE),  # append
     ("git add foo.txt", VerbClass.MUTATE),
     ("git commit -m hi", VerbClass.MUTATE),
     ("python -c 'print(1)'", VerbClass.EXEC),

@@ -91,6 +91,8 @@ _VERB_TO_CLASS: dict[str, VerbClass] = {
     "delete-file": VerbClass.MUTATE,
     "copy-files": VerbClass.MUTATE,
     "move-files": VerbClass.MUTATE,
+    # cat with redirect — file writes (heredoc and one-liners alike)
+    "write-file": VerbClass.MUTATE,
     # python
     "run-python-inline": VerbClass.EXEC,
     "run-python-module": VerbClass.EXEC,

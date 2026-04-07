@@ -300,7 +300,13 @@ def test_stream_without_detector_ignores_bash_fences() -> None:
 def test_dangerous_command_in_stream_shows_refusal() -> None:
     """A dangerous command streamed by the model is caught at dispatch
     time — the refused card is shown plus a synthetic note."""
+    from successor.profiles import Profile
     chat = SuccessorChat()
+    # Pin a hermetic profile — otherwise we inherit whatever the
+    # user's real ~/.config/successor/profiles/default.json has,
+    # which may have allow_dangerous flipped on from their last
+    # actual chat session.
+    chat.profile = Profile(name="hermetic-test")
     chat.messages = []
     chat._stream_bash_detector = BashStreamDetector()
     chat._stream = _FakeStream([
@@ -347,6 +353,92 @@ def test_yolo_profile_lets_dangerous_command_through_stream() -> None:
     # No 'refused' synthetic message this time
     synthetic = [m for m in chat.messages if m.synthetic and "refused" in m.raw_text.lower()]
     assert synthetic == []
+
+
+def test_heredoc_file_write_produces_one_card_and_writes_file(tmp_path) -> None:
+    """REGRESSION (phase 5.8.1): a heredoc HTML file write used to
+    explode into one tool card per heredoc line, each failing with
+    'command not found' on the HTML tag lines. After the fix, the
+    whole heredoc is dispatched as one bash command, creating exactly
+    one tool card AND writing the real file to disk.
+    """
+    from successor.profiles import Profile
+    target = tmp_path / "successor.html"
+
+    chat = SuccessorChat()
+    # Yolo mode so the `>` redirect (mutating) isn't refused
+    chat.profile = Profile(
+        name="yolo",
+        tool_config={"bash": {"allow_dangerous": True, "allow_mutating": True}},
+    )
+    chat.messages = []
+    chat._stream_bash_detector = BashStreamDetector()
+
+    # This is what the model typically emits when asked to write
+    # an HTML file
+    model_reply = (
+        "I'll create that HTML file for you.\n\n"
+        "```bash\n"
+        f"cat > {target} <<'EOF'\n"
+        "<!DOCTYPE html>\n"
+        "<html>\n"
+        "<head><title>Successor</title></head>\n"
+        "<body><h1>Hello from Successor</h1></body>\n"
+        "</html>\n"
+        "EOF\n"
+        "```\n\n"
+        "Done!\n"
+    )
+    chat._stream = _FakeStream([
+        _content(model_reply),
+        _stream_end(),
+    ])
+    chat._pump_stream()
+
+    # EXACTLY one tool card should land — not one per heredoc line
+    tool_msgs = [m for m in chat.messages if m.tool_card is not None]
+    assert len(tool_msgs) == 1, (
+        f"expected 1 tool card, got {len(tool_msgs)}: "
+        f"{[m.tool_card.raw_command[:40] for m in tool_msgs]}"
+    )
+
+    # The card's raw command should be the WHOLE heredoc, preserving
+    # the multi-line structure
+    raw = tool_msgs[0].tool_card.raw_command
+    assert "<!DOCTYPE html>" in raw
+    assert raw.endswith("EOF")
+
+    # And the file should actually exist with the right content
+    assert target.exists()
+    content = target.read_text()
+    assert "<!DOCTYPE html>" in content
+    assert "Hello from Successor" in content
+    assert "</html>" in content
+
+
+def test_multi_line_script_dispatches_as_one_block(tmp_path) -> None:
+    """A block with several sequential commands (cd; ls; pwd) lands
+    as ONE tool card containing the whole script, run via bash."""
+    from successor.profiles import Profile
+    chat = SuccessorChat()
+    chat.profile = Profile(
+        name="multi",
+        tool_config={"bash": {"allow_dangerous": True}},
+    )
+    chat.messages = []
+    chat._stream_bash_detector = BashStreamDetector()
+    chat._stream = _FakeStream([
+        _content("```bash\necho one\necho two\necho three\n```\n"),
+        _stream_end(),
+    ])
+    chat._pump_stream()
+    tool_msgs = [m for m in chat.messages if m.tool_card is not None]
+    assert len(tool_msgs) == 1
+    # All three echoes in the output
+    output = tool_msgs[0].tool_card.output
+    assert "one" in output
+    assert "two" in output
+    assert "three" in output
 
 
 def test_read_only_profile_blocks_mutating_command_in_stream() -> None:

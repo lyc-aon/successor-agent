@@ -35,10 +35,28 @@ def temp_config_dir(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
       - any user theme/profile/skill files are read from the temp dir
       - any saved chat config writes to the temp dir
 
+    ALSO resets the module-level registries so a prior test (or pytest
+    collection-time import) that loaded them against the real user
+    config dir doesn't leak its cached entries into this test. Without
+    this reset, a user profile with customized `tool_config` would
+    bleed through and break assumptions in tests that expect pristine
+    built-in profiles.
+
     Yields the temp dir as a Path. Cleanup happens automatically when
     the test finishes (tempfile.TemporaryDirectory handles it).
     """
     with tempfile.TemporaryDirectory(prefix="successor-test-") as tmp:
         path = Path(tmp)
         monkeypatch.setenv("SUCCESSOR_CONFIG_DIR", str(path))
+        # Reload registries so they rescan against the temp dir. The
+        # import is lazy so this fixture stays light for tests that
+        # don't touch the registries.
+        try:
+            from successor.profiles import PROFILE_REGISTRY
+            from successor.render.theme import THEME_REGISTRY
+            PROFILE_REGISTRY.reload()
+            THEME_REGISTRY.reload()
+        except ImportError:
+            # Successor package not yet importable (e.g. bootstrap tests)
+            pass
         yield path

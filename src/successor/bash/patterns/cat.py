@@ -8,13 +8,33 @@ from ..parser import bash_parser, clip_at_operators
 
 @bash_parser("cat")
 def parse_cat(args: list[str], *, raw_command: str) -> ToolCard:
-    args = clip_at_operators(args)
-    """Parse `cat [-n] file1 [file2 ...]` into a read-file card.
+    """Parse `cat` commands into a read-file / concatenate-files /
+    write-file card depending on whether there's a redirect.
 
-    Multiple files become "concatenate-files" with a comma-joined path
-    list, since the model usually means "show me these files" when
-    concatenating. The -n (line numbers) flag is preserved as a hint.
+    Multi-line heredoc writes (common model pattern for file creation)
+    look like `cat > target <<'EOF' ... EOF` — detect the redirect
+    target BEFORE clipping at operators and surface it as a proper
+    write-file action with the target path as the primary param.
     """
+    # Detect a redirect write: `cat > path` or `cat >> path`. We need
+    # to inspect the raw args BEFORE clipping at operators because
+    # clip_at_operators drops everything after `>`. shlex has already
+    # tokenized the command so `>` is its own token OR the start of
+    # a glued token like `>path`.
+    write_target = _find_redirect_target(args)
+
+    if write_target is not None:
+        return ToolCard(
+            verb="write-file",
+            params=(("path", write_target),),
+            risk="mutating",  # redirects mutate disk
+            raw_command=raw_command,
+            confidence=0.9,
+            parser_name="cat",
+        )
+
+    # No redirect — normal cat read behavior
+    args = clip_at_operators(args)
     paths: list[str] = []
     numbered = False
     for arg in args:
@@ -53,3 +73,22 @@ def parse_cat(args: list[str], *, raw_command: str) -> ToolCard:
         confidence=0.95,
         parser_name="cat",
     )
+
+
+def _find_redirect_target(args: list[str]) -> str | None:
+    """Scan args for `>` or `>>` followed by a target path.
+
+    Handles both separated (`cat > file.html`) and glued
+    (`cat >file.html`) forms. Returns the target path or None.
+    """
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in (">", ">>") and i + 1 < len(args):
+            return args[i + 1]
+        if arg.startswith(">>") and len(arg) > 2:
+            return arg[2:]
+        if arg.startswith(">") and len(arg) > 1 and not arg.startswith(">>"):
+            return arg[1:]
+        i += 1
+    return None

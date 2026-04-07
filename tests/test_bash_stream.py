@@ -148,36 +148,115 @@ def test_shell_alias_recognized() -> None:
     assert out == ["ls"]
 
 
-# ─── Multi-command blocks ───
+# ─── Multi-line blocks — yielded as ONE command ───
+#
+# The detector used to split on newlines and yield N commands from
+# a block containing N lines. That heuristic broke heredocs, quoted
+# multi-line strings, functions, and every other bash construct
+# that spans lines. The fix: yield the whole block as one command
+# and let bash parse it via subprocess(shell=True).
 
 
-def test_multi_command_block() -> None:
+def test_multi_command_block_yields_one_command() -> None:
+    """A block with several commands is passed to bash as a single
+    script. bash runs them in sequence; the tool card shows the
+    raw multi-line script on its bottom border and the combined
+    output above."""
     d = BashStreamDetector()
     out = d.feed("```bash\ncd /tmp\nls -la\npwd\n```")
     out += d.flush()
-    assert out == ["cd /tmp", "ls -la", "pwd"]
+    assert out == ["cd /tmp\nls -la\npwd"]
 
 
-def test_block_with_comments() -> None:
-    """Comments are stripped, real commands are kept."""
+def test_block_with_comments_yields_one_command() -> None:
+    """Comments are preserved — bash ignores them natively."""
     d = BashStreamDetector()
     out = d.feed("```bash\n# this is a comment\nls\n# another\necho hi\n```")
     out += d.flush()
-    assert out == ["ls", "echo hi"]
+    assert out == ["# this is a comment\nls\n# another\necho hi"]
 
 
-def test_block_with_blank_lines() -> None:
+def test_block_with_blank_lines_yields_one_command() -> None:
+    """Blank lines don't split; they're just part of the script."""
     d = BashStreamDetector()
     out = d.feed("```bash\nls\n\necho hi\n\n```")
     out += d.flush()
-    assert out == ["ls", "echo hi"]
+    # Trailing blank lines are stripped by .strip() but internal
+    # blank lines stay intact
+    assert out == ["ls\n\necho hi"]
 
 
-def test_backslash_continuation() -> None:
+def test_backslash_continuation_yields_one_command() -> None:
+    """Backslash continuations are preserved — bash joins them."""
     d = BashStreamDetector()
     out = d.feed("```bash\nfind /tmp \\\n  -name foo\n```")
     out += d.flush()
-    assert out == ["find /tmp -name foo"]
+    assert out == ["find /tmp \\\n  -name foo"]
+
+
+def test_heredoc_block_yields_one_command() -> None:
+    """REGRESSION: a heredoc writing HTML to a file used to explode
+    into one command per heredoc line, each failing with
+    'command not found' on the HTML tag lines. After the fix, the
+    whole heredoc is one command passed straight to bash."""
+    d = BashStreamDetector()
+    sample = (
+        "```bash\n"
+        "cat > /tmp/foo.html <<'EOF'\n"
+        "<!DOCTYPE html>\n"
+        "<html>\n"
+        "<head><title>X</title></head>\n"
+        "<body><h1>Hi</h1></body>\n"
+        "</html>\n"
+        "EOF\n"
+        "```"
+    )
+    out = d.feed(sample)
+    out += d.flush()
+    assert len(out) == 1
+    assert "cat > /tmp/foo.html <<'EOF'" in out[0]
+    assert "<!DOCTYPE html>" in out[0]
+    assert out[0].endswith("EOF")
+
+
+def test_bash_function_definition_yields_one_command() -> None:
+    """Bash function definitions span lines and can't be split
+    line-by-line — they'd fail at `() {` alone."""
+    d = BashStreamDetector()
+    sample = (
+        "```bash\n"
+        "greet() {\n"
+        "  echo hello\n"
+        "  echo world\n"
+        "}\n"
+        "greet\n"
+        "```"
+    )
+    out = d.feed(sample)
+    out += d.flush()
+    assert len(out) == 1
+    assert "greet()" in out[0]
+    assert "greet" in out[0]
+
+
+def test_if_then_fi_block_yields_one_command() -> None:
+    """Same deal for if/then/fi — the splitter would dispatch
+    `if [ -f foo ]; then` as a standalone 'command'."""
+    d = BashStreamDetector()
+    sample = (
+        "```bash\n"
+        "if [ -f README.md ]; then\n"
+        "  echo exists\n"
+        "else\n"
+        "  echo missing\n"
+        "fi\n"
+        "```"
+    )
+    out = d.feed(sample)
+    out += d.flush()
+    assert len(out) == 1
+    assert "if [ -f README.md ]; then" in out[0]
+    assert "fi" in out[0]
 
 
 # ─── State management ───
