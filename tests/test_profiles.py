@@ -3,7 +3,7 @@
 Covers:
   - parse_profile_file: happy path, missing fields use defaults,
     bad types fall back, malformed JSON raises
-  - PROFILE_REGISTRY: built-in default + ronin-dev present, user
+  - PROFILE_REGISTRY: built-in default + successor-dev present, user
     override wins on collision, broken user file doesn't block builtins
   - get_active_profile: reads chat.json's active_profile, falls back
     to "default" → first registered → hardcoded fallback
@@ -21,8 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from ronin.config import load_chat_config
-from ronin.profiles import (
+from successor.config import load_chat_config
+from successor.profiles import (
     PROFILE_REGISTRY,
     Profile,
     all_profiles,
@@ -160,12 +160,12 @@ def test_default_profile_is_builtin(temp_config_dir: Path) -> None:
     assert PROFILE_REGISTRY.source_of("default") == "builtin"
 
 
-def test_ronin_dev_profile_is_builtin_with_intro(temp_config_dir: Path) -> None:
-    """The bundled ronin-dev profile uses the nusamurai intro animation."""
+def test_successor_dev_profile_is_builtin_with_intro(temp_config_dir: Path) -> None:
+    """The bundled successor-dev profile uses the nusamurai intro animation."""
     PROFILE_REGISTRY.reload()
-    rd = get_profile("ronin-dev")
+    rd = get_profile("successor-dev")
     assert rd is not None
-    assert rd.name == "ronin-dev"
+    assert rd.name == "successor-dev"
     assert rd.intro_animation == "nusamurai"
 
 
@@ -199,7 +199,7 @@ def test_user_profile_loads_alongside_builtin(temp_config_dir: Path) -> None:
     PROFILE_REGISTRY.reload()
     names = PROFILE_REGISTRY.names()
     assert "default" in names
-    assert "ronin-dev" in names
+    assert "successor-dev" in names
     assert "research" in names
 
 
@@ -232,11 +232,11 @@ def test_get_active_reads_config(temp_config_dir: Path) -> None:
     """active_profile in chat.json is honored."""
     (temp_config_dir / "chat.json").write_text(json.dumps({
         "version": 2,
-        "active_profile": "ronin-dev",
+        "active_profile": "successor-dev",
     }))
     PROFILE_REGISTRY.reload()
     profile = get_active_profile()
-    assert profile.name == "ronin-dev"
+    assert profile.name == "successor-dev"
 
 
 def test_get_active_falls_back_when_name_missing(temp_config_dir: Path) -> None:
@@ -253,17 +253,17 @@ def test_get_active_falls_back_when_name_missing(temp_config_dir: Path) -> None:
 def test_set_active_persists_to_config(temp_config_dir: Path) -> None:
     """set_active_profile writes active_profile to chat.json."""
     PROFILE_REGISTRY.reload()
-    assert set_active_profile("ronin-dev") is True
+    assert set_active_profile("successor-dev") is True
 
     cfg = load_chat_config()
-    assert cfg["active_profile"] == "ronin-dev"
+    assert cfg["active_profile"] == "successor-dev"
 
 
 def test_set_active_then_get_roundtrip(temp_config_dir: Path) -> None:
     PROFILE_REGISTRY.reload()
-    set_active_profile("ronin-dev")
+    set_active_profile("successor-dev")
     profile = get_active_profile()
-    assert profile.name == "ronin-dev"
+    assert profile.name == "successor-dev"
 
 
 # ─── next_profile ───
@@ -273,7 +273,7 @@ def test_next_profile_cycles(temp_config_dir: Path) -> None:
     """next_profile walks the registry and wraps."""
     PROFILE_REGISTRY.reload()
     profiles = all_profiles()
-    assert len(profiles) >= 2  # default + ronin-dev
+    assert len(profiles) >= 2  # default + successor-dev
 
     seen = []
     current = profiles[0]

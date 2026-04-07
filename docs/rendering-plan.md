@@ -1,15 +1,15 @@
-# Ronin Rendering Plan
+# Successor Rendering Plan
 
 Date: 2026-04-06
 Status: Phase 0 prototype landed.
 
 ## Purpose
 
-This document describes the design of Ronin's terminal renderer and the
+This document describes the design of Successor's terminal renderer and the
 reasoning behind the choices. It exists so we never have to relitigate
 the architecture once the agent loop and tool system land on top of it.
 
-It is the first piece of Ronin we're building because **rendering bugs
+It is the first piece of Successor we're building because **rendering bugs
 are the single most expensive class of issue to retrofit into a TUI**.
 Get this layer wrong and every later feature pays the cost.
 
@@ -197,7 +197,7 @@ Cheng Lou's Pretext (https://www.pretext.cool/) makes one core move:
 **separate slow measurement from fast layout, do everything in
 userland, commit once.** That same move maps onto a terminal:
 
-| Pretext (browser) | Ronin (terminal) |
+| Pretext (browser) | Successor (terminal) |
 |---|---|
 | Slow side: `getBoundingClientRect` (DOM reflow) | Slow side: grapheme width, ANSI strip, EAW table lookup |
 | `prepare()` measures via off-screen canvas, caches | `measure.char_width` + paint walks each grapheme once |

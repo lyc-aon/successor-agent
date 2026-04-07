@@ -21,7 +21,7 @@ These tests verify three things:
    the variant resolver loses the mode argument.
 
 These tests use the THEME_REGISTRY built-ins, not user fixtures, so
-they work in CI and exercise the same code path as a real `rn snapshot`
+they work in CI and exercise the same code path as a real `successor snapshot`
 invocation.
 """
 
@@ -31,8 +31,8 @@ from pathlib import Path
 
 import pytest
 
-from ronin.render.theme import THEME_REGISTRY, get_theme
-from ronin.snapshot import (
+from successor.render.theme import THEME_REGISTRY, get_theme
+from successor.snapshot import (
     chat_demo_snapshot,
     render_grid_to_plain,
 )
@@ -70,8 +70,8 @@ def test_matrix_renders_without_error(
     )
     plain = render_grid_to_plain(grid)
     assert plain  # non-empty
-    # The title bar always shows "ronin · chat"
-    assert "ronin" in plain
+    # The title bar always shows "successor · chat"
+    assert "successor" in plain
 
 
 @pytest.mark.parametrize("density", DENSITIES)
@@ -87,7 +87,7 @@ def test_density_axis_renders(temp_config_dir: Path, density: str) -> None:
         scenario="showcase",
     )
     plain = render_grid_to_plain(grid)
-    assert "ronin" in plain
+    assert "successor" in plain
     assert "what I can render" in plain.lower() or "render" in plain.lower()
 
 
@@ -102,8 +102,8 @@ def test_blank_scenario_shows_greeting(temp_config_dir: Path) -> None:
         theme_name="steel", display_mode="dark",
     )
     plain = render_grid_to_plain(grid)
-    # The greeting starts with "I am ronin." regardless of server state
-    assert "I am ronin" in plain
+    # The greeting starts with "I am successor." regardless of server state
+    assert "I am successor" in plain
 
 
 def test_showcase_renders_markdown_sampler(temp_config_dir: Path) -> None:
@@ -188,7 +188,7 @@ def test_dark_and_light_produce_different_pixels(temp_config_dir: Path) -> None:
     whole frame (catching the case where display_mode gets dropped on
     the floor and both modes paint with the same variant).
     """
-    from ronin.snapshot import render_grid_to_ansi
+    from successor.snapshot import render_grid_to_ansi
 
     THEME_REGISTRY.reload()
     dark_grid = chat_demo_snapshot(
@@ -224,7 +224,7 @@ def test_steel_and_user_theme_differ(temp_config_dir: Path) -> None:
     """
     import json as _json
 
-    from ronin.snapshot import render_grid_to_ansi
+    from successor.snapshot import render_grid_to_ansi
 
     user_themes = temp_config_dir / "themes"
     user_themes.mkdir()
@@ -275,8 +275,8 @@ def test_steel_and_user_theme_differ(temp_config_dir: Path) -> None:
 
     # Both render the greeting (proving both themes paint the chat body
     # successfully — neither one fell back to a blank or crash state).
-    assert "I am ronin" in steel_plain
-    assert "I am ronin" in sakura_plain
+    assert "I am successor" in steel_plain
+    assert "I am successor" in sakura_plain
 
     # The title-bar theme pill names the active theme — visible chrome
     # that legitimately differs between two themes.

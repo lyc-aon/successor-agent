@@ -24,8 +24,8 @@ from __future__ import annotations
 
 import pytest
 
-from ronin.input.keys import Key, KeyEvent, MOD_CTRL, MOD_SHIFT
-from ronin.wizard.prompt_editor import (
+from successor.input.keys import Key, KeyEvent, MOD_CTRL, MOD_SHIFT
+from successor.wizard.prompt_editor import (
     PromptEditor,
     _is_in_selection,
     _normalize_selection,
@@ -84,7 +84,7 @@ def test_wrap_preserves_every_character() -> None:
 
 def test_wrap_source_col_starts_align() -> None:
     """Each chunk's source_col_start equals previous chunk's end_col."""
-    line = "hello world from ronin"
+    line = "hello world from successor"
     chunks = _wrap_source_line(line, 10)
     for i in range(1, len(chunks)):
         assert chunks[i].source_col_start == chunks[i - 1].end_col
@@ -262,8 +262,8 @@ def test_visible_navigation_no_wrap() -> None:
     """Without wrap (long width), UP/DOWN behaves like source navigation."""
     ed = PromptEditor("line1\nline2\nline3")
     # Trigger a paint with a wide width so cache is built
-    from ronin.render.cells import Grid
-    from ronin.render.theme import find_theme_or_fallback
+    from successor.render.cells import Grid
+    from successor.render.theme import find_theme_or_fallback
     g = Grid(20, 100)
     ed.paint(g, x=0, y=0, w=80, h=18, theme=find_theme_or_fallback("steel").variant("dark"))
 
@@ -284,10 +284,10 @@ def test_visible_navigation_with_wrap() -> None:
     should move within those chunks of the same source line, not jump
     source rows.
     """
-    line = "hello world from ronin terminal renderer that is quite long"
+    line = "hello world from successor terminal renderer that is quite long"
     ed = PromptEditor(line)
-    from ronin.render.cells import Grid
-    from ronin.render.theme import find_theme_or_fallback
+    from successor.render.cells import Grid
+    from successor.render.theme import find_theme_or_fallback
     g = Grid(20, 100)
     # Modal width 30 → text area width = 30 - 10 = 20. The line is
     # 60 chars so it wraps into ~3 chunks.
@@ -506,8 +506,8 @@ def test_wrap_cache_invalidates_on_edit() -> None:
     """Editing a line invalidates ONLY that line's cache."""
     ed = PromptEditor("line1\nline2\nline3")
     # Trigger cache population
-    from ronin.render.cells import Grid
-    from ronin.render.theme import find_theme_or_fallback
+    from successor.render.cells import Grid
+    from successor.render.theme import find_theme_or_fallback
     g = Grid(20, 100)
     theme = find_theme_or_fallback("steel").variant("dark")
     ed.paint(g, x=0, y=0, w=80, h=18, theme=theme)
@@ -530,8 +530,8 @@ def test_wrap_cache_invalidates_on_edit() -> None:
 def test_wrap_cache_invalidates_all_on_resize() -> None:
     """Changing the paint width invalidates the entire cache."""
     ed = PromptEditor("line1\nline2\nline3")
-    from ronin.render.cells import Grid
-    from ronin.render.theme import find_theme_or_fallback
+    from successor.render.cells import Grid
+    from successor.render.theme import find_theme_or_fallback
     g = Grid(20, 100)
     theme = find_theme_or_fallback("steel").variant("dark")
 
@@ -551,8 +551,8 @@ def test_wrap_cache_invalidates_all_on_resize() -> None:
 def test_wrap_cache_invalidates_all_on_newline() -> None:
     """Inserting a newline invalidates the whole cache (line shift)."""
     ed = PromptEditor("line1\nline2\nline3")
-    from ronin.render.cells import Grid
-    from ronin.render.theme import find_theme_or_fallback
+    from successor.render.cells import Grid
+    from successor.render.theme import find_theme_or_fallback
     g = Grid(20, 100)
     theme = find_theme_or_fallback("steel").variant("dark")
     ed.paint(g, x=0, y=0, w=80, h=18, theme=theme)

@@ -4,7 +4,7 @@ What we send to llama.cpp's HTTP server, what we get back, and the
 quirks Lycaon's local Qwen3.5-27B-Opus-Distilled-v2 setup specifically.
 This doc exists so future Claude doesn't have to re-probe the API to
 figure out the response shape — read this first when touching anything
-in `src/ronin/providers/llama.py`.
+in `src/successor/providers/llama.py`.
 
 Probed against `b1-ecd99d6` (llama.cpp build identifier from the
 `system_fingerprint` field of the response, ~April 2026).
@@ -51,7 +51,7 @@ tokens/sec prompt eval (measured 2026-04-06).
 | `/v1/chat/completions` | POST | OpenAI-compatible chat completion |
 
 There's also `/completion` (raw prompt + token stream, llama.cpp-native)
-and `/v1/embeddings` etc. but we don't use them in Ronin.
+and `/v1/embeddings` etc. but we don't use them in Successor.
 
 ---
 
@@ -67,7 +67,7 @@ Accept: text/event-stream
 {
   "model": "qwopus",
   "messages": [
-    {"role": "system",    "content": "You are ronin..."},
+    {"role": "system",    "content": "You are successor..."},
     {"role": "user",      "content": "Greet me."},
     {"role": "assistant", "content": "Greetings, traveler."},
     {"role": "user",      "content": "What's your blade?"}
@@ -83,8 +83,8 @@ Accept: text/event-stream
 | Field | Required | Notes |
 |---|---|---|
 | `model` | yes | **Ignored by llama.cpp** — any string works. We send `"qwopus"` for clarity in logs. |
-| `messages` | yes | Standard OpenAI shape. Roles: `system`, `user`, `assistant`. Note we map our internal `"ronin"` role to `"assistant"` before sending. |
-| `stream` | optional | `true` for SSE, `false` for one-shot JSON. Ronin always streams. |
+| `messages` | yes | Standard OpenAI shape. Roles: `system`, `user`, `assistant`. Note we map our internal `"successor"` role to `"assistant"` before sending. |
+| `stream` | optional | `true` for SSE, `false` for one-shot JSON. Successor always streams. |
 | `max_tokens` | optional | **Use generous values** (16K-32K). The 256K context easily handles it. |
 | `temperature` | optional | 0.0-2.0; we default to 0.7. |
 | `top_p` | optional | Nucleus sampling. |
@@ -100,12 +100,12 @@ any additional knobs through to the request body.
 
 Qwen3.5-27B-Opus-Distilled-v2 is a thinking model. It tends to add
 "Solution:", "Verification:", and checkmark lists to its replies if
-not explicitly told not to. The Ronin chat system prompt includes
+not explicitly told not to. The Successor chat system prompt includes
 explicit instructions to suppress these patterns:
 
 ```
-You are ronin — a terse, contemplative wandering samurai assistant.
-Speak as ronin would: with intention, with brevity...
+You are successor — a thoughtful, intentional assistant. Speak with
+brevity, as if every word costs effort...
 Do not use markdown headers. Do not use bullet lists or numbered lists.
 Do not write "Solution:", "Answer:", "Verification:", "Note:", or any
 preamble label. Do not use checkmarks. Do not wrap your reply in code
@@ -266,7 +266,7 @@ field alongside the `delta`, sometimes a separate chunk after the
 finish_reason chunk has `usage` with no `choices`, sometimes neither
 and you have to count tokens yourself.
 
-Ronin's `ChatStream._read_sse` handles all three cases:
+Successor's `ChatStream._read_sse` handles all three cases:
 1. Final chunk with `finish_reason` AND `usage` → captured
 2. Trailing chunk with `usage` and no `choices` → captured
 3. No usage at all → fall back to char-count estimate in the ctx bar
@@ -339,12 +339,12 @@ user seeing it on screen is ~33 ms. Effectively real-time.
 
 ---
 
-## How Ronin uses this
+## How Successor uses this
 
 The full pipeline:
 
 ```
-RoninChat._submit()
+SuccessorChat._submit()
   ├─ build api_messages from self.messages (skip synthetic)
   ├─ self._stream = self.client.stream_chat(messages=api_messages)
   └─ ChatStream worker thread starts
@@ -356,7 +356,7 @@ RoninChat._submit()
                            ├─ if delta.content: append + emit ContentChunk
                            └─ if finish_reason: capture usage/timings, emit StreamEnded
 
-RoninChat.on_tick (every frame, 30 FPS)
+SuccessorChat.on_tick (every frame, 30 FPS)
   ├─ self._pump_stream() drains all queued events
   │    ├─ ReasoningChunk → bumps _stream_reasoning_chars counter
   │    ├─ ContentChunk → appends to _stream_content list
@@ -372,15 +372,15 @@ RoninChat.on_tick (every frame, 30 FPS)
 
 | File | Role |
 |---|---|
-| `src/ronin/providers/llama.py` | The client + ChatStream + event types |
-| `src/ronin/providers/__init__.py` | Re-exports for convenience |
-| `src/ronin/demos/chat.py` | The first consumer of LlamaCppClient |
+| `src/successor/providers/llama.py` | The client + ChatStream + event types |
+| `src/successor/providers/__init__.py` | Re-exports for convenience |
+| `src/successor/demos/chat.py` | The first consumer of LlamaCppClient |
 
 ---
 
 ## What this doc deliberately does NOT cover
 
-These are llama.cpp features Ronin doesn't use yet, so we haven't
+These are llama.cpp features Successor doesn't use yet, so we haven't
 probed them:
 
 - **Tool calls** — llama.cpp's chat-completions endpoint supports

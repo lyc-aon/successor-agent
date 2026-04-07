@@ -1,4 +1,4 @@
-# Ronin changelog
+# Successor changelog
 
 Per-phase notes for the framework infrastructure built on top of the
 Phase 0 renderer + chat. Each phase below is one or more git commits
@@ -22,27 +22,27 @@ palette identity and mode as separate, and conflating them prevented
 
 ### What landed
 
-- `src/ronin/loader.py` — generic `Registry[T]` with built-in dir +
+- `src/successor/loader.py` — generic `Registry[T]` with built-in dir +
   user dir loading, name-collision precedence (user wins), parser
   failure skipping with stderr warnings, hermetic-testable via
-  `RONIN_CONFIG_DIR` env var
-- `src/ronin/render/theme.py` rewritten — `ThemeVariant` (the 9
+  `SUCCESSOR_CONFIG_DIR` env var
+- `src/successor/render/theme.py` rewritten — `ThemeVariant` (the 9
   semantic color slots, one per mode) + `Theme` bundle (name + icon +
   description + dark variant + light variant). `parse_color()` accepts
   hex strings AND oklch tuples/strings. `blend_variants()` lerps
   between variants for smooth transitions. `THEME_REGISTRY` singleton.
   `find_theme_or_fallback()` always returns a valid Theme.
-- `src/ronin/builtin/themes/steel.json` — the default theme, ported
+- `src/successor/builtin/themes/steel.json` — the default theme, ported
   from the previous DARK_THEME/LIGHT_THEME oklch values into one
   bundle with both variants
 - `docs/example-themes/forge.json` — example user theme, hand-tuned
-  warm samurai red palette with both dark and light variants. Drop
-  into `~/.config/ronin/themes/` to install.
-- `src/ronin/config.py` extended — added `version`, `display_mode`,
+  warm red palette with both dark and light variants. Drop
+  into `~/.config/successor/themes/` to install.
+- `src/successor/config.py` extended — added `version`, `display_mode`,
   `active_profile` slots; v1 → v2 migration translates legacy `theme`
   values (`dark` → `(steel, dark)`, `light` → `(steel, light)`,
   `forge` → `(forge, dark)`) idempotently
-- `src/ronin/demos/chat.py` refactored to use ThemeVariant — every
+- `src/successor/demos/chat.py` refactored to use ThemeVariant — every
   painter now takes `theme: ThemeVariant`, the chat resolves the
   current variant once per frame via `_current_variant()` which
   blends across both axes (theme transition + mode transition).
@@ -50,12 +50,12 @@ palette identity and mode as separate, and conflating them prevented
   slash command. Added display mode widget (☾/☀ pill) to the title
   bar between density and theme. Made the `/theme` completer dynamic
   so user themes show up in autocomplete.
-- `src/ronin/render/terminal.py` — file descriptors are now resolved
+- `src/successor/render/terminal.py` — file descriptors are now resolved
   lazily so the renderer is testable under pytest's captured stdin
   (which has no `fileno()`). The diff layer's stdout writes are
   unchanged in real terminal use.
-- `src/ronin/snapshot.py` + `cli.py` — `chat_demo_snapshot()` accepts
-  a `display_mode` parameter; `rn snapshot --display-mode` flag added.
+- `src/successor/snapshot.py` + `cli.py` — `chat_demo_snapshot()` accepts
+  a `display_mode` parameter; `successor snapshot --display-mode` flag added.
   Theme choices are resolved against the live registry instead of
   hardcoded.
 
@@ -70,7 +70,7 @@ palette identity and mode as separate, and conflating them prevented
   matrix (every scenario × every mode renders, dark and light produce
   different ANSI, user themes produce different ANSI from steel)
 - `tests/conftest.py` — `temp_config_dir` fixture using
-  `RONIN_CONFIG_DIR` for hermetic isolation
+  `SUCCESSOR_CONFIG_DIR` for hermetic isolation
 
 ### Notes
 
@@ -91,25 +91,25 @@ will use in phase 3.
 
 ### What landed
 
-- `src/ronin/providers/base.py` — `ChatProvider` Protocol (structural,
+- `src/successor/providers/base.py` — `ChatProvider` Protocol (structural,
   runtime-checkable). Re-exports the `ChatStream` event types so
-  callers can `from ronin.providers import StreamEnded` regardless of
+  callers can `from successor.providers import StreamEnded` regardless of
   which backend is producing them.
-- `src/ronin/providers/llama.py` — added `provider_type = "llamacpp"`
+- `src/successor/providers/llama.py` — added `provider_type = "llamacpp"`
   class attribute. No behavioral changes.
-- `src/ronin/providers/openai_compat.py` — `OpenAICompatClient` for
+- `src/successor/providers/openai_compat.py` — `OpenAICompatClient` for
   any OpenAI-API-compatible server (LM Studio, Ollama, vLLM, OpenRouter,
   hosted servers). Optional `Authorization: Bearer` header via an
   `_AuthenticatedChatStream` subclass that injects the header before
   the urlopen call. `/v1/models` is the liveness probe (the OpenAI
   spec doesn't include `/health`).
-- `src/ronin/providers/factory.py` — `make_provider(config)` reads
+- `src/successor/providers/factory.py` — `make_provider(config)` reads
   the `type` field and dispatches to the matching constructor. Aliases
   supported (`llama`, `llama.cpp`, `openai`, `openai-compat`). Key
   translation (`max_tokens` → `default_max_tokens`). Forward-compat:
   unknown keys are silently dropped so future profiles don't break
-  older Ronin installs.
-- `src/ronin/providers/__init__.py` — re-exports for the public surface
+  older Successor installs.
+- `src/successor/providers/__init__.py` — re-exports for the public surface
 
 ### Tests (19)
 
@@ -131,33 +131,33 @@ The first showcase commit. Profiles bundle (theme, display_mode,
 density, system_prompt, provider, skills, tools, intro_animation)
 into a single switchable persona unit. Hot-swap via `/profile <name>`
 or `Ctrl+P`. The active profile name appears in the title bar. New
-profiles drop into `~/.config/ronin/profiles/*.json`.
+profiles drop into `~/.config/successor/profiles/*.json`.
 
 ### What landed
 
-- `src/ronin/profiles/profile.py` — `Profile` dataclass, JSON parser
+- `src/successor/profiles/profile.py` — `Profile` dataclass, JSON parser
   with type-tolerant fallback (wrong-typed fields revert to dataclass
   defaults instead of crashing), `PROFILE_REGISTRY` singleton,
   `get_active_profile()` chain (chat.json → "default" → first
   registered → hardcoded fallback)
-- `src/ronin/profiles/__init__.py` — public surface
-- `src/ronin/builtin/profiles/default.json` — general-purpose profile,
+- `src/successor/profiles/__init__.py` — public surface
+- `src/successor/builtin/profiles/default.json` — general-purpose profile,
   no intro animation
-- `src/ronin/builtin/profiles/ronin-dev.json` — harness-development
+- `src/successor/builtin/profiles/successor-dev.json` — harness-development
   profile with `intro_animation: "nusamurai"`, lower temperature
   (0.5), 64K max_tokens, and a system prompt that primes the model
-  for Ronin codebase work
-- `src/ronin/demos/chat.py` — `RoninChat.__init__` accepts a
+  for Successor codebase work
+- `src/successor/demos/chat.py` — `SuccessorChat.__init__` accepts a
   `profile=` argument and resolves theme/mode/density/system_prompt/
   provider from it. Saved config still wins per-setting so manual
   changes persist. Added `_set_profile()`, `_cycle_profile()`,
   `/profile` slash command, `Ctrl+P` keybind, profile-name title bar
   widget, "profile" hit-box action for mouse mode, breadcrumb
   synthetic message on swap.
-- `src/ronin/demos/braille.py` — `RoninDemo` gained `max_duration_s`
+- `src/successor/demos/braille.py` — `SuccessorDemo` gained `max_duration_s`
   (auto-exit after N seconds) and `intro_mode` (any keypress exits
   early) parameters
-- `src/ronin/cli.py` — `cmd_chat` now resolves the active profile,
+- `src/successor/cli.py` — `cmd_chat` now resolves the active profile,
   plays its intro animation if configured (calls
   `_play_intro_animation("nusamurai")`), then constructs the chat
   with the profile
@@ -186,9 +186,9 @@ profiles drop into `~/.config/ronin/profiles/*.json`.
 - Intro animation: brief flash between intro App teardown and chat
   App startup is acceptable for v0. Future polish: share a single
   Terminal instance across both Apps to eliminate the flash.
-- The `ronin-dev` profile is what we use to dogfood the harness on
-  itself. Activating it (`/profile ronin-dev` or set
-  `active_profile: "ronin-dev"` in chat.json) loads the rendering
+- The `successor-dev` profile is what we use to dogfood the harness on
+  itself. Activating it (`/profile successor-dev` or set
+  `active_profile: "successor-dev"` in chat.json) loads the rendering
   rules into the system prompt.
 
 ---
@@ -203,17 +203,17 @@ time with Qwen 3.5.
 
 ### What landed
 
-- `src/ronin/skills/skill.py` — `Skill` dataclass (name, description,
+- `src/successor/skills/skill.py` — `Skill` dataclass (name, description,
   body, source_path, `estimated_tokens` property using chars/4
   heuristic). `parse_skill_file()` reads `*.md` files, splits the
   frontmatter block via a tiny line-based parser (no PyYAML
   dependency), returns None for files without frontmatter so READMEs
   drop into `skills/` cleanly. `SKILL_REGISTRY` singleton.
-- `src/ronin/skills/__init__.py` — public surface
-- `src/ronin/builtin/skills/ronin-rendering-pattern.md` — the One Rule
+- `src/successor/skills/__init__.py` — public surface
+- `src/successor/builtin/skills/successor-rendering-pattern.md` — the One Rule
   + five-layer architecture as a bundled skill. Self-documenting
   example of the format.
-- `src/ronin/cli.py` — `rn skills` subcommand lists every loaded skill
+- `src/successor/cli.py` — `successor skills` subcommand lists every loaded skill
   with name, source label (builtin/user), token estimate, and
   description (soft-wrapped at 80 cols). Shows total token count.
 
@@ -228,7 +228,7 @@ time with Qwen 3.5.
 ### Notes
 
 - The `~/.claude/skills/*.md` library should work as-is once the user
-  symlinks or copies it into `~/.config/ronin/skills/`. Same format,
+  symlinks or copies it into `~/.config/successor/skills/`. Same format,
   same loader contract.
 - `_split_frontmatter` is intentionally minimal (no nested keys, no
   quoted values, no multiline values). Matches how Claude Code skills
@@ -239,7 +239,7 @@ time with Qwen 3.5.
 
 ## Phase 6 — Tool registry scaffolding (2026-04-06)
 
-Loader-only. Tools are the only Ronin extension type that turns data
+Loader-only. Tools are the only Successor extension type that turns data
 into code, so the registry has its own shape: a Python module
 importer that harvests `@tool`-decorated functions instead of parsing
 file contents. User tools are GATED behind a config flag (default
@@ -247,18 +247,18 @@ OFF) and audited to stderr when enabled.
 
 ### What landed
 
-- `src/ronin/tools/tool.py` — `@tool(name=, description=, schema=)`
+- `src/successor/tools/tool.py` — `@tool(name=, description=, schema=)`
   decorator, `Tool` dataclass (callable via passthrough), `ToolRegistry`
   with module-import-based discovery. Built-in tools always load;
   user tools require `allow_user_tools: true` in chat.json. Each
   user tool import is announced to stderr. Partial-import rollback
   prevents a half-imported file from leaking partial registrations.
   Multi-tool files are supported (multiple @tool decorators per .py).
-- `src/ronin/tools/__init__.py` — public surface
-- `src/ronin/builtin/tools/__init__.py` — package marker
-- `src/ronin/builtin/tools/read_file.py` — example built-in tool with
+- `src/successor/tools/__init__.py` — public surface
+- `src/successor/builtin/tools/__init__.py` — package marker
+- `src/successor/builtin/tools/read_file.py` — example built-in tool with
   full JSON schema, demonstrating the API
-- `src/ronin/cli.py` — `rn tools` subcommand lists every registered
+- `src/successor/cli.py` — `successor tools` subcommand lists every registered
   tool with source label and description
 
 ### Tests (15)
@@ -278,15 +278,15 @@ OFF) and audited to stderr when enabled.
   the model's function-calling format.
 - Gating is the only safety mechanism for user-supplied Python. There
   is no sandboxing — user tools run with the same privileges as the
-  ronin process. The gate exists so a misconfigured profile can't
+  successor process. The gate exists so a misconfigured profile can't
   surprise the user with arbitrary code execution.
 
 ---
 
-## Phase 4 — rn setup wizard with live preview (2026-04-06)
+## Phase 4 — successor setup wizard with live preview (2026-04-06)
 
 The showcase. Multi-region App with a live preview pane on the right
-that's a real RoninChat instance the wizard mutates as the user picks
+that's a real SuccessorChat instance the wizard mutates as the user picks
 options. The chat's existing `_set_theme`/`_set_display_mode`/
 `_set_density` machinery animates the smooth blend transitions for
 free — there's zero animation code in the wizard itself. Every
@@ -295,7 +295,7 @@ the proof that the harness can build itself.
 
 ### What landed
 
-- `src/ronin/wizard/setup.py` — `RoninSetup` App with eight steps
+- `src/successor/wizard/setup.py` — `SuccessorSetup` App with eight steps
   (welcome, name, theme, mode, density, intro, review, saved). State
   machine dispatches per-step paint methods and key handlers.
   - Multi-region layout: title row, 16-col sidebar, main content,
@@ -309,19 +309,19 @@ the proof that the harness can build itself.
     validation glow that pulses red→accent over 0.5s on rejected input.
   - Theme/Mode/Density steps each show their option list on the left
     and a LIVE preview pane on the right.
-- `src/ronin/wizard/__init__.py` — `run_setup_wizard()` entry point
+- `src/successor/wizard/__init__.py` — `run_setup_wizard()` entry point
   that returns the saved Profile or None on cancel.
-- `src/ronin/cli.py` — `rn setup` subcommand. cmd_setup runs the
+- `src/successor/cli.py` — `successor setup` subcommand. cmd_setup runs the
   wizard, then plays the new profile's intro animation if configured,
   then drops into the chat with the new profile active.
-- `src/ronin/snapshot.py` — `wizard_demo_snapshot(step=, name=, ...)`
+- `src/successor/snapshot.py` — `wizard_demo_snapshot(step=, name=, ...)`
   helper for headless wizard snapshots, shaped like the existing
   `chat_demo_snapshot`. Pins simulated `elapsed` so animations are
   deterministic in tests.
 
 ### The live preview pane (the centerpiece)
 
-The wizard holds a `_preview_chat: RoninChat` constructed once at
+The wizard holds a `_preview_chat: SuccessorChat` constructed once at
 wizard startup. As the user picks theme/mode/density options, the
 wizard calls `preview_chat._set_theme()` etc. — which trigger the
 chat's existing transition machinery. Every wizard frame, the wizard
@@ -386,7 +386,7 @@ wizard doesn't reimplement any of it. When the user arrows from
 
 ---
 
-## Phase 4.5 — rn config three-pane menu (2026-04-06)
+## Phase 4.5 — successor config three-pane menu (2026-04-06)
 
 The companion to the wizard. Where the wizard is "create from scratch,
 linear, one-shot," the config menu is "browse all your profiles, edit
@@ -397,7 +397,7 @@ profile's appearance fields to chat.json automatically.
 
 ### What landed
 
-- `src/ronin/wizard/config.py` — `RoninConfig` App. Three-pane layout
+- `src/successor/wizard/config.py` — `SuccessorConfig` App. Three-pane layout
   (profiles list / settings tree / live preview). Focus state machine
   with Tab cycling. Settings tree groups fields into sections
   (appearance, behavior, provider, extensions). Dirty tracking via
@@ -410,18 +410,18 @@ profile's appearance fields to chat.json automatically.
     immediately, no overlay.
   - **READONLY fields** (system_prompt, provider_*, skills, tools):
     shown in dim italic with an "edit JSON file" hint.
-- `src/ronin/wizard/__init__.py` — re-exports `RoninConfig` and
+- `src/successor/wizard/__init__.py` — re-exports `SuccessorConfig` and
   `run_config_menu` alongside the wizard exports.
-- `src/ronin/cli.py` — `cmd_config` for the standalone `rn config`
+- `src/successor/cli.py` — `cmd_config` for the standalone `successor config`
   subcommand. `cmd_chat` rewritten as a re-entry loop that checks
   `chat._pending_action` after each `chat.run()` and reopens the
   config menu (then resumes the chat with the user's selected
   active profile) when set.
-- `src/ronin/demos/chat.py` — `_pending_action` instance state.
+- `src/successor/demos/chat.py` — `_pending_action` instance state.
   `/config` slash command and `Ctrl+,` keybind both set
   `_pending_action = "config"` and call `self.stop()`. Help overlay
   documents the new keybind.
-- `src/ronin/snapshot.py` — `config_demo_snapshot()` helper for
+- `src/successor/snapshot.py` — `config_demo_snapshot()` helper for
   headless config menu rendering with controllable focus, cursors,
   editing state, and dirty markers.
 
@@ -437,7 +437,7 @@ profile's appearance fields to chat.json automatically.
 
 ### Save flow specifics
 
-1. For each dirty profile, write `~/.config/ronin/profiles/<name>.json`
+1. For each dirty profile, write `~/.config/successor/profiles/<name>.json`
    using `_profile_to_json_dict` (the inverse of `parse_profile_file`)
 2. If any of the *currently-active* profile's appearance fields
    (theme/display_mode/density) were edited, also write those into
@@ -520,7 +520,7 @@ system prompt directly inside the TUI — until now.
   `llamacpp` and `openai_compat`).
 
 - **`_InlineTextEdit` dataclass** + `_handle_inline_text_key` handler
-  in `RoninConfig`. Holds the buffer, cursor position, snapshot for
+  in `SuccessorConfig`. Holds the buffer, cursor position, snapshot for
   cancel, and the field index. Esc restores the snapshot and closes.
   Enter commits (with NUMBER validation) and closes.
 
@@ -616,7 +616,7 @@ architectural separation.
 
 ### What landed
 
-- **New file: `src/ronin/wizard/prompt_editor.py`** — `PromptEditor`
+- **New file: `src/successor/wizard/prompt_editor.py`** — `PromptEditor`
   class (now public, no underscore) plus the `_wrap_source_line`
   pure-function primitive and `_VisibleChunk` dataclass. Standalone
   and reusable; doesn't depend on anything in the config menu.
@@ -813,5 +813,5 @@ newline insertion (line shift)
 collection may include additional small additions in subsequent
 commits.)
 
-Final: **339 tests, all passing, hermetic via `RONIN_CONFIG_DIR`,
+Final: **339 tests, all passing, hermetic via `SUCCESSOR_CONFIG_DIR`,
 no fake mocks, no `.skip()` or `.todo()`.**

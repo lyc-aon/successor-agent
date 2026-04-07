@@ -1,7 +1,7 @@
-"""Pytest fixtures for hermetic Ronin tests.
+"""Pytest fixtures for hermetic Successor tests.
 
 The key fixture here is `temp_config_dir`. It creates a clean temp
-directory and points `RONIN_CONFIG_DIR` at it for the lifetime of one
+directory and points `SUCCESSOR_CONFIG_DIR` at it for the lifetime of one
 test, then cleans up. Both `config.py` (chat config) and `loader.py`
 (registries) honor that env var, so the entire user-config surface
 becomes hermetic with one fixture — no mocking, no monkeypatching of
@@ -26,9 +26,9 @@ import pytest
 
 @pytest.fixture
 def temp_config_dir(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
-    """Create a hermetic ~/.config/ronin equivalent for one test.
+    """Create a hermetic ~/.config/successor equivalent for one test.
 
-    Sets RONIN_CONFIG_DIR to a temp dir for the duration of the test
+    Sets SUCCESSOR_CONFIG_DIR to a temp dir for the duration of the test
     so that:
       - config.py:_config_dir() returns the temp dir
       - loader.py:config_dir() returns the temp dir
@@ -38,7 +38,7 @@ def temp_config_dir(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     Yields the temp dir as a Path. Cleanup happens automatically when
     the test finishes (tempfile.TemporaryDirectory handles it).
     """
-    with tempfile.TemporaryDirectory(prefix="ronin-test-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="successor-test-") as tmp:
         path = Path(tmp)
-        monkeypatch.setenv("RONIN_CONFIG_DIR", str(path))
+        monkeypatch.setenv("SUCCESSOR_CONFIG_DIR", str(path))
         yield path

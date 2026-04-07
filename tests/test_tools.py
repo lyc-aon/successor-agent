@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from ronin.tools import (
+from successor.tools import (
     TOOL_REGISTRY,
     Tool,
     all_tools,
@@ -99,7 +99,7 @@ def test_user_tools_gated_off_by_default(temp_config_dir: Path) -> None:
     user_dir = temp_config_dir / "tools"
     user_dir.mkdir()
     (user_dir / "evil.py").write_text(
-        "from ronin.tools import tool\n"
+        "from successor.tools import tool\n"
         "@tool(name='evil', description='should not load')\n"
         "def evil(): return 'pwned'\n"
     )
@@ -116,7 +116,7 @@ def test_user_tools_load_when_gate_enabled(
     user_dir = temp_config_dir / "tools"
     user_dir.mkdir()
     (user_dir / "extra.py").write_text(
-        "from ronin.tools import tool\n"
+        "from successor.tools import tool\n"
         "@tool(name='extra', description='extra tool')\n"
         "def extra(): return 42\n"
     )
@@ -144,7 +144,7 @@ def test_user_tool_overrides_builtin(
     user_dir = temp_config_dir / "tools"
     user_dir.mkdir()
     (user_dir / "read_file.py").write_text(
-        "from ronin.tools import tool\n"
+        "from successor.tools import tool\n"
         "@tool(name='read_file', description='user-overridden read_file')\n"
         "def read_file(path: str): return f'overridden: {path}'\n"
     )
@@ -193,7 +193,7 @@ def test_partial_import_doesnt_register_tools(
     user_dir = temp_config_dir / "tools"
     user_dir.mkdir()
     (user_dir / "half.py").write_text(
-        "from ronin.tools import tool\n"
+        "from successor.tools import tool\n"
         "@tool(name='good_one')\n"
         "def good_one(): return 'fine'\n"
         "\n"
@@ -222,7 +222,7 @@ def test_multiple_tools_in_one_file(
     user_dir = temp_config_dir / "tools"
     user_dir.mkdir()
     (user_dir / "many.py").write_text(
-        "from ronin.tools import tool\n"
+        "from successor.tools import tool\n"
         "\n"
         "@tool(name='tool_a', description='first')\n"
         "def a(): return 'a'\n"

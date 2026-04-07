@@ -1,4 +1,4 @@
-"""Tests for the RoninConfig three-pane menu.
+"""Tests for the SuccessorConfig three-pane menu.
 
 Three layers (matching the wizard test pattern):
   1. State machine — pure logic for navigation, dirty tracking,
@@ -16,21 +16,21 @@ from pathlib import Path
 
 import pytest
 
-from ronin.config import load_chat_config
-from ronin.input.keys import Key, KeyEvent
-from ronin.profiles import PROFILE_REGISTRY, Profile, get_profile
-from ronin.render.theme import THEME_REGISTRY
-from ronin.snapshot import config_demo_snapshot, render_grid_to_plain
-from ronin.input.keys import MOD_CTRL
-from ronin.wizard.config import (
+from successor.config import load_chat_config
+from successor.input.keys import Key, KeyEvent
+from successor.profiles import PROFILE_REGISTRY, Profile, get_profile
+from successor.render.theme import THEME_REGISTRY
+from successor.snapshot import config_demo_snapshot, render_grid_to_plain
+from successor.input.keys import MOD_CTRL
+from successor.wizard.config import (
     FieldKind,
     Focus,
-    RoninConfig,
+    SuccessorConfig,
     _SETTINGS_TREE,
     _profile_to_json_dict,
     run_config_menu,
 )
-from ronin.wizard.prompt_editor import PromptEditor
+from successor.wizard.prompt_editor import PromptEditor
 
 
 def _field_idx(name: str) -> int:
@@ -44,8 +44,8 @@ def _field_idx(name: str) -> int:
 def test_construct_loads_profiles(temp_config_dir: Path) -> None:
     PROFILE_REGISTRY.reload()
     THEME_REGISTRY.reload()
-    menu = RoninConfig()
-    assert len(menu._working_profiles) >= 2  # default + ronin-dev builtins
+    menu = SuccessorConfig()
+    assert len(menu._working_profiles) >= 2  # default + successor-dev builtins
     assert len(menu._initial_profiles) == len(menu._working_profiles)
 
 
@@ -53,25 +53,25 @@ def test_construct_starts_on_active_profile(temp_config_dir: Path) -> None:
     """The profile cursor starts on whichever profile is active in chat.json."""
     (temp_config_dir / "chat.json").write_text(json.dumps({
         "version": 2,
-        "active_profile": "ronin-dev",
+        "active_profile": "successor-dev",
     }))
     PROFILE_REGISTRY.reload()
     THEME_REGISTRY.reload()
-    menu = RoninConfig()
-    assert menu._working_profiles[menu._profile_cursor].name == "ronin-dev"
+    menu = SuccessorConfig()
+    assert menu._working_profiles[menu._profile_cursor].name == "successor-dev"
 
 
 def test_construct_has_no_dirty(temp_config_dir: Path) -> None:
     PROFILE_REGISTRY.reload()
     THEME_REGISTRY.reload()
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     assert not menu._any_dirty()
 
 
 def test_settings_cursor_starts_on_editable_row(temp_config_dir: Path) -> None:
     PROFILE_REGISTRY.reload()
     THEME_REGISTRY.reload()
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     assert _SETTINGS_TREE[menu._settings_cursor].kind.value != "readonly"
 
 
@@ -79,7 +79,7 @@ def test_settings_cursor_starts_on_editable_row(temp_config_dir: Path) -> None:
 
 
 def test_tab_cycles_focus(temp_config_dir: Path) -> None:
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     initial = menu._focus
     menu._handle_key(KeyEvent(key=Key.TAB))
     assert menu._focus != initial
@@ -89,7 +89,7 @@ def test_tab_cycles_focus(temp_config_dir: Path) -> None:
 
 def test_settings_arrows_skip_readonly(temp_config_dir: Path) -> None:
     """Up/Down in the settings pane only land on editable fields."""
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     seen_indices = set()
     for _ in range(20):
@@ -104,7 +104,7 @@ def test_settings_arrows_skip_readonly(temp_config_dir: Path) -> None:
 
 def test_profiles_arrows_walk_through_list(temp_config_dir: Path) -> None:
     PROFILE_REGISTRY.reload()
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.PROFILES
     n = len(menu._working_profiles)
     if n < 2:
@@ -120,7 +120,7 @@ def test_profile_navigation_syncs_preview(temp_config_dir: Path) -> None:
     """Selecting a different profile in the left pane updates the preview."""
     PROFILE_REGISTRY.reload()
     THEME_REGISTRY.reload()
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.PROFILES
     if len(menu._working_profiles) < 2:
         return
@@ -140,7 +140,7 @@ def test_profile_navigation_syncs_preview(temp_config_dir: Path) -> None:
 
 def test_toggle_mode_flips_immediately(temp_config_dir: Path) -> None:
     """Enter on the mode field flips dark↔light without opening overlay."""
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     # Position cursor on the mode field
     mode_idx = next(
@@ -158,7 +158,7 @@ def test_toggle_mode_flips_immediately(temp_config_dir: Path) -> None:
 
 
 def test_toggle_intro_flips_none_to_nusamurai(temp_config_dir: Path) -> None:
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     intro_idx = next(
         i for i, f in enumerate(_SETTINGS_TREE) if f.name == "intro_animation"
@@ -175,7 +175,7 @@ def test_toggle_intro_flips_none_to_nusamurai(temp_config_dir: Path) -> None:
 
 def test_cycle_theme_opens_overlay(temp_config_dir: Path) -> None:
     THEME_REGISTRY.reload()
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     theme_idx = next(i for i, f in enumerate(_SETTINGS_TREE) if f.name == "theme")
     menu._settings_cursor = theme_idx
@@ -206,7 +206,7 @@ def test_overlay_up_down_cycles_options_with_live_preview(
     (user_themes / "sakura.json").write_text(json.dumps(sakura))
     THEME_REGISTRY.reload()
 
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     theme_idx = next(i for i, f in enumerate(_SETTINGS_TREE) if f.name == "theme")
     menu._settings_cursor = theme_idx
@@ -225,7 +225,7 @@ def test_overlay_up_down_cycles_options_with_live_preview(
 
 def test_overlay_enter_confirms(temp_config_dir: Path) -> None:
     THEME_REGISTRY.reload()
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     theme_idx = next(i for i, f in enumerate(_SETTINGS_TREE) if f.name == "theme")
     menu._settings_cursor = theme_idx
@@ -255,7 +255,7 @@ def test_overlay_esc_cancels_and_restores(temp_config_dir: Path) -> None:
     (user_themes / "other.json").write_text(json.dumps(other_theme))
     THEME_REGISTRY.reload()
 
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     theme_idx = next(i for i, f in enumerate(_SETTINGS_TREE) if f.name == "theme")
     menu._settings_cursor = theme_idx
@@ -278,7 +278,7 @@ def test_overlay_esc_cancels_and_restores(temp_config_dir: Path) -> None:
 
 
 def test_edit_marks_dirty(temp_config_dir: Path) -> None:
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     mode_idx = next(
         i for i, f in enumerate(_SETTINGS_TREE) if f.name == "display_mode"
@@ -289,7 +289,7 @@ def test_edit_marks_dirty(temp_config_dir: Path) -> None:
 
 
 def test_revert_clears_dirty(temp_config_dir: Path) -> None:
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     mode_idx = next(
         i for i, f in enumerate(_SETTINGS_TREE) if f.name == "display_mode"
@@ -307,7 +307,7 @@ def test_revert_clears_dirty(temp_config_dir: Path) -> None:
 
 def test_edit_then_back_to_initial_clears_that_field_dirty(temp_config_dir: Path) -> None:
     """Toggling a field twice (back to original) clears its dirty marker."""
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     mode_idx = next(
         i for i, f in enumerate(_SETTINGS_TREE) if f.name == "display_mode"
@@ -324,7 +324,7 @@ def test_edit_then_back_to_initial_clears_that_field_dirty(temp_config_dir: Path
 
 def test_save_writes_dirty_profile_to_disk(temp_config_dir: Path) -> None:
     PROFILE_REGISTRY.reload()
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
 
     # Find the active profile and toggle its mode
@@ -354,7 +354,7 @@ def test_save_writes_dirty_profile_to_disk(temp_config_dir: Path) -> None:
 def test_save_syncs_active_profile_to_chat_json(temp_config_dir: Path) -> None:
     """Editing the active profile's appearance syncs to chat.json."""
     PROFILE_REGISTRY.reload()
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     mode_idx = next(
         i for i, f in enumerate(_SETTINGS_TREE) if f.name == "display_mode"
@@ -370,7 +370,7 @@ def test_save_syncs_active_profile_to_chat_json(temp_config_dir: Path) -> None:
 
 
 def test_save_when_nothing_dirty_is_noop(temp_config_dir: Path) -> None:
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._handle_key(KeyEvent(char="s"))
     # Toast is set but no error
     assert menu._toast is not None
@@ -382,7 +382,7 @@ def test_save_when_nothing_dirty_is_noop(temp_config_dir: Path) -> None:
 
 def test_first_esc_warns_on_dirty(temp_config_dir: Path) -> None:
     """First esc with dirty changes shows a warning toast, doesn't exit."""
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     mode_idx = next(
         i for i, f in enumerate(_SETTINGS_TREE) if f.name == "display_mode"
@@ -399,7 +399,7 @@ def test_first_esc_warns_on_dirty(temp_config_dir: Path) -> None:
 
 
 def test_second_esc_after_warn_exits(temp_config_dir: Path) -> None:
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     mode_idx = next(
         i for i, f in enumerate(_SETTINGS_TREE) if f.name == "display_mode"
@@ -412,7 +412,7 @@ def test_second_esc_after_warn_exits(temp_config_dir: Path) -> None:
 
 
 def test_esc_exits_immediately_when_clean(temp_config_dir: Path) -> None:
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._handle_key(KeyEvent(key=Key.ESC))
     assert menu.exit_to_chat
 
@@ -420,7 +420,7 @@ def test_esc_exits_immediately_when_clean(temp_config_dir: Path) -> None:
 def test_enter_on_profile_activates_and_exits(temp_config_dir: Path) -> None:
     """Enter on a profile in the left pane activates it and exits."""
     PROFILE_REGISTRY.reload()
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.PROFILES
     target_name = menu._working_profiles[menu._profile_cursor].name
     menu._handle_key(KeyEvent(key=Key.ENTER))
@@ -437,7 +437,7 @@ def test_enter_on_profile_activates_and_exits(temp_config_dir: Path) -> None:
 def test_snapshot_three_panes_render(temp_config_dir: Path) -> None:
     g = config_demo_snapshot(rows=30, cols=120, focus="settings")
     plain = render_grid_to_plain(g)
-    assert "ronin · config" in plain
+    assert "successor · config" in plain
     assert "profiles" in plain
     assert "settings" in plain
     assert "preview" in plain
@@ -457,7 +457,7 @@ def test_snapshot_profile_list_shows_names(temp_config_dir: Path) -> None:
     g = config_demo_snapshot(rows=30, cols=120, focus="profiles")
     plain = render_grid_to_plain(g)
     assert "default" in plain
-    assert "ronin-dev" in plain
+    assert "successor-dev" in plain
 
 
 def test_snapshot_focus_profiles_shows_cursor(temp_config_dir: Path) -> None:
@@ -515,7 +515,7 @@ def test_snapshot_too_small_terminal(temp_config_dir: Path) -> None:
 
 def test_text_field_opens_inline_edit(temp_config_dir: Path) -> None:
     """Pressing Enter on a TEXT field opens the inline text editor."""
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     menu._settings_cursor = _field_idx("provider_model")
     menu._handle_key(KeyEvent(key=Key.ENTER))
@@ -524,7 +524,7 @@ def test_text_field_opens_inline_edit(temp_config_dir: Path) -> None:
 
 
 def test_text_field_buffer_starts_with_current_value(temp_config_dir: Path) -> None:
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     menu._settings_cursor = _field_idx("provider_model")
     menu._handle_key(KeyEvent(key=Key.ENTER))
@@ -534,7 +534,7 @@ def test_text_field_buffer_starts_with_current_value(temp_config_dir: Path) -> N
 
 
 def test_text_field_typing_appends(temp_config_dir: Path) -> None:
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     menu._settings_cursor = _field_idx("provider_model")
     menu._handle_key(KeyEvent(key=Key.ENTER))
@@ -544,7 +544,7 @@ def test_text_field_typing_appends(temp_config_dir: Path) -> None:
 
 
 def test_text_field_backspace_deletes(temp_config_dir: Path) -> None:
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     menu._settings_cursor = _field_idx("provider_model")
     menu._handle_key(KeyEvent(key=Key.ENTER))
@@ -555,7 +555,7 @@ def test_text_field_backspace_deletes(temp_config_dir: Path) -> None:
 
 
 def test_text_field_left_right_moves_cursor(temp_config_dir: Path) -> None:
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     menu._settings_cursor = _field_idx("provider_model")
     menu._handle_key(KeyEvent(key=Key.ENTER))
@@ -569,7 +569,7 @@ def test_text_field_left_right_moves_cursor(temp_config_dir: Path) -> None:
 
 
 def test_text_field_enter_commits(temp_config_dir: Path) -> None:
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     menu._settings_cursor = _field_idx("provider_model")
     menu._handle_key(KeyEvent(key=Key.ENTER))
@@ -585,7 +585,7 @@ def test_text_field_enter_commits(temp_config_dir: Path) -> None:
 
 
 def test_text_field_esc_cancels(temp_config_dir: Path) -> None:
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     menu._settings_cursor = _field_idx("provider_model")
     original = menu._current_profile().provider.get("model")
@@ -604,7 +604,7 @@ def test_text_field_esc_cancels(temp_config_dir: Path) -> None:
 
 def test_number_field_filters_letters(temp_config_dir: Path) -> None:
     """Typing letters into a NUMBER field is silently rejected."""
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     menu._settings_cursor = _field_idx("provider_temperature")
     menu._handle_key(KeyEvent(key=Key.ENTER))
@@ -617,7 +617,7 @@ def test_number_field_filters_letters(temp_config_dir: Path) -> None:
 
 def test_number_int_field_rejects_decimal(temp_config_dir: Path) -> None:
     """Typing '.' into an int field is filtered."""
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     menu._settings_cursor = _field_idx("provider_max_tokens")
     menu._handle_key(KeyEvent(key=Key.ENTER))
@@ -629,7 +629,7 @@ def test_number_int_field_rejects_decimal(temp_config_dir: Path) -> None:
 
 
 def test_number_field_commits_parsed_float(temp_config_dir: Path) -> None:
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     menu._settings_cursor = _field_idx("provider_temperature")
     menu._handle_key(KeyEvent(key=Key.ENTER))
@@ -646,7 +646,7 @@ def test_number_field_commits_parsed_float(temp_config_dir: Path) -> None:
 
 
 def test_number_int_field_commits_int(temp_config_dir: Path) -> None:
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     menu._settings_cursor = _field_idx("provider_max_tokens")
     menu._handle_key(KeyEvent(key=Key.ENTER))
@@ -663,7 +663,7 @@ def test_number_int_field_commits_int(temp_config_dir: Path) -> None:
 
 def test_number_field_invalid_buffer_warns(temp_config_dir: Path) -> None:
     """Empty buffer on Enter triggers a warning toast and stays in edit mode."""
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     menu._settings_cursor = _field_idx("provider_temperature")
     menu._handle_key(KeyEvent(key=Key.ENTER))
@@ -682,7 +682,7 @@ def test_number_field_invalid_buffer_warns(temp_config_dir: Path) -> None:
 def test_secret_field_displays_masked(temp_config_dir: Path) -> None:
     """A non-empty SECRET field renders as bullets in the display."""
     PROFILE_REGISTRY.reload()
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     menu._settings_cursor = _field_idx("provider_api_key")
     menu._handle_key(KeyEvent(key=Key.ENTER))
@@ -698,7 +698,7 @@ def test_secret_field_displays_masked(temp_config_dir: Path) -> None:
 
 def test_secret_field_editing_shows_plaintext(temp_config_dir: Path) -> None:
     """While editing, the buffer is plaintext (so the user can verify)."""
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     menu._settings_cursor = _field_idx("provider_api_key")
     menu._handle_key(KeyEvent(key=Key.ENTER))
@@ -708,7 +708,7 @@ def test_secret_field_editing_shows_plaintext(temp_config_dir: Path) -> None:
 
 
 def test_secret_field_commits_to_provider_dict(temp_config_dir: Path) -> None:
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     menu._settings_cursor = _field_idx("provider_api_key")
     menu._handle_key(KeyEvent(key=Key.ENTER))
@@ -724,7 +724,7 @@ def test_secret_field_commits_to_provider_dict(temp_config_dir: Path) -> None:
 
 def test_provider_type_field_opens_cycle_overlay(temp_config_dir: Path) -> None:
     """The provider_type field is now a CYCLE."""
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     menu._settings_cursor = _field_idx("provider_type")
     menu._handle_key(KeyEvent(key=Key.ENTER))
@@ -875,7 +875,7 @@ def test_prompt_editor_dirty_tracking() -> None:
 
 def test_multiline_field_opens_prompt_editor(temp_config_dir: Path) -> None:
     """Pressing Enter on the system_prompt field opens the prompt editor."""
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     menu._settings_cursor = _field_idx("system_prompt")
     menu._handle_key(KeyEvent(key=Key.ENTER))
@@ -886,7 +886,7 @@ def test_multiline_field_opens_prompt_editor(temp_config_dir: Path) -> None:
 
 def test_multiline_save_commits_prompt_to_profile(temp_config_dir: Path) -> None:
     """Ctrl+S in the prompt editor commits the new text to the profile."""
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     menu._settings_cursor = _field_idx("system_prompt")
     menu._handle_key(KeyEvent(key=Key.ENTER))
@@ -903,7 +903,7 @@ def test_multiline_save_commits_prompt_to_profile(temp_config_dir: Path) -> None
 
 
 def test_multiline_esc_cancels(temp_config_dir: Path) -> None:
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     menu._settings_cursor = _field_idx("system_prompt")
     original = menu._current_profile().system_prompt
@@ -920,7 +920,7 @@ def test_multiline_esc_cancels(temp_config_dir: Path) -> None:
 def test_multiline_save_persists_to_disk(temp_config_dir: Path) -> None:
     """Edit prompt, Ctrl+S in editor, then s in menu — JSON file has new prompt."""
     PROFILE_REGISTRY.reload()
-    menu = RoninConfig()
+    menu = SuccessorConfig()
     menu._focus = Focus.SETTINGS
     active_name = menu._current_profile().name
     menu._settings_cursor = _field_idx("system_prompt")
@@ -949,7 +949,7 @@ def test_multiline_save_persists_to_disk(temp_config_dir: Path) -> None:
 
 def test_profile_to_json_round_trip(temp_config_dir: Path) -> None:
     """Serializing and re-parsing a Profile preserves all fields."""
-    from ronin.profiles import parse_profile_file
+    from successor.profiles import parse_profile_file
 
     original = Profile(
         name="roundtrip",

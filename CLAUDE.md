@@ -1,10 +1,10 @@
-# Ronin — Notes for Claude Sessions
+# Successor — Notes for Claude Sessions
 
-You're working in the Ronin agent harness. This file is auto-loaded by
+You're working in the Successor agent harness. This file is auto-loaded by
 Claude Code when you open a session in this directory. It's a tight
 orientation; the deeper architectural docs live in `docs/`.
 
-## What is Ronin
+## What is Successor
 
 Custom Python agent harness for locally-run mid-grade models (Qwen 3.5 27B
 primary). Pure-stdlib Python 3.11+, zero deps. Replaces the previous
@@ -16,11 +16,11 @@ Phase 0 + framework infra status (2026-04-06):
   - extension framework (loader pattern, themes, profiles, providers,
     skills, tools) complete as scaffolding — see "Framework infra" below
   - agent loop and tool dispatch intentionally not built yet
-  - rn setup wizard (the showcase) is the next planned piece
+  - successor setup wizard (the showcase) is the next planned piece
 
 ## The One Rule (read before touching the renderer)
 
-**`src/ronin/render/diff.py` is the only module in the entire codebase
+**`src/successor/render/diff.py` is the only module in the entire codebase
 allowed to write to stdout.** Not Rich. Not prompt_toolkit. Not `print()`.
 Not your own one-off escape sequences from somewhere convenient.
 
@@ -39,7 +39,7 @@ in full** before:
 ## What's where
 
 ```
-src/ronin/render/        the rendering engine
+src/successor/render/        the rendering engine
   measure.py             Layer 1 — grapheme width, ANSI strip
   cells.py               Cell, Style, Grid (data layers operate on)
   paint.py               Layers 2-4 — text, lines, fills, centering
@@ -50,37 +50,37 @@ src/ronin/render/        the rendering engine
   text.py                PreparedText, hard_wrap, lerp_rgb, ease_out_cubic
   theme.py               Theme bundle, ThemeVariant, blend_variants, oklch parser
 
-src/ronin/loader.py      generic Registry[T] pattern shared by every kind
-src/ronin/config.py      ~/.config/ronin/chat.json load/save + v1→v2 migration
+src/successor/loader.py      generic Registry[T] pattern shared by every kind
+src/successor/config.py      ~/.config/successor/chat.json load/save + v1→v2 migration
 
-src/ronin/profiles/      Profile dataclass + JSON loader + active-profile resolver
-src/ronin/providers/     ChatProvider protocol + factory + llamacpp/openai_compat
-src/ronin/skills/        Skill dataclass + frontmatter parser + registry (loader-only)
-src/ronin/tools/         @tool decorator + ToolRegistry (Python imports, gated user dir)
-src/ronin/wizard/        rn setup wizard with live preview pane (the showcase)
+src/successor/profiles/      Profile dataclass + JSON loader + active-profile resolver
+src/successor/providers/     ChatProvider protocol + factory + llamacpp/openai_compat
+src/successor/skills/        Skill dataclass + frontmatter parser + registry (loader-only)
+src/successor/tools/         @tool decorator + ToolRegistry (Python imports, gated user dir)
+src/successor/wizard/        successor setup wizard with live preview pane (the showcase)
 
-src/ronin/builtin/       package-shipped data files loaded by the registries
+src/successor/builtin/       package-shipped data files loaded by the registries
   themes/steel.json      the default theme — instrument-panel oklch
   profiles/default.json  general-purpose profile
-  profiles/ronin-dev.json  harness-development profile (uses nusamurai intro)
-  skills/ronin-rendering-pattern.md   the One Rule + five-layer architecture
+  profiles/successor-dev.json  harness-development profile (uses nusamurai intro)
+  skills/successor-rendering-pattern.md   the One Rule + five-layer architecture
   tools/read_file.py     example built-in tool
 
-src/ronin/demos/         runnable scenes
-  braille.py             RoninDemo (animation, supports intro_mode + max_duration_s)
-  chat.py                RoninChat — v0 chat interface (now profile-aware)
+src/successor/demos/         runnable scenes
+  braille.py             SuccessorDemo (animation, supports intro_mode + max_duration_s)
+  chat.py                SuccessorChat — v0 chat interface (now profile-aware)
 
-src/ronin/snapshot.py    headless render via chat_demo_snapshot()
-src/ronin/recorder.py    record/replay session traces
-src/ronin/cli.py         argparse subcommand dispatch (`rn` binary)
-src/ronin/__main__.py    `python -m ronin` entry point
+src/successor/snapshot.py    headless render via chat_demo_snapshot()
+src/successor/recorder.py    record/replay session traces
+src/successor/cli.py         argparse subcommand dispatch (`successor` binary)
+src/successor/__main__.py    `python -m successor` entry point
 
-docs/example-themes/     copy these into ~/.config/ronin/themes/ to install
-  forge.json             warm samurai red, hand-tuned hex palette
+docs/example-themes/     copy these into ~/.config/successor/themes/ to install
+  forge.json             warm red, hand-tuned hex palette
 
 assets/nusamurai/pos-th30/   9 braille keyframes (the intro animation source)
 
-tests/                   pytest suite — 187 tests, hermetic via RONIN_CONFIG_DIR
+tests/                   pytest suite — 187 tests, hermetic via SUCCESSOR_CONFIG_DIR
   conftest.py            temp_config_dir fixture
   test_loader.py         Registry pattern tests
   test_theme.py          color parsing, variant resolver, blend math, registry
@@ -88,7 +88,7 @@ tests/                   pytest suite — 187 tests, hermetic via RONIN_CONFIG_D
   test_snapshot_themes.py  visual regression matrix (scenario × theme × mode)
   test_providers.py      protocol conformance, factory dispatch
   test_profiles.py       loader, registry, active-profile resolver
-  test_chat_profiles.py  RoninChat ↔ Profile integration, hot swap
+  test_chat_profiles.py  SuccessorChat ↔ Profile integration, hot swap
   test_skills.py         frontmatter parser, registry
   test_tools.py          @tool decorator, ToolRegistry, user gating
 
@@ -102,26 +102,35 @@ docs/                    architectural docs (read these)
 
 ## Commands
 
-The binary is `rn` (the `ronin` name is too contested in OSS — see
-`docs/rendering-superpowers.md` for context). Installed via:
+The binary is `successor` (full word — typing the brand reinforces it).
+A 2-letter alias `sx` is also installed for daily ergonomics. Both
+point at the same entry. Installed via:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e .
-ln -sf "$PWD/.venv/bin/rn" ~/.local/bin/rn
+ln -sf "$PWD/.venv/bin/successor" ~/.local/bin/successor
+ln -sf "$PWD/.venv/bin/sx" ~/.local/bin/sx
 ```
 
-Available subcommands:
+Available subcommands (use either `successor` or `sx`):
 
 ```
-rn               help
-rn -V            version
-rn chat          v0 chat (scripted ronin responses)
-rn demo          braille animation cycle
-rn show <name>   single static braille frame
-rn frames        list 9 nusamurai keyframes
-rn doctor        terminal capabilities + measure samples
-rn bench         renderer benchmark (no TTY needed)
+successor              help
+successor -V           version
+successor chat         v0 chat
+successor setup        profile creation wizard
+successor config       three-pane profile config menu
+successor demo         braille animation cycle
+successor show <name>  single static braille frame
+successor frames       list 9 bundled braille keyframes
+successor doctor       terminal capabilities + measure samples
+successor bench        renderer benchmark (no TTY needed)
+successor skills       list loaded skills
+successor tools        list registered tools
+successor snapshot     headless render of a chat scenario
+successor record       record an input session to JSONL
+successor replay       replay a recorded session
 ```
 
 ## The five layers
@@ -141,7 +150,7 @@ terminal. The renderer is testable by inspecting Grid contents directly.
 
 ## Pretext-shaped primitives (the cache pattern)
 
-Two places it pays off in Ronin today, both validated:
+Two places it pays off in Successor today, both validated:
 
 | Primitive | Cache hit | Miss | Speedup |
 |---|---|---|---|
@@ -158,7 +167,7 @@ this pattern:
 
 - **Chat scrolling is custom-built**, not native terminal. We're in
   alt-screen mode so terminal scrollback can't see our paint. The
-  `RoninChat._paint_chat_area` slices a flat list of all message lines
+  `SuccessorChat._paint_chat_area` slices a flat list of all message lines
   by `scroll_offset`.
 - **`on_tick` clears the ESC accumulator** (`self._esc_buf = None`) at
   the start so bare ESC presses don't get stuck.
@@ -192,57 +201,57 @@ it before continuing.
 
 The harness now has the loader pattern + four customizable axes:
 
-- **Themes** (`src/ronin/render/theme.py`): `Theme(name, icon, dark, light)`
+- **Themes** (`src/successor/render/theme.py`): `Theme(name, icon, dark, light)`
   bundles dark and light variants of the same visual identity. Display
   mode is now ORTHOGONAL to theme — Ctrl+T cycles theme, Alt+D toggles
   mode, both transition smoothly via `blend_variants`. The bundled
   `steel` theme is the default; user themes drop into
-  `~/.config/ronin/themes/*.json`.
+  `~/.config/successor/themes/*.json`.
 
-- **Profiles** (`src/ronin/profiles/`): `Profile` bundles theme +
+- **Profiles** (`src/successor/profiles/`): `Profile` bundles theme +
   display_mode + density + system_prompt + provider config + skill
   refs + tool refs + intro_animation. Switching a profile is one
   user-facing action that swaps everything coherently. Built-in
-  profiles: `default` (general purpose) and `ronin-dev` (harness work,
+  profiles: `default` (general purpose) and `successor-dev` (harness work,
   uses the nusamurai braille intro). Slash command: `/profile <name>`.
   Keybind: Ctrl+P cycles. Title bar shows the active profile name.
 
-- **Providers** (`src/ronin/providers/`): `ChatProvider` Protocol +
+- **Providers** (`src/successor/providers/`): `ChatProvider` Protocol +
   `LlamaCppClient` + `OpenAICompatClient` + `make_provider(config)`
   factory. Profiles reference a provider config dict; the factory
   constructs the right class.
 
-- **Skills** (`src/ronin/skills/`): SCAFFOLD only. Markdown +
-  frontmatter parser, `~/.config/ronin/skills/*.md` loader, `rn skills`
+- **Skills** (`src/successor/skills/`): SCAFFOLD only. Markdown +
+  frontmatter parser, `~/.config/successor/skills/*.md` loader, `successor skills`
   inventory command. NOT yet wired into the chat — invocation strategy
   (always-on prepend vs on-demand tool) deferred until hands-on time
   with the local model.
 
-- **Tools** (`src/ronin/tools/`): SCAFFOLD only. `@tool` decorator
+- **Tools** (`src/successor/tools/`): SCAFFOLD only. `@tool` decorator
   registers functions in `TOOL_REGISTRY`. Built-in tools live in
-  `src/ronin/builtin/tools/*.py` (one example: `read_file`). User
-  tools in `~/.config/ronin/tools/*.py` are GATED behind
+  `src/successor/builtin/tools/*.py` (one example: `read_file`). User
+  tools in `~/.config/successor/tools/*.py` are GATED behind
   `allow_user_tools` config (default OFF, audited to stderr). NOT yet
   wired into the chat — agent loop comes later after we study request/
   response patterns more deliberately.
 
-- **Loader pattern** (`src/ronin/loader.py`): generic `Registry[T]`
+- **Loader pattern** (`src/successor/loader.py`): generic `Registry[T]`
   reused by themes, profiles, skills (tools have their own
   Python-import variant). Built-in dir + user dir, user wins on name
   collision, broken files skipped to stderr. Hermetic-testable via
-  `RONIN_CONFIG_DIR` env var (already supported by `config.py`).
+  `SUCCESSOR_CONFIG_DIR` env var (already supported by `config.py`).
 
 - **Config schema v2**: `chat.json` gained `version`, `display_mode`,
   `active_profile`, `allow_user_tools` slots. v1 configs are migrated
   transparently on load. Migration is idempotent and tested.
 
-The intro animation feature uses the existing `RoninDemo` with two new
+The intro animation feature uses the existing `SuccessorDemo` with two new
 parameters (`max_duration_s`, `intro_mode`) so a profile's
 `intro_animation: "nusamurai"` plays the bundled braille keyframes for
 4 seconds before the chat opens. Any keypress skips ahead.
 
-**`rn setup` wizard** (`src/ronin/wizard/setup.py`): multi-region App
-with a LIVE preview pane that's a real RoninChat instance the wizard
+**`successor setup` wizard** (`src/successor/wizard/setup.py`): multi-region App
+with a LIVE preview pane that's a real SuccessorChat instance the wizard
 mutates as the user picks options. Eight steps (welcome, name, theme,
 mode, density, intro, review, saved) with sidebar progress, footer
 keybinds + colored progress bar, validation glow on bad input, toast
@@ -252,7 +261,7 @@ smooth blend transitions run for free — no animation code in the
 wizard at all. **The wizard is the proof that the harness can build
 itself**: writing it required ZERO new primitives.
 
-**`rn config` menu** (`src/ronin/wizard/config.py`): three-pane App
+**`successor config` menu** (`src/successor/wizard/config.py`): three-pane App
 for ongoing tweaks. Profiles list (left) | settings tree (middle) |
 live preview (right). Tab cycles focus, ↑↓ navigates within the
 focused pane, Enter edits the selected setting.
@@ -279,7 +288,7 @@ discards. From inside the chat, `Ctrl+,` and `/config` open the menu,
 and the cli main loop handles the chat → config → chat re-entry
 seamlessly.
 
-**The system prompt editor** (`src/ronin/wizard/prompt_editor.py`) is
+**The system prompt editor** (`src/successor/wizard/prompt_editor.py`) is
 a real text editor with the full feature set you'd expect:
 
 - **Pretext-shaped soft word wrap** — per-source-line cache invalidates
@@ -318,7 +327,7 @@ parser" piece:
 - ASCII-only typed input (no UTF-8 multi-byte input)
 - No arrow-key cursor navigation in the input box
 - No bracketed paste in the chat
-- No interrupt during ronin response (Ctrl+C still quits)
+- No interrupt during successor response (Ctrl+C still quits)
 - History recall (Up/Down in input)
 
 When the real key parser lands, all of these get fixed simultaneously.
@@ -330,7 +339,7 @@ For architectural comparison:
 - `codex-reference/` — OpenAI Codex CLI (Rust, ~80 crates, ~595K LOC)
 - `hermes-reference/` — Nous Research Hermes Agent (Python, ~297K LOC)
 - `opencode-reference/` — sst/opencode (TypeScript, ~59K LOC)
-- `hk13/` — the deprecated agent harness Ronin replaces
+- `hk13/` — the deprecated agent harness Successor replaces
 
 ## Validated by user
 

@@ -1,7 +1,7 @@
 # Rendering Superpowers — Read Me First
 
 > If you're about to add `import rich`, `import prompt_toolkit`, `import textual`,
-> or any other "let me just import a TUI library" to Ronin: **read this entire
+> or any other "let me just import a TUI library" to Successor: **read this entire
 > document first**. Then decide whether you still need to. The answer should
 > almost always be no.
 
@@ -9,7 +9,7 @@
 
 ## The One Rule
 
-**`src/ronin/render/diff.py` is the only module in the entire codebase
+**`src/successor/render/diff.py` is the only module in the entire codebase
 allowed to write to stdout.**
 
 Not Rich. Not prompt_toolkit. Not `print()`. Not `sys.stdout.write()`. Not
@@ -19,7 +19,7 @@ The diff layer holds the contract with the terminal. Nothing else gets to
 break it. If you find yourself wanting to write to stdout from outside
 `diff.py`, the answer is: **paint into the Grid via `paint.py` instead**.
 The renderer was designed so that's always possible. Every feature in
-Ronin so far has fit through this hole, and that is not a coincidence.
+Successor so far has fit through this hole, and that is not a coincidence.
 
 ---
 
@@ -32,11 +32,11 @@ state. Every rule was a treaty clause between two libraries that each
 assumed they owned stdout. The visible output looked OK; the architecture
 was a war.
 
-Ronin's design eliminates that war by having one screen owner. Not "fewer
+Successor's design eliminates that war by having one screen owner. Not "fewer
 fights," not "better isolation" — *zero* fights, by construction. The diff
 layer is the only stdout writer, so there is nothing for it to fight with.
 
-This single decision is why Ronin's chat already renders better than every
+This single decision is why Successor's chat already renders better than every
 other agent harness — and it's also why the codebase is small, why resize
 doesn't flicker, why the renderer is testable without a terminal, and why
 every feature is a one-line addition somewhere.
@@ -87,7 +87,7 @@ crash-safe, and immune to library coexistence bugs.
 
 The "prepare once, layout many times with width-keyed cache" pattern from
 Cheng Lou's Pretext maps directly onto terminal rendering. Two places it
-pays off in Ronin today:
+pays off in Successor today:
 
 | Primitive | Cache hit | Cache miss | Speedup |
 |---|---|---|---|
@@ -241,7 +241,7 @@ structures inside `on_tick`, see if you can hoist them into `__init__`.
 
 If you want richer chat formatting, more UI elements, animated widgets,
 or any other "real TUI features" — write a small new pure-function
-primitive in `src/ronin/render/`. Don't reach for a library to do it.
+primitive in `src/successor/render/`. Don't reach for a library to do it.
 
 The renderer is designed to grow in pure-function modules, not by
 stacking opinionated frameworks on top.
@@ -293,7 +293,7 @@ Phase 0 evidence (commits in `git log`):
 | Viewport scaling (Pretext-shaped) | ~250 | braille.py, demos/braille.py | none |
 | OSC 52 clipboard + bracketed paste | ~30 | terminal.py | none |
 | Pause animation + space-to-pause | ~30 | demos/braille.py | none |
-| Full chat interface (`rn chat`) | ~400 | new files | none |
+| Full chat interface (`successor chat`) | ~400 | new files | none |
 | Move ctx bar below input | ~5 | demos/chat.py | none |
 | Custom scrollback navigation | ~250 | demos/chat.py | none |
 
@@ -312,7 +312,7 @@ This is the architecture working. Don't break it.
 - Don't import Rich, prompt_toolkit, Textual, blessed, urwid, or any
   other TUI library as a screen owner. If you need styled segments
   from one of them, call it as a pure function and translate to cells.
-- New visual features go in as new pure functions in `src/ronin/render/`.
+- New visual features go in as new pure functions in `src/successor/render/`.
 - Layout coordinates come from `grid.rows / cols`, never magic numbers.
 - `on_tick` has no side effects. It paints into the grid. That's all.
 - Caching expensive prepares is the pattern. Use single-entry width-

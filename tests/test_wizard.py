@@ -1,4 +1,4 @@
-"""Tests for the rn setup wizard.
+"""Tests for the successor setup wizard.
 
 Three layers of coverage:
 
@@ -27,12 +27,12 @@ from pathlib import Path
 
 import pytest
 
-from ronin.input.keys import Key, KeyEvent
-from ronin.profiles import PROFILE_REGISTRY, get_profile
-from ronin.render.theme import THEME_REGISTRY
-from ronin.snapshot import render_grid_to_plain, wizard_demo_snapshot
-from ronin.wizard.setup import (
-    RoninSetup,
+from successor.input.keys import Key, KeyEvent
+from successor.profiles import PROFILE_REGISTRY, get_profile
+from successor.render.theme import THEME_REGISTRY
+from successor.snapshot import render_grid_to_plain, wizard_demo_snapshot
+from successor.wizard.setup import (
+    SuccessorSetup,
     Step,
     _WizardState,
     _DENSITY_OPTIONS,
@@ -94,16 +94,16 @@ def test_wizard_state_empty_name_falls_back_to_untitled() -> None:
 
 
 def test_is_valid_name_accepts_alphanumeric(temp_config_dir: Path) -> None:
-    wizard = RoninSetup()
-    assert wizard._is_valid_name("ronin")
-    assert wizard._is_valid_name("ronin-dev")
-    assert wizard._is_valid_name("ronin_dev")
-    assert wizard._is_valid_name("ronin123")
+    wizard = SuccessorSetup()
+    assert wizard._is_valid_name("successor")
+    assert wizard._is_valid_name("successor-dev")
+    assert wizard._is_valid_name("successor_dev")
+    assert wizard._is_valid_name("successor123")
     assert wizard._is_valid_name("123-x")
 
 
 def test_is_valid_name_rejects_invalid(temp_config_dir: Path) -> None:
-    wizard = RoninSetup()
+    wizard = SuccessorSetup()
     assert not wizard._is_valid_name("")
     assert not wizard._is_valid_name("has space")
     assert not wizard._is_valid_name("has/slash")
@@ -115,7 +115,7 @@ def test_is_valid_name_rejects_invalid(temp_config_dir: Path) -> None:
 
 
 def test_advance_step_walks_enum_order(temp_config_dir: Path) -> None:
-    wizard = RoninSetup()
+    wizard = SuccessorSetup()
     assert wizard.current_step == Step.WELCOME
     wizard._advance_step()
     assert wizard.current_step == Step.NAME
@@ -126,7 +126,7 @@ def test_advance_step_walks_enum_order(temp_config_dir: Path) -> None:
 
 
 def test_retreat_step_walks_backward(temp_config_dir: Path) -> None:
-    wizard = RoninSetup()
+    wizard = SuccessorSetup()
     wizard._enter_step(Step.DENSITY)
     wizard._retreat_step()
     assert wizard.current_step == Step.MODE
@@ -135,7 +135,7 @@ def test_retreat_step_walks_backward(temp_config_dir: Path) -> None:
 
 
 def test_retreat_at_welcome_is_noop(temp_config_dir: Path) -> None:
-    wizard = RoninSetup()
+    wizard = SuccessorSetup()
     assert wizard.current_step == Step.WELCOME
     wizard._retreat_step()
     assert wizard.current_step == Step.WELCOME
@@ -143,7 +143,7 @@ def test_retreat_at_welcome_is_noop(temp_config_dir: Path) -> None:
 
 def test_advance_at_review_triggers_save(temp_config_dir: Path) -> None:
     """REVIEW + advance → save flow runs (with valid name set first)."""
-    wizard = RoninSetup()
+    wizard = SuccessorSetup()
     wizard.state.name = "test-save"
     wizard._enter_step(Step.REVIEW)
     wizard._advance_step()  # triggers _save_and_finish
@@ -155,7 +155,7 @@ def test_advance_at_review_triggers_save(temp_config_dir: Path) -> None:
 
 
 def test_handle_name_accepts_letters(temp_config_dir: Path) -> None:
-    wizard = RoninSetup()
+    wizard = SuccessorSetup()
     wizard._enter_step(Step.NAME)
     wizard._handle_name(KeyEvent(char="r"))
     wizard._handle_name(KeyEvent(char="o"))
@@ -164,7 +164,7 @@ def test_handle_name_accepts_letters(temp_config_dir: Path) -> None:
 
 
 def test_handle_name_rejects_space(temp_config_dir: Path) -> None:
-    wizard = RoninSetup()
+    wizard = SuccessorSetup()
     wizard._enter_step(Step.NAME)
     wizard._handle_name(KeyEvent(char="a"))
     wizard._handle_name(KeyEvent(char=" "))
@@ -173,17 +173,17 @@ def test_handle_name_rejects_space(temp_config_dir: Path) -> None:
 
 
 def test_handle_name_backspace(temp_config_dir: Path) -> None:
-    wizard = RoninSetup()
+    wizard = SuccessorSetup()
     wizard._enter_step(Step.NAME)
-    for ch in "ronin":
+    for ch in "successor":
         wizard._handle_name(KeyEvent(char=ch))
     wizard._handle_name(KeyEvent(key=Key.BACKSPACE))
     wizard._handle_name(KeyEvent(key=Key.BACKSPACE))
-    assert wizard.state.name == "ron"
+    assert wizard.state.name == "success"
 
 
 def test_handle_name_max_length(temp_config_dir: Path) -> None:
-    wizard = RoninSetup()
+    wizard = SuccessorSetup()
     wizard._enter_step(Step.NAME)
     for _ in range(50):
         wizard._handle_name(KeyEvent(char="x"))
@@ -192,7 +192,7 @@ def test_handle_name_max_length(temp_config_dir: Path) -> None:
 
 
 def test_handle_name_enter_with_valid_advances(temp_config_dir: Path) -> None:
-    wizard = RoninSetup()
+    wizard = SuccessorSetup()
     wizard._enter_step(Step.NAME)
     for ch in "myprofile":
         wizard._handle_name(KeyEvent(char=ch))
@@ -202,7 +202,7 @@ def test_handle_name_enter_with_valid_advances(temp_config_dir: Path) -> None:
 
 def test_handle_name_enter_with_empty_glows(temp_config_dir: Path) -> None:
     """Empty name on Enter triggers a validation glow, doesn't advance."""
-    wizard = RoninSetup()
+    wizard = SuccessorSetup()
     wizard._enter_step(Step.NAME)
     wizard._handle_name(KeyEvent(key=Key.ENTER))
     assert wizard.current_step == Step.NAME
@@ -216,7 +216,7 @@ def test_handle_name_enter_with_empty_glows(temp_config_dir: Path) -> None:
 def test_handle_theme_cycles_with_arrows(temp_config_dir: Path) -> None:
     """Up/Down arrows cycle through registered themes."""
     THEME_REGISTRY.reload()
-    wizard = RoninSetup()
+    wizard = SuccessorSetup()
     wizard._enter_step(Step.THEME)
     initial = wizard.state.theme_name
     wizard._handle_theme(KeyEvent(key=Key.DOWN))
@@ -249,7 +249,7 @@ def test_handle_theme_arrow_syncs_preview(temp_config_dir: Path) -> None:
     (user_themes / "test_alt.json").write_text(json.dumps(other_theme))
     THEME_REGISTRY.reload()
 
-    wizard = RoninSetup()
+    wizard = SuccessorSetup()
     wizard._enter_step(Step.THEME)
     initial_theme_name = wizard._preview_chat.theme.name
     # Walk through themes via DOWN key — eventually we'll land on a different one
@@ -263,7 +263,7 @@ def test_handle_theme_arrow_syncs_preview(temp_config_dir: Path) -> None:
 
 
 def test_handle_mode_toggles(temp_config_dir: Path) -> None:
-    wizard = RoninSetup()
+    wizard = SuccessorSetup()
     wizard._enter_step(Step.MODE)
     initial = wizard.state.display_mode
     wizard._handle_mode(KeyEvent(key=Key.UP))
@@ -273,7 +273,7 @@ def test_handle_mode_toggles(temp_config_dir: Path) -> None:
 
 
 def test_handle_density_cycles(temp_config_dir: Path) -> None:
-    wizard = RoninSetup()
+    wizard = SuccessorSetup()
     wizard._enter_step(Step.DENSITY)
     wizard._handle_density(KeyEvent(key=Key.DOWN))
     assert wizard.state.density == _DENSITY_OPTIONS[2]  # normal → spacious
@@ -282,7 +282,7 @@ def test_handle_density_cycles(temp_config_dir: Path) -> None:
 
 
 def test_handle_intro_toggles(temp_config_dir: Path) -> None:
-    wizard = RoninSetup()
+    wizard = SuccessorSetup()
     wizard._enter_step(Step.INTRO)
     assert wizard.state.intro_animation is None
     wizard._handle_intro(KeyEvent(key=Key.DOWN))
@@ -299,7 +299,7 @@ def test_full_save_flow_writes_json_file(temp_config_dir: Path) -> None:
     THEME_REGISTRY.reload()
     PROFILE_REGISTRY.reload()
 
-    wizard = RoninSetup()
+    wizard = SuccessorSetup()
 
     # Welcome → name
     wizard._handle_welcome(KeyEvent(key=Key.RIGHT))
@@ -353,7 +353,7 @@ def test_full_save_flow_writes_json_file(temp_config_dir: Path) -> None:
 
 def test_save_with_empty_name_rejects(temp_config_dir: Path) -> None:
     """Trying to save with an empty name triggers validation glow + bounce to NAME."""
-    wizard = RoninSetup()
+    wizard = SuccessorSetup()
     wizard._enter_step(Step.REVIEW)
     wizard._handle_review(KeyEvent(key=Key.ENTER))
     assert wizard.current_step == Step.NAME
@@ -363,7 +363,7 @@ def test_save_with_empty_name_rejects(temp_config_dir: Path) -> None:
 
 def test_esc_cancels_wizard(temp_config_dir: Path) -> None:
     """Esc from any non-saved step sets should_launch_chat=False and stops."""
-    wizard = RoninSetup()
+    wizard = SuccessorSetup()
     wizard._enter_step(Step.THEME)
     wizard._handle_key(KeyEvent(key=Key.ESC))
     assert wizard.should_launch_chat is False
@@ -376,7 +376,7 @@ def test_esc_cancels_wizard(temp_config_dir: Path) -> None:
 def test_snapshot_welcome_renders(temp_config_dir: Path) -> None:
     g = wizard_demo_snapshot(rows=30, cols=100, step="welcome")
     plain = render_grid_to_plain(g)
-    assert "ronin · setup" in plain
+    assert "successor · setup" in plain
     assert "welcome" in plain
     assert "step 1 of 7" in plain
 
@@ -448,11 +448,11 @@ def test_snapshot_sidebar_shows_progress_marks(temp_config_dir: Path) -> None:
 def test_snapshot_creating_pill_in_title_bar(temp_config_dir: Path) -> None:
     """When name is set, the title bar shows a 'creating: <name>' pill."""
     g = wizard_demo_snapshot(
-        rows=20, cols=100, step="theme", name="ronin-test",
+        rows=20, cols=100, step="theme", name="successor-test",
     )
     plain = render_grid_to_plain(g)
     assert "creating:" in plain
-    assert "ronin-test" in plain
+    assert "successor-test" in plain
 
 
 def test_snapshot_too_small_terminal(temp_config_dir: Path) -> None:
@@ -468,7 +468,7 @@ def test_snapshot_dark_and_light_differ(temp_config_dir: Path) -> None:
     Catches the case where the wizard's chrome doesn't honor the
     user's selected display mode.
     """
-    from ronin.snapshot import render_grid_to_ansi
+    from successor.snapshot import render_grid_to_ansi
 
     dark = wizard_demo_snapshot(
         rows=30, cols=100, step="mode", display_mode="dark",
@@ -481,7 +481,7 @@ def test_snapshot_dark_and_light_differ(temp_config_dir: Path) -> None:
 
 def test_snapshot_density_changes_preview(temp_config_dir: Path) -> None:
     """Different densities produce visibly different previews."""
-    from ronin.snapshot import render_grid_to_ansi
+    from successor.snapshot import render_grid_to_ansi
 
     compact = wizard_demo_snapshot(
         rows=30, cols=110, step="density", density="compact",

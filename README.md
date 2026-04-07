@@ -1,4 +1,4 @@
-# Ronin
+# Successor
 
 An omni-agent harness for locally-run mid-grade models, focused on local
 tools, configurability, and a terminal renderer that doesn't fight you.
@@ -13,12 +13,12 @@ expensive class of issue to retrofit.
 ## Layout
 
 ```
-ronin/
+successor/
 ├── docs/
 │   └── rendering-plan.md       # The five-layer architecture
 ├── assets/
 │   └── nusamurai/pos-th30/     # Braille keyframes for the demo
-├── src/ronin/
+├── src/successor/
 │   └── render/
 │       ├── measure.py          # Layer 1 — grapheme width
 │       ├── cells.py            # Cell, Style, Grid
@@ -28,32 +28,32 @@ ronin/
 │       ├── app.py              # Frame loop with input + resize
 │       └── braille.py          # Braille codec + Bayer interp
 └── examples/
-    └── demo_ronin.py           # Full-screen braille animation
+    └── demo_successor.py           # Full-screen braille animation
 ```
 
 ## Install
 
-The project is named **Ronin** but the installed binary is **`rn`**
-(the `ronin` name is heavily contested in the open-source ecosystem
-— Node CLI framework, npm `@ronin/cli`, ronin-rb, axieinfinity
+The project is named **Successor** but the installed binary is **`successor`**
+(the `successor` name is heavily contested in the open-source ecosystem
+— Node CLI framework, npm `@successor/cli`, successor-rb, axieinfinity
 blockchain, etc).
 
 ```
 pip install -e .
 ```
 
-This registers `rn` in `~/.local/bin` so it's available from anywhere.
+This registers `successor` in `~/.local/bin` so it's available from anywhere.
 
 ## Use
 
 ```
-rn               show help
-rn -V            version
-rn demo          braille animation
-rn show <name>   render a single static braille frame
-rn frames        list available frames with dimensions
-rn doctor        terminal capabilities + renderer info
-rn bench         renderer benchmark (no TTY required)
+successor               show help
+successor -V            version
+successor demo          braille animation
+successor show <name>   render a single static braille frame
+successor frames        list available frames with dimensions
+successor doctor        terminal capabilities + renderer info
+successor bench         renderer benchmark (no TTY required)
 ```
 
 Press **q** or **Ctrl+C** to exit any TUI command. Drag the terminal

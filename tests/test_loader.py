@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from ronin.loader import Registry, builtin_root, config_dir
+from successor.loader import Registry, builtin_root, config_dir
 
 
 # ─── Tiny test fixture type ───
@@ -60,15 +60,15 @@ def _make_registry() -> Registry[_DummyItem]:
 
 
 def test_config_dir_honors_env_var(temp_config_dir: Path) -> None:
-    """config_dir() must return the path set by RONIN_CONFIG_DIR."""
+    """config_dir() must return the path set by SUCCESSOR_CONFIG_DIR."""
     assert config_dir() == temp_config_dir
 
 
 def test_builtin_root_points_at_package() -> None:
-    """builtin_root() lives inside the installed ronin package."""
+    """builtin_root() lives inside the installed successor package."""
     root = builtin_root()
     assert root.name == "builtin"
-    assert root.parent.name == "ronin"
+    assert root.parent.name == "successor"
 
 
 # ─── load() — basic walking ───
@@ -158,7 +158,7 @@ def test_load_skips_broken_file_with_warning(
 
     # The warning landed on stderr.
     captured = capsys.readouterr()
-    assert "ronin:" in captured.err
+    assert "successor:" in captured.err
     assert "broken.json" in captured.err
 
 
@@ -230,7 +230,7 @@ def test_user_overrides_builtin_on_name_collision(
     )
 
     # Patch builtin_root for this test only.
-    import ronin.loader as loader_mod
+    import successor.loader as loader_mod
     monkeypatch.setattr(loader_mod, "builtin_root", lambda: builtin_dir)
 
     reg = _make_registry()
@@ -254,7 +254,7 @@ def test_builtin_wins_when_no_user_file(
         json.dumps({"name": "core", "payload": "from builtin"})
     )
 
-    import ronin.loader as loader_mod
+    import successor.loader as loader_mod
     monkeypatch.setattr(loader_mod, "builtin_root", lambda: builtin_dir)
 
     reg = _make_registry()

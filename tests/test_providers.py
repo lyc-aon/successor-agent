@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import pytest
 
-from ronin.providers import (
+from successor.providers import (
     ChatProvider,
     LlamaCppClient,
     OpenAICompatClient,

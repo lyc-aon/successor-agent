@@ -1,8 +1,8 @@
-"""Tests for the RoninChat ↔ Profile integration.
+"""Tests for the SuccessorChat ↔ Profile integration.
 
 Covers:
-  - RoninChat() with no args picks up the active profile from config
-  - RoninChat(profile=...) honors the explicit profile
+  - SuccessorChat() with no args picks up the active profile from config
+  - SuccessorChat(profile=...) honors the explicit profile
   - Saved theme/mode/density override profile defaults (user wins)
   - _set_profile updates theme, mode, density, system_prompt, provider
   - _set_profile persists active_profile to chat.json
@@ -18,13 +18,13 @@ from pathlib import Path
 
 import pytest
 
-from ronin.profiles import (
+from successor.profiles import (
     PROFILE_REGISTRY,
     Profile,
     get_profile,
 )
-from ronin.render.theme import THEME_REGISTRY
-from ronin.snapshot import (
+from successor.render.theme import THEME_REGISTRY
+from successor.snapshot import (
     chat_demo_snapshot,
     render_grid_to_plain,
 )
@@ -34,25 +34,25 @@ from ronin.snapshot import (
 
 
 def test_chat_uses_active_profile_when_no_arg(temp_config_dir: Path) -> None:
-    """RoninChat() with no args reads the active profile from chat.json."""
-    from ronin.demos.chat import RoninChat
+    """SuccessorChat() with no args reads the active profile from chat.json."""
+    from successor.demos.chat import SuccessorChat
 
     (temp_config_dir / "chat.json").write_text(json.dumps({
         "version": 2,
-        "active_profile": "ronin-dev",
+        "active_profile": "successor-dev",
     }))
     PROFILE_REGISTRY.reload()
     THEME_REGISTRY.reload()
 
-    chat = RoninChat()
-    assert chat.profile.name == "ronin-dev"
+    chat = SuccessorChat()
+    assert chat.profile.name == "successor-dev"
     # The system prompt comes from the profile, not from a constant
-    assert "ronin-dev" in chat.system_prompt or "Ronin" in chat.system_prompt
+    assert "successor-dev" in chat.system_prompt or "Successor" in chat.system_prompt
 
 
 def test_chat_uses_explicit_profile_arg(temp_config_dir: Path) -> None:
-    """RoninChat(profile=...) overrides the config-resolved profile."""
-    from ronin.demos.chat import RoninChat
+    """SuccessorChat(profile=...) overrides the config-resolved profile."""
+    from successor.demos.chat import SuccessorChat
 
     PROFILE_REGISTRY.reload()
     THEME_REGISTRY.reload()
@@ -65,7 +65,7 @@ def test_chat_uses_explicit_profile_arg(temp_config_dir: Path) -> None:
         density="compact",
         system_prompt="custom prompt",
     )
-    chat = RoninChat(profile=custom)
+    chat = SuccessorChat(profile=custom)
     assert chat.profile.name == "custom-test"
     assert chat.system_prompt == "custom prompt"
     assert chat.display_mode == "light"
@@ -80,7 +80,7 @@ def test_saved_config_overrides_profile_defaults(temp_config_dir: Path) -> None:
     On restart, the saved values win — the user's last choice is what
     they expect to see.
     """
-    from ronin.demos.chat import RoninChat
+    from successor.demos.chat import SuccessorChat
 
     # Drop a forge theme into the user dir so it's available
     user_themes = temp_config_dir / "themes"
@@ -113,7 +113,7 @@ def test_saved_config_overrides_profile_defaults(temp_config_dir: Path) -> None:
     PROFILE_REGISTRY.reload()
     THEME_REGISTRY.reload()
 
-    chat = RoninChat()
+    chat = SuccessorChat()
     assert chat.profile.name == "default"  # profile is still default
     assert chat.theme.name == "forge"  # but the user's manual theme wins
     assert chat.display_mode == "light"  # and their mode
@@ -122,7 +122,7 @@ def test_saved_config_overrides_profile_defaults(temp_config_dir: Path) -> None:
 
 def test_profile_field_used_when_no_saved_value(temp_config_dir: Path) -> None:
     """When chat.json has no theme/mode/density, the profile's defaults apply."""
-    from ronin.demos.chat import RoninChat
+    from successor.demos.chat import SuccessorChat
 
     PROFILE_REGISTRY.reload()
     THEME_REGISTRY.reload()
@@ -133,7 +133,7 @@ def test_profile_field_used_when_no_saved_value(temp_config_dir: Path) -> None:
         display_mode="light",
         density="compact",
     )
-    chat = RoninChat(profile=custom)
+    chat = SuccessorChat(profile=custom)
     # No saved values → profile defaults apply
     assert chat.theme.name == "steel"
     assert chat.display_mode == "light"
@@ -145,12 +145,12 @@ def test_profile_field_used_when_no_saved_value(temp_config_dir: Path) -> None:
 
 def test_set_profile_swaps_everything(temp_config_dir: Path) -> None:
     """Switching profile updates theme, mode, density, system_prompt."""
-    from ronin.demos.chat import RoninChat
+    from successor.demos.chat import SuccessorChat
 
     PROFILE_REGISTRY.reload()
     THEME_REGISTRY.reload()
 
-    chat = RoninChat()
+    chat = SuccessorChat()
     initial_name = chat.profile.name
     initial_prompt = chat.system_prompt
 
@@ -170,29 +170,29 @@ def test_set_profile_swaps_everything(temp_config_dir: Path) -> None:
 
 def test_set_profile_persists_active(temp_config_dir: Path) -> None:
     """_set_profile writes the new active_profile to chat.json."""
-    from ronin.config import load_chat_config
-    from ronin.demos.chat import RoninChat
+    from successor.config import load_chat_config
+    from successor.demos.chat import SuccessorChat
 
     PROFILE_REGISTRY.reload()
     THEME_REGISTRY.reload()
 
-    chat = RoninChat()
-    target = get_profile("ronin-dev")
+    chat = SuccessorChat()
+    target = get_profile("successor-dev")
     assert target is not None
     chat._set_profile(target)
 
     cfg = load_chat_config()
-    assert cfg["active_profile"] == "ronin-dev"
+    assert cfg["active_profile"] == "successor-dev"
 
 
 def test_set_profile_noop_on_same_name(temp_config_dir: Path) -> None:
     """Switching to the currently-active profile is a no-op."""
-    from ronin.demos.chat import RoninChat
+    from successor.demos.chat import SuccessorChat
 
     PROFILE_REGISTRY.reload()
     THEME_REGISTRY.reload()
 
-    chat = RoninChat()
+    chat = SuccessorChat()
     initial_messages = len(chat.messages)
     chat._set_profile(chat.profile)
     # No synthetic announcement message added
@@ -201,14 +201,14 @@ def test_set_profile_noop_on_same_name(temp_config_dir: Path) -> None:
 
 def test_set_profile_appends_synthetic_message(temp_config_dir: Path) -> None:
     """Switching profile drops a breadcrumb message into the chat."""
-    from ronin.demos.chat import RoninChat
+    from successor.demos.chat import SuccessorChat
 
     PROFILE_REGISTRY.reload()
     THEME_REGISTRY.reload()
 
-    chat = RoninChat()
+    chat = SuccessorChat()
     initial_count = len(chat.messages)
-    target = get_profile("ronin-dev")
+    target = get_profile("successor-dev")
     if target.name == chat.profile.name:
         # Make sure we have a real swap
         target = get_profile("default") or target
@@ -222,12 +222,12 @@ def test_set_profile_appends_synthetic_message(temp_config_dir: Path) -> None:
 
 def test_cycle_profile_walks_registry(temp_config_dir: Path) -> None:
     """_cycle_profile advances to the next profile in registry order."""
-    from ronin.demos.chat import RoninChat
+    from successor.demos.chat import SuccessorChat
 
     PROFILE_REGISTRY.reload()
     THEME_REGISTRY.reload()
 
-    chat = RoninChat()
+    chat = SuccessorChat()
     profiles = PROFILE_REGISTRY.all()
     if len(profiles) < 2:
         return  # only one profile; cycling is trivially correct

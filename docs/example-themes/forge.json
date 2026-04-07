@@ -1,7 +1,7 @@
 {
   "name": "forge",
   "icon": "▲",
-  "description": "warm samurai red — blacksmith-by-the-fire, hand-tuned hex palette",
+  "description": "warm red — blacksmith-by-the-fire, hand-tuned hex palette",
   "dark": {
     "bg":          "#10070A",
     "bg_input":    "#070204",

@@ -1,7 +1,7 @@
 """Tests for config.py — load/save and v1 → v2 migration.
 
 The migration is the load-bearing part of this module: every existing
-Ronin user has a v1 config from before the theme refactor, and we need
+Successor user has a v1 config from before the theme refactor, and we need
 their settings to keep working without manual edits.
 
 Tests use the temp_config_dir fixture for hermetic isolation, and use
@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ronin.config import (
+from successor.config import (
     CURRENT_SCHEMA_VERSION,
     load_chat_config,
     migrate_config,
@@ -50,7 +50,7 @@ def test_save_then_load_roundtrip(temp_config_dir: Path) -> None:
 
 
 def test_save_creates_config_dir(temp_config_dir: Path) -> None:
-    """Saving when ~/.config/ronin doesn't exist creates it."""
+    """Saving when ~/.config/successor doesn't exist creates it."""
     # The fixture's temp dir already exists; remove its contents.
     for child in temp_config_dir.iterdir():
         if child.is_dir():

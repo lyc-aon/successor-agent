@@ -10,14 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from ronin.skills import (
+from successor.skills import (
     SKILL_REGISTRY,
     Skill,
     all_skills,
     get_skill,
     parse_skill_file,
 )
-from ronin.skills.skill import _split_frontmatter
+from successor.skills.skill import _split_frontmatter
 
 
 # ─── _split_frontmatter (unit-level test of the parser internals) ───
@@ -166,14 +166,14 @@ def test_source_path_is_absolute(tmp_path: Path) -> None:
 # ─── SKILL_REGISTRY ───
 
 
-def test_builtin_ronin_rendering_skill_loads(temp_config_dir: Path) -> None:
-    """The bundled ronin-rendering-pattern skill is in the registry."""
+def test_builtin_successor_rendering_skill_loads(temp_config_dir: Path) -> None:
+    """The bundled successor-rendering-pattern skill is in the registry."""
     SKILL_REGISTRY.reload()
-    skill = get_skill("ronin-rendering-pattern")
+    skill = get_skill("successor-rendering-pattern")
     assert skill is not None
-    assert skill.name == "ronin-rendering-pattern"
+    assert skill.name == "successor-rendering-pattern"
     assert "diff.py" in skill.body  # mentions the One Rule
-    assert SKILL_REGISTRY.source_of("ronin-rendering-pattern") == "builtin"
+    assert SKILL_REGISTRY.source_of("successor-rendering-pattern") == "builtin"
 
 
 def test_user_skill_loads(temp_config_dir: Path) -> None:
@@ -197,20 +197,20 @@ def test_user_skill_loads(temp_config_dir: Path) -> None:
 def test_user_skill_overrides_builtin(temp_config_dir: Path) -> None:
     user_dir = temp_config_dir / "skills"
     user_dir.mkdir()
-    (user_dir / "ronin-rendering-pattern.md").write_text(
+    (user_dir / "successor-rendering-pattern.md").write_text(
         "---\n"
-        "name: ronin-rendering-pattern\n"
+        "name: successor-rendering-pattern\n"
         "description: user override\n"
         "---\n"
         "OVERRIDDEN BODY\n"
     )
 
     SKILL_REGISTRY.reload()
-    skill = get_skill("ronin-rendering-pattern")
+    skill = get_skill("successor-rendering-pattern")
     assert skill is not None
     assert skill.description == "user override"
     assert "OVERRIDDEN BODY" in skill.body
-    assert SKILL_REGISTRY.source_of("ronin-rendering-pattern") == "user"
+    assert SKILL_REGISTRY.source_of("successor-rendering-pattern") == "user"
 
 
 def test_broken_user_skill_doesnt_block_builtin(
@@ -228,7 +228,7 @@ def test_broken_user_skill_doesnt_block_builtin(
 
     SKILL_REGISTRY.reload()
     # The builtin still loaded
-    assert get_skill("ronin-rendering-pattern") is not None
+    assert get_skill("successor-rendering-pattern") is not None
     # The broken file was skipped with a warning
     assert get_skill("broken") is None
     captured = capsys.readouterr()
@@ -254,4 +254,4 @@ def test_all_skills_returns_loaded(temp_config_dir: Path) -> None:
     skills = all_skills()
     assert len(skills) >= 1  # at least the builtin
     names = [s.name for s in skills]
-    assert "ronin-rendering-pattern" in names
+    assert "successor-rendering-pattern" in names

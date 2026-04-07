@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from ronin.render.theme import (
+from successor.render.theme import (
     THEME_REGISTRY,
     Theme,
     ThemeVariant,

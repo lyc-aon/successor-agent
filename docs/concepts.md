@@ -1,6 +1,6 @@
 # Implementation Concepts — What Our Renderer Enables
 
-This document is the running list of features and behaviors that Ronin's
+This document is the running list of features and behaviors that Successor's
 rendering architecture makes possible. None of these are "blocked by the
 renderer" — they're all small additive changes to pure-function modules.
 Some are flashy, some are foundational, all of them are doable without
@@ -59,7 +59,7 @@ Press again to collapse.
 
 Slash command `/edit` reopens the last user message in the input area
 with its content prefilled. Edit and resubmit → the old message is
-replaced in `self.messages` (not duplicated) and ronin re-responds.
+replaced in `self.messages` (not duplicated) and successor re-responds.
 
 - New state: `self.editing_index: int | None`
 - New on_key handling for the `/edit` command
@@ -68,10 +68,10 @@ replaced in `self.messages` (not duplicated) and ronin re-responds.
 
 ### Strikethrough retracted content — `XS, U`
 
-When ronin says something like "actually, that's wrong, the answer is..."
+When successor says something like "actually, that's wrong, the answer is..."
 the renderer detects the retraction phrase and renders the wrong portion
 with `ATTR_STRIKE` styling. Optional, opt-in via a slash command on
-ronin's behalf.
+successor's behalf.
 
 - New paint rule in `_build_message_lines`: if a message contains a
   retraction marker, slice the body and apply different styles to the
@@ -164,7 +164,7 @@ harnesses can't highlight existing committed text at all.
 
 ### Section reveal animations — `XS, V`
 
-When a long ronin response commits, instead of dumping the whole thing
+When a long successor response commits, instead of dumping the whole thing
 at once, the message reveals one paragraph at a time with a 100ms
 delay between paragraphs. Each paragraph fades in via the same lerp
 machinery the message-level fade uses, but at sub-message granularity.
@@ -458,7 +458,7 @@ Things that are possible but speculative.
 
 ### Two-user collaborative session over IPC — `L, U`
 
-Two users on the same machine attach to the same `RoninChat` instance
+Two users on the same machine attach to the same `SuccessorChat` instance
 via Unix socket. Both see the same messages, both can scroll
 independently because each maintains their own `scroll_offset`. Like
 Google Docs collab but in the terminal.

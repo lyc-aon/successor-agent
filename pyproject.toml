@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ronin"
+name = "successor"
 version = "0.0.1"
-description = "Omni-agent harness for locally-run mid-grade models"
+description = "Successor Agent — omni-agent harness for locally-run mid-grade models"
 requires-python = ">=3.11"
 authors = [{ name = "lycaon" }]
 dependencies = []
@@ -14,14 +14,15 @@ dependencies = []
 dev = ["pytest>=8"]
 
 [project.scripts]
-# Project is "Ronin" but the binary is `rn` to avoid the very crowded
-# `ronin` namespace (Node CLI framework, npm @ronin/cli, ronin-rb,
-# axieinfinity blockchain, hundredrabbits graphics terminal, etc).
-# Convention: ripgrep → rg, fd-find → fd, bat-cat → bat.
-rn = "ronin.cli:main"
+# `successor` is the canonical command — typing the brand reinforces it
+# in shell history, screencasts, and muscle memory. `sx` is a 2-letter
+# alias for daily ergonomics (matches the kubectl/k or git/g pattern
+# of long-form + short alias).
+successor = "successor.cli:main"
+sx = "successor.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-"ronin.builtin" = ["themes/*.json", "profiles/*.json", "skills/*.md"]
+"successor.builtin" = ["themes/*.json", "profiles/*.json", "skills/*.md"]
