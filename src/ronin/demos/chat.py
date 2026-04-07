@@ -75,19 +75,22 @@ from ..render.cells import (
 from ..render.paint import fill_region, paint_text
 from ..render.terminal import Terminal
 from ..render.text import PreparedText, ease_out_cubic, hard_wrap, lerp_rgb
+from ..render.theme import (
+    DARK_THEME,
+    LIGHT_THEME,
+    THEMES,
+    Theme,
+    blend_themes,
+    find_theme,
+    next_theme,
+)
 
 
-# ─── Palette ───
-
-INK_DEEP = 0x10070A     # main background
-INK_DEEPER = 0x070204   # input area background (slightly darker)
-INK_FOOTER = 0x1A0A0E   # static footer background (slightly tinted)
-INK_BLOOD = 0xC1272D    # primary ronin red
-INK_EMBER = 0xFF6347    # warmer accent
-INK_BONE = 0xE6D9B8     # off-white text
-INK_DUST = 0x6B5A4A     # dim chrome / labels
-INK_DIM = 0x3A1418      # very dim red (fade-in start, bar empty)
-INK_GOLD = 0xFFCC33     # warning when context bar is near-full
+# Theme transition duration — how long it takes to lerp between themes
+# when the user presses Ctrl+T or runs /theme. The renderer doesn't
+# care about animation cost; this is just a visual touch that shows
+# the entire UI smoothly fading from one palette to another.
+THEME_TRANSITION_S = 0.4
 
 
 # ─── Tunables ───
@@ -108,6 +111,10 @@ INPUT_MAX_ROWS = 8
 CONTEXT_MAX = 262144
 
 SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+# Theme widget label format. The widget is rendered in the top-right
+# of the title row as a small "pill" with the theme's icon and name.
+THEME_WIDGET_PAD = " "
 
 
 # ─── System prompt ───
@@ -163,6 +170,7 @@ class RoninChat(App):
         self,
         *,
         client: LlamaCppClient | None = None,
+        theme: Theme = DARK_THEME,
     ) -> None:
         super().__init__(
             target_fps=30.0,
@@ -170,6 +178,13 @@ class RoninChat(App):
             terminal=Terminal(bracketed_paste=True),
         )
         self.client = client if client is not None else LlamaCppClient()
+
+        # ─── Theme state ───
+        # `theme` is the committed target. `_theme_from` and `_theme_t0`
+        # drive a smooth lerp transition when the user switches themes.
+        self.theme: Theme = theme
+        self._theme_from: Theme | None = None
+        self._theme_t0: float = 0.0
 
         # Probe the server immediately so we can show a useful greeting.
         server_up = self.client.health()
@@ -228,6 +243,11 @@ class RoninChat(App):
             return
         if event.key == Key.PASTE_END:
             self._in_paste = False
+            return
+
+        # ─── Theme cycle (always available, even mid-stream) ───
+        if event.is_ctrl and event.char == "t":
+            self._cycle_theme()
             return
 
         # ─── Scroll keys (always available, even mid-stream) ───
@@ -335,6 +355,36 @@ class RoninChat(App):
     def _page_size(self) -> int:
         return max(1, self._last_chat_h - 1)
 
+    # ─── Theme management ───
+
+    def _set_theme(self, new_theme: Theme) -> None:
+        """Switch to a new theme with a smooth lerp transition."""
+        if new_theme is self.theme:
+            return
+        self._theme_from = self._current_theme()
+        self.theme = new_theme
+        self._theme_t0 = time.monotonic()
+
+    def _cycle_theme(self) -> None:
+        self._set_theme(next_theme(self.theme))
+
+    def _current_theme(self) -> Theme:
+        """The theme to use for THIS frame's render.
+
+        If a transition is in progress, return a blended theme that's
+        partway between `_theme_from` and `self.theme`. When the
+        transition completes, drop the source and return `self.theme`
+        directly.
+        """
+        if self._theme_from is None:
+            return self.theme
+        elapsed = time.monotonic() - self._theme_t0
+        if elapsed >= THEME_TRANSITION_S:
+            self._theme_from = None
+            return self.theme
+        t = ease_out_cubic(elapsed / THEME_TRANSITION_S)
+        return blend_themes(self._theme_from, self.theme, t)
+
     # ─── Submission ───
 
     def _submit(self) -> None:
@@ -343,6 +393,38 @@ class RoninChat(App):
 
         if text in ("/quit", "/exit", "/q"):
             self.stop()
+            return
+
+        # /theme       — show current theme and available options
+        # /theme dark  — switch to dark theme
+        # /theme light — switch to light theme
+        # /theme cycle — cycle to next theme
+        if text.startswith("/theme"):
+            parts = text.split(maxsplit=1)
+            if len(parts) == 1:
+                names = ", ".join(t.name for t in THEMES)
+                hint = (
+                    f"current theme: {self.theme.name} {self.theme.icon}. "
+                    f"Available: {names}. Use /theme <name> or Ctrl+T to cycle."
+                )
+                self.messages.append(_Message("ronin", hint, synthetic=True))
+                return
+            arg = parts[1].strip().lower()
+            if arg == "cycle":
+                self._cycle_theme()
+                return
+            target = find_theme(arg)
+            if target is None:
+                self.messages.append(
+                    _Message(
+                        "ronin",
+                        f"no theme named '{arg}'. try one of: "
+                        f"{', '.join(t.name for t in THEMES)}.",
+                        synthetic=True,
+                    )
+                )
+                return
+            self._set_theme(target)
             return
 
         # Add the user's message and start a stream.
@@ -417,9 +499,15 @@ class RoninChat(App):
         # Drain any pending llama.cpp stream events.
         self._pump_stream()
 
+        # Resolve the active theme for THIS frame. If a theme transition
+        # is in progress this returns a blended palette; otherwise it's
+        # just self.theme. Every painter takes `theme` as a parameter so
+        # the same code paints in any palette.
+        theme = self._current_theme()
+
         rows, cols = grid.rows, grid.cols
         if rows < 3 or cols < 4:
-            fill_region(grid, 0, 0, cols, rows, style=Style(bg=INK_DEEP))
+            fill_region(grid, 0, 0, cols, rows, style=Style(bg=theme.bg))
             return
 
         # Layout — bottom-up:
@@ -436,43 +524,62 @@ class RoninChat(App):
         chat_bottom = max(chat_top, input_y)
 
         # ─── Background ───
-        fill_region(grid, 0, 0, cols, rows, style=Style(bg=INK_DEEP))
+        fill_region(grid, 0, 0, cols, rows, style=Style(bg=theme.bg))
 
         # ─── Title row ───
         title = " ronin · chat "
-        title_style = Style(fg=INK_BONE, bg=INK_DEEP, attrs=ATTR_BOLD)
+        title_style = Style(fg=theme.fg, bg=theme.bg, attrs=ATTR_BOLD)
         tx = max(0, (cols - len(title)) // 2)
         paint_text(grid, title, tx, 0, style=title_style)
 
         # ─── Chat scroll area ───
-        self._paint_chat_area(grid, chat_top, chat_bottom, cols)
+        self._paint_chat_area(grid, chat_top, chat_bottom, cols, theme)
 
-        # ─── Scroll indicator (right side of title row, when scrolled) ───
+        # ─── Theme widget (rightmost cell of title row) ───
+        # Renders as a small accent-colored pill so it visually reads
+        # as an interactive element. The keybinding (Ctrl+T) cycles it.
+        theme_label = f" {theme.icon} {theme.name} "
+        theme_style = Style(
+            fg=theme.bg,
+            bg=theme.accent,
+            attrs=ATTR_BOLD,
+        )
+        theme_x = max(0, cols - len(theme_label))
+        paint_text(grid, theme_label, theme_x, 0, style=theme_style)
+
+        # ─── Scroll indicator (left of the theme widget when scrolled) ───
         if self.scroll_offset > 0:
             if self._stream is not None:
                 indicator = f" ↑ {self.scroll_offset} · ronin responding · Ctrl+E newest "
             else:
                 indicator = f" ↑ {self.scroll_offset}/{self._max_scroll()} · End for newest "
-            ix = max(0, cols - len(indicator))
+            ix = max(0, theme_x - len(indicator))
             paint_text(
                 grid,
                 indicator,
                 ix,
                 0,
-                style=Style(fg=INK_EMBER, bg=INK_DEEP, attrs=ATTR_BOLD),
+                style=Style(fg=theme.accent_warm, bg=theme.bg, attrs=ATTR_BOLD),
             )
 
         # ─── Input area ───
         if input_y >= 0 and input_y < rows:
-            self._paint_input(grid, input_y, min(input_h, rows - input_y), cols)
+            self._paint_input(grid, input_y, min(input_h, rows - input_y), cols, theme)
 
         # ─── Static footer (ctx bar) ───
         if 0 <= static_y < rows:
-            self._paint_static_footer(grid, static_y, cols)
+            self._paint_static_footer(grid, static_y, cols, theme)
 
     # ─── Region painters ───
 
-    def _paint_chat_area(self, grid: Grid, top: int, bottom: int, width: int) -> None:
+    def _paint_chat_area(
+        self,
+        grid: Grid,
+        top: int,
+        bottom: int,
+        width: int,
+        theme: Theme,
+    ) -> None:
         if bottom <= top or width <= 2:
             return
 
@@ -481,7 +588,7 @@ class RoninChat(App):
         chat_h = bottom - top
 
         # Build the flat list of committed-message lines.
-        committed = self._build_message_lines(body_width)
+        committed = self._build_message_lines(body_width, theme)
         committed_h = len(committed)
 
         # Auto-anchor: if scrolled up and content grew, advance offset
@@ -511,7 +618,7 @@ class RoninChat(App):
 
         # Streaming reply — only when anchored at bottom.
         if self._stream is not None and self.scroll_offset == 0:
-            stream_lines = self._build_streaming_lines(body_width)
+            stream_lines = self._build_streaming_lines(body_width, theme)
             combined = visible + stream_lines
             if len(combined) > chat_h:
                 combined = combined[-chat_h:]
@@ -528,11 +635,15 @@ class RoninChat(App):
             if y >= bottom:
                 break
             if line:
-                paint_text(grid, line, body_x, y, style=Style(fg=fg, bg=INK_DEEP))
+                paint_text(grid, line, body_x, y, style=Style(fg=fg, bg=theme.bg))
 
     # ─── Flat-line builders ───
 
-    def _build_message_lines(self, body_width: int) -> list[tuple[str, int]]:
+    def _build_message_lines(
+        self,
+        body_width: int,
+        theme: Theme,
+    ) -> list[tuple[str, int]]:
         out: list[tuple[str, int]] = []
         now = time.monotonic()
         n = len(self.messages)
@@ -543,11 +654,11 @@ class RoninChat(App):
                 if age < FADE_IN_S
                 else 1.0
             )
-            base_color = INK_BONE if msg.role == "user" else INK_BLOOD
+            base_color = theme.fg if msg.role == "user" else theme.accent
             if msg.synthetic:
-                base_color = INK_DUST
+                base_color = theme.fg_dim
             if fade_t < 1.0:
-                fg = lerp_rgb(INK_DIM, base_color, fade_t)
+                fg = lerp_rgb(theme.fg_subtle, base_color, fade_t)
             else:
                 fg = base_color
             for line in msg.body.lines(body_width):
@@ -556,7 +667,11 @@ class RoninChat(App):
                 out.append(("", fg))
         return out
 
-    def _build_streaming_lines(self, body_width: int) -> list[tuple[str, int]]:
+    def _build_streaming_lines(
+        self,
+        body_width: int,
+        theme: Theme,
+    ) -> list[tuple[str, int]]:
         if self._stream is None:
             return []
         now = time.monotonic()
@@ -573,14 +688,20 @@ class RoninChat(App):
             text = f"ronin ▸ {content_so_far}▌"
 
         stream_pt = PreparedText(text)
-        out: list[tuple[str, int]] = [("", INK_BLOOD)]
+        out: list[tuple[str, int]] = [("", theme.accent)]
         for line in stream_pt.lines(body_width):
-            out.append((line, INK_BLOOD))
+            out.append((line, theme.accent))
         return out
 
     # ─── Static footer ───
 
-    def _paint_static_footer(self, grid: Grid, y: int, width: int) -> None:
+    def _paint_static_footer(
+        self,
+        grid: Grid,
+        y: int,
+        width: int,
+        theme: Theme,
+    ) -> None:
         # Compute approximate token usage from the latest known usage
         # info, falling back to a char-count estimate.
         if self._last_usage and "total_tokens" in self._last_usage:
@@ -593,12 +714,12 @@ class RoninChat(App):
         pct = used / CONTEXT_MAX
 
         # Footer background
-        fill_region(grid, 0, y, width, 1, style=Style(bg=INK_FOOTER))
+        fill_region(grid, 0, y, width, 1, style=Style(bg=theme.bg_footer))
 
         label = f" ctx {used:>6}/{CONTEXT_MAX} "
         right_label = f" {pct * 100:5.2f}%  {self.client.model[:20]} "
-        label_style = Style(fg=INK_DUST, bg=INK_FOOTER, attrs=ATTR_DIM)
-        right_style = Style(fg=INK_BONE, bg=INK_FOOTER, attrs=ATTR_BOLD)
+        label_style = Style(fg=theme.fg_dim, bg=theme.bg_footer, attrs=ATTR_DIM)
+        right_style = Style(fg=theme.fg, bg=theme.bg_footer, attrs=ATTR_BOLD)
 
         paint_text(grid, label, 0, y, style=label_style)
 
@@ -610,18 +731,18 @@ class RoninChat(App):
             filled = int(round(bar_w * pct))
             empty = bar_w - filled
             if pct < 0.6:
-                bar_fg = lerp_rgb(INK_BLOOD, INK_EMBER, pct / 0.6)
+                bar_fg = lerp_rgb(theme.accent, theme.accent_warm, pct / 0.6)
             elif pct < 0.85:
-                bar_fg = lerp_rgb(INK_EMBER, INK_GOLD, (pct - 0.6) / 0.25)
+                bar_fg = lerp_rgb(theme.accent_warm, theme.accent_warn, (pct - 0.6) / 0.25)
             else:
-                bar_fg = INK_GOLD
+                bar_fg = theme.accent_warn
             if filled > 0:
                 paint_text(
                     grid,
                     "█" * filled,
                     bar_x,
                     y,
-                    style=Style(fg=bar_fg, bg=INK_FOOTER),
+                    style=Style(fg=bar_fg, bg=theme.bg_footer),
                 )
             if empty > 0:
                 paint_text(
@@ -629,23 +750,30 @@ class RoninChat(App):
                     "░" * empty,
                     bar_x + filled,
                     y,
-                    style=Style(fg=INK_DIM, bg=INK_FOOTER),
+                    style=Style(fg=theme.fg_subtle, bg=theme.bg_footer),
                 )
 
         paint_text(grid, right_label, right_x, y, style=right_style)
 
     # ─── Input area ───
 
-    def _paint_input(self, grid: Grid, y: int, height: int, width: int) -> None:
-        fill_region(grid, 0, y, width, height, style=Style(bg=INK_DEEPER))
+    def _paint_input(
+        self,
+        grid: Grid,
+        y: int,
+        height: int,
+        width: int,
+        theme: Theme,
+    ) -> None:
+        fill_region(grid, 0, y, width, height, style=Style(bg=theme.bg_input))
 
         wrapped = self._input_lines_at_width(width)
         wrapped = wrapped[-height:] if len(wrapped) > height else wrapped
 
-        prompt_style = Style(fg=INK_BLOOD, bg=INK_DEEPER, attrs=ATTR_BOLD)
+        prompt_style = Style(fg=theme.accent, bg=theme.bg_input, attrs=ATTR_BOLD)
         paint_text(grid, PROMPT, 0, y, style=prompt_style)
 
-        text_style = Style(fg=INK_BONE, bg=INK_DEEPER)
+        text_style = Style(fg=theme.fg, bg=theme.bg_input)
         for i, line in enumerate(wrapped):
             ly = y + i
             if ly >= y + height:
@@ -659,7 +787,7 @@ class RoninChat(App):
             cursor_x = min(width - 1, PROMPT_WIDTH + len(last_line))
             visible = (int(time.monotonic() * CURSOR_BLINK_HZ * 2) % 2) == 0
             if visible:
-                cursor_cell = Cell(" ", Style(fg=INK_DEEPER, bg=INK_BONE))
+                cursor_cell = Cell(" ", Style(fg=theme.bg_input, bg=theme.fg))
                 grid.set(last_y, cursor_x, cursor_cell)
         else:
             hint = "ronin is responding…  Ctrl+G to interrupt"
@@ -668,5 +796,5 @@ class RoninChat(App):
                 hint,
                 PROMPT_WIDTH,
                 y,
-                style=Style(fg=INK_DUST, bg=INK_DEEPER, attrs=ATTR_DIM),
+                style=Style(fg=theme.fg_dim, bg=theme.bg_input, attrs=ATTR_DIM),
             )
