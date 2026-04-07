@@ -24,10 +24,85 @@ ignored).
 
 from __future__ import annotations
 
+import re
 import shlex
 from typing import Callable
 
 from .cards import ToolCard
+
+
+# ─── Heredoc body stripping ───
+#
+# Before shlex.split runs we remove any heredoc bodies from the command
+# string. The body can contain arbitrary characters (HTML apostrophes,
+# unclosed quotes in shell scripts, backticks, whatever the model is
+# writing to disk) which shlex's posix-quote tokenizer cannot handle —
+# it raises ValueError on the first unbalanced quote and the whole
+# command falls through to the generic "bash ?" fallback. The opener
+# line alone is enough to classify the command (`cat > target <<'EOF'`
+# has every signal we need: the `>` redirect, the target, the heredoc
+# marker), so stripping the body lets the cat/tee/etc. parsers do
+# their job regardless of what's inside.
+#
+# Supported opener forms:
+#   cmd << EOF         (unquoted delimiter)
+#   cmd << 'EOF'       (single-quoted — literal body)
+#   cmd << "EOF"       (double-quoted — variable expansion in body)
+#   cmd <<- EOF        (dash for tab stripping)
+#   cmd <<-'EOF'       (dash + quoted delim)
+#
+# The closer is the delimiter on its own line, optionally with leading
+# whitespace (for the `<<-` form). If no closer is found — the heredoc
+# is still streaming in — we truncate at the opener line, leaving a
+# well-formed short command for shlex.
+
+_HEREDOC_OPENER_RE = re.compile(
+    r"""
+    <<                  # heredoc operator
+    -?                  # optional dash (tab stripping)
+    \s*                 # optional whitespace
+    (['"]?)             # optional opening quote (group 1)
+    (\w+)               # delimiter word (group 2)
+    \1                  # matching closing quote (backref to group 1)
+    [^\n]*              # rest of the opener line (trailing command text)
+    \n                  # newline ends the opener
+    """,
+    re.VERBOSE,
+)
+
+
+def _strip_heredoc_bodies(command: str) -> str:
+    """Remove heredoc bodies from a multi-line command so shlex can
+    tokenize the rest without tripping on the body's quoting.
+
+    Returns a single-line (or near-single-line) command string that
+    shlex.split can consume cleanly. Idempotent: commands without
+    heredocs pass through unchanged.
+    """
+    out = command
+    max_iterations = 16  # safety bail against pathological nesting
+    for _ in range(max_iterations):
+        m = _HEREDOC_OPENER_RE.search(out)
+        if m is None:
+            break
+        delim = m.group(2)
+        # Look for the closer — the delimiter on its own line. Allow
+        # leading whitespace (for <<- heredocs) and trailing whitespace.
+        close_re = re.compile(
+            r"\n\s*" + re.escape(delim) + r"\s*(?:\n|$)",
+        )
+        close_m = close_re.search(out, pos=m.end())
+        if close_m is None:
+            # Open-ended heredoc — the body is still streaming in.
+            # Truncate at the end of the opener line so shlex has
+            # a complete command to work with.
+            out = out[: m.end()]
+            break
+        # Drop the body (everything between the opener's newline and
+        # the closer's end). Leave the opener line intact so the
+        # cat/tee/etc. parsers can still see the `>` redirect.
+        out = out[: m.end()] + out[close_m.end() :]
+    return out
 
 # A parser takes the post-command-name args and the original raw
 # command string. The raw_command is passed in as a kwarg so parsers
@@ -129,25 +204,39 @@ def parse_bash(command: str) -> ToolCard:
     """Parse a bash command into a ToolCard.
 
     Strategy:
-      1. Strip and shlex-split. Empty input returns an empty generic card.
-      2. Look up the first token in _PARSERS.
-      3. If found, call it with the remaining args. Catch any parser
+      1. Strip heredoc bodies — their contents are arbitrary (HTML
+         apostrophes, shell scripts with unclosed quotes, etc.) and
+         would otherwise crash shlex's quote-aware tokenizer. The
+         opener line alone carries every signal the parser needs.
+      2. Strip and shlex-split. Empty input returns an empty generic card.
+      3. Look up the first token in _PARSERS.
+      4. If found, call it with the remaining args. Catch any parser
          exception and fall through to the generic path so a buggy
          parser never crashes the chat.
-      4. If not found, return a generic "bash" card with confidence 0.5
+      5. If not found, return a generic "bash" card with confidence 0.5
          (we know it's a bash command, just don't recognize the verb).
-      5. The parser's risk is honored as-is here. The risk classifier
+      6. The parser's risk is honored as-is here. The risk classifier
          in `risk.py` runs separately at execution time and can
          escalate but not de-escalate.
+
+    The returned card's raw_command is the ORIGINAL command text,
+    not the heredoc-stripped variant — we want the card to display
+    and re-dispatch exactly what the user / model typed.
     """
     raw = command.strip()
     if not raw:
         return _empty_card(raw)
 
+    # Strip heredoc bodies so the shlex tokenizer sees a command
+    # with only the opener line's metacharacters. The original raw
+    # text is still carried on the returned card below.
+    tokenizable = _strip_heredoc_bodies(raw)
+
     try:
-        tokens = shlex.split(raw, posix=True)
+        tokens = shlex.split(tokenizable, posix=True)
     except ValueError:
-        # Unbalanced quotes, etc. — shlex couldn't tokenize.
+        # Unbalanced quotes remain even after heredoc stripping —
+        # probably a genuinely malformed command.
         return _generic_card(raw, confidence=0.2)
 
     if not tokens:

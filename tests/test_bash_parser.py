@@ -195,6 +195,80 @@ def test_cat_with_glued_redirect_is_write_file() -> None:
     assert dict(card.params)["path"] == "/tmp/glued.txt"
 
 
+def test_cat_heredoc_with_apostrophe_in_body_still_parses() -> None:
+    """REGRESSION: a heredoc body containing an apostrophe (e.g., HTML
+    like "can't" or dialogue) used to crash shlex's posix tokenizer,
+    causing the command to fall through to the generic "bash ?" card
+    EVEN THOUGH the opener line was perfectly well-formed. The parser
+    now strips heredoc bodies before shlex sees them so the opener
+    line alone classifies the command.
+    """
+    raw = (
+        "cat > /tmp/story.html <<'EOF'\n"
+        "<h1>Things you can't do</h1>\n"
+        "<p>It's the apostrophes that break shlex.</p>\n"
+        "EOF"
+    )
+    card = parse_bash(raw)
+    assert card.verb == "write-file"
+    assert card.confidence >= 0.9
+    assert dict(card.params)["path"] == "/tmp/story.html"
+    # raw_command MUST be the original, not the stripped variant —
+    # callers need to re-dispatch exactly what came in
+    assert card.raw_command == raw
+
+
+def test_cat_heredoc_with_unclosed_quotes_in_shell_script_body() -> None:
+    """Similar regression — a heredoc body that's a shell script
+    containing an inline `echo \"it's working\"` has an apostrophe
+    inside a double-quoted string. shlex can't parse the whole
+    command because the body's apostrophe looks like an unclosed
+    single quote to it. Stripping the body fixes this."""
+    raw = (
+        "cat > /tmp/deploy.sh <<'EOF'\n"
+        "#!/bin/bash\n"
+        'echo "it\'s working"\n'
+        "EOF"
+    )
+    card = parse_bash(raw)
+    assert card.verb == "write-file"
+    assert dict(card.params)["path"] == "/tmp/deploy.sh"
+
+
+def test_cat_heredoc_with_dash_form_and_quoted_delim() -> None:
+    """The `<<-'DELIM'` form (dash strips leading tabs, quotes make
+    the body literal) is a common model pattern for indented heredocs.
+    Must strip correctly too.
+    """
+    raw = (
+        "cat > /tmp/indent.txt <<-'END'\n"
+        "\thello\n"
+        "\tworld\n"
+        "\tEND"
+    )
+    card = parse_bash(raw)
+    assert card.verb == "write-file"
+    assert dict(card.params)["path"] == "/tmp/indent.txt"
+
+
+def test_cat_heredoc_streaming_partial_still_parses() -> None:
+    """A heredoc that's still streaming in — the closing delimiter
+    hasn't arrived yet — should resolve to write-file based on the
+    opener line. This is what keeps the streaming preview header
+    locked onto the correct verb throughout the scroll.
+    """
+    raw = (
+        "cat > /tmp/streaming.html <<'EOF'\n"
+        "<!DOCTYPE html>\n"
+        "<html>\n"
+        "<body>\n"
+        "  <h1>still coming"  # no closing EOF yet
+    )
+    card = parse_bash(raw)
+    assert card.verb == "write-file"
+    assert dict(card.params)["path"] == "/tmp/streaming.html"
+
+
 def test_head_with_n_flag() -> None:
     card = parse_bash("head -n 50 file.txt")
     p = dict(card.params)
