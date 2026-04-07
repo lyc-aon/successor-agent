@@ -21,13 +21,21 @@ from ronin.input.keys import Key, KeyEvent
 from ronin.profiles import PROFILE_REGISTRY, Profile, get_profile
 from ronin.render.theme import THEME_REGISTRY
 from ronin.snapshot import config_demo_snapshot, render_grid_to_plain
+from ronin.input.keys import MOD_CTRL
 from ronin.wizard.config import (
+    FieldKind,
     Focus,
     RoninConfig,
+    _PromptEditor,
     _SETTINGS_TREE,
     _profile_to_json_dict,
     run_config_menu,
 )
+
+
+def _field_idx(name: str) -> int:
+    """Find the index of a field by its name in the settings tree."""
+    return next(i for i, f in enumerate(_SETTINGS_TREE) if f.name == name)
 
 
 # ─── Construction ───
@@ -500,6 +508,443 @@ def test_snapshot_too_small_terminal(temp_config_dir: Path) -> None:
 
 
 # ─── Profile JSON serialization ───
+
+
+# ─── Inline TEXT field editing ───
+
+
+def test_text_field_opens_inline_edit(temp_config_dir: Path) -> None:
+    """Pressing Enter on a TEXT field opens the inline text editor."""
+    menu = RoninConfig()
+    menu._focus = Focus.SETTINGS
+    menu._settings_cursor = _field_idx("provider_model")
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+    assert menu._inline_text_edit is not None
+    assert menu._inline_text_edit.kind == FieldKind.TEXT
+
+
+def test_text_field_buffer_starts_with_current_value(temp_config_dir: Path) -> None:
+    menu = RoninConfig()
+    menu._focus = Focus.SETTINGS
+    menu._settings_cursor = _field_idx("provider_model")
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+    current_model = menu._current_profile().provider.get("model", "")
+    assert menu._inline_text_edit.buffer == current_model
+    assert menu._inline_text_edit.cursor == len(current_model)
+
+
+def test_text_field_typing_appends(temp_config_dir: Path) -> None:
+    menu = RoninConfig()
+    menu._focus = Focus.SETTINGS
+    menu._settings_cursor = _field_idx("provider_model")
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+    for ch in "_v2":
+        menu._handle_key(KeyEvent(char=ch))
+    assert menu._inline_text_edit.buffer.endswith("_v2")
+
+
+def test_text_field_backspace_deletes(temp_config_dir: Path) -> None:
+    menu = RoninConfig()
+    menu._focus = Focus.SETTINGS
+    menu._settings_cursor = _field_idx("provider_model")
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+    initial_len = len(menu._inline_text_edit.buffer)
+    menu._handle_key(KeyEvent(key=Key.BACKSPACE))
+    menu._handle_key(KeyEvent(key=Key.BACKSPACE))
+    assert len(menu._inline_text_edit.buffer) == initial_len - 2
+
+
+def test_text_field_left_right_moves_cursor(temp_config_dir: Path) -> None:
+    menu = RoninConfig()
+    menu._focus = Focus.SETTINGS
+    menu._settings_cursor = _field_idx("provider_model")
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+    end_pos = menu._inline_text_edit.cursor
+    menu._handle_key(KeyEvent(key=Key.LEFT))
+    assert menu._inline_text_edit.cursor == end_pos - 1
+    menu._handle_key(KeyEvent(key=Key.HOME))
+    assert menu._inline_text_edit.cursor == 0
+    menu._handle_key(KeyEvent(key=Key.END))
+    assert menu._inline_text_edit.cursor == end_pos
+
+
+def test_text_field_enter_commits(temp_config_dir: Path) -> None:
+    menu = RoninConfig()
+    menu._focus = Focus.SETTINGS
+    menu._settings_cursor = _field_idx("provider_model")
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+    while menu._inline_text_edit.cursor > 0:
+        menu._handle_key(KeyEvent(key=Key.BACKSPACE))
+    for ch in "newmodel":
+        menu._handle_key(KeyEvent(char=ch))
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+
+    assert menu._inline_text_edit is None
+    assert menu._current_profile().provider["model"] == "newmodel"
+    assert menu._is_dirty(menu._current_profile().name, "provider_model")
+
+
+def test_text_field_esc_cancels(temp_config_dir: Path) -> None:
+    menu = RoninConfig()
+    menu._focus = Focus.SETTINGS
+    menu._settings_cursor = _field_idx("provider_model")
+    original = menu._current_profile().provider.get("model")
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+    for ch in "garbage":
+        menu._handle_key(KeyEvent(char=ch))
+    menu._handle_key(KeyEvent(key=Key.ESC))
+
+    assert menu._inline_text_edit is None
+    assert menu._current_profile().provider.get("model") == original
+    assert not menu._is_dirty(menu._current_profile().name, "provider_model")
+
+
+# ─── NUMBER field editing ───
+
+
+def test_number_field_filters_letters(temp_config_dir: Path) -> None:
+    """Typing letters into a NUMBER field is silently rejected."""
+    menu = RoninConfig()
+    menu._focus = Focus.SETTINGS
+    menu._settings_cursor = _field_idx("provider_temperature")
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+    while menu._inline_text_edit.cursor > 0:
+        menu._handle_key(KeyEvent(key=Key.BACKSPACE))
+    for ch in "1.5xyz":
+        menu._handle_key(KeyEvent(char=ch))
+    assert menu._inline_text_edit.buffer == "1.5"
+
+
+def test_number_int_field_rejects_decimal(temp_config_dir: Path) -> None:
+    """Typing '.' into an int field is filtered."""
+    menu = RoninConfig()
+    menu._focus = Focus.SETTINGS
+    menu._settings_cursor = _field_idx("provider_max_tokens")
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+    while menu._inline_text_edit.cursor > 0:
+        menu._handle_key(KeyEvent(key=Key.BACKSPACE))
+    for ch in "100.5":
+        menu._handle_key(KeyEvent(char=ch))
+    assert menu._inline_text_edit.buffer == "1005"
+
+
+def test_number_field_commits_parsed_float(temp_config_dir: Path) -> None:
+    menu = RoninConfig()
+    menu._focus = Focus.SETTINGS
+    menu._settings_cursor = _field_idx("provider_temperature")
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+    while menu._inline_text_edit.cursor > 0:
+        menu._handle_key(KeyEvent(key=Key.BACKSPACE))
+    for ch in "0.42":
+        menu._handle_key(KeyEvent(char=ch))
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+
+    assert menu._inline_text_edit is None
+    value = menu._current_profile().provider["temperature"]
+    assert isinstance(value, float)
+    assert value == 0.42
+
+
+def test_number_int_field_commits_int(temp_config_dir: Path) -> None:
+    menu = RoninConfig()
+    menu._focus = Focus.SETTINGS
+    menu._settings_cursor = _field_idx("provider_max_tokens")
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+    while menu._inline_text_edit.cursor > 0:
+        menu._handle_key(KeyEvent(key=Key.BACKSPACE))
+    for ch in "65536":
+        menu._handle_key(KeyEvent(char=ch))
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+
+    value = menu._current_profile().provider["max_tokens"]
+    assert isinstance(value, int)
+    assert value == 65536
+
+
+def test_number_field_invalid_buffer_warns(temp_config_dir: Path) -> None:
+    """Empty buffer on Enter triggers a warning toast and stays in edit mode."""
+    menu = RoninConfig()
+    menu._focus = Focus.SETTINGS
+    menu._settings_cursor = _field_idx("provider_temperature")
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+    while menu._inline_text_edit.cursor > 0:
+        menu._handle_key(KeyEvent(key=Key.BACKSPACE))
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+
+    assert menu._inline_text_edit is not None
+    assert menu._toast is not None
+    assert menu._toast.kind == "warn"
+
+
+# ─── SECRET field editing ───
+
+
+def test_secret_field_displays_masked(temp_config_dir: Path) -> None:
+    """A non-empty SECRET field renders as bullets in the display."""
+    PROFILE_REGISTRY.reload()
+    menu = RoninConfig()
+    menu._focus = Focus.SETTINGS
+    menu._settings_cursor = _field_idx("provider_api_key")
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+    for ch in "sk-secret-key":
+        menu._handle_key(KeyEvent(char=ch))
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+
+    field = _SETTINGS_TREE[_field_idx("provider_api_key")]
+    display = menu._profile_value_for_field(menu._current_profile(), field)
+    assert "•" in display
+    assert "sk-secret-key" not in display
+
+
+def test_secret_field_editing_shows_plaintext(temp_config_dir: Path) -> None:
+    """While editing, the buffer is plaintext (so the user can verify)."""
+    menu = RoninConfig()
+    menu._focus = Focus.SETTINGS
+    menu._settings_cursor = _field_idx("provider_api_key")
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+    for ch in "sk-test":
+        menu._handle_key(KeyEvent(char=ch))
+    assert menu._inline_text_edit.buffer == "sk-test"
+
+
+def test_secret_field_commits_to_provider_dict(temp_config_dir: Path) -> None:
+    menu = RoninConfig()
+    menu._focus = Focus.SETTINGS
+    menu._settings_cursor = _field_idx("provider_api_key")
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+    for ch in "sk-12345":
+        menu._handle_key(KeyEvent(char=ch))
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+
+    assert menu._current_profile().provider["api_key"] == "sk-12345"
+
+
+# ─── Provider type CYCLE field ───
+
+
+def test_provider_type_field_opens_cycle_overlay(temp_config_dir: Path) -> None:
+    """The provider_type field is now a CYCLE."""
+    menu = RoninConfig()
+    menu._focus = Focus.SETTINGS
+    menu._settings_cursor = _field_idx("provider_type")
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+    assert menu._editing_field == _field_idx("provider_type")
+
+
+# ─── _PromptEditor — multiline editor unit tests ───
+
+
+def test_prompt_editor_initial_state() -> None:
+    ed = _PromptEditor("hello\nworld")
+    assert ed.lines == ["hello", "world"]
+    assert ed.cursor_row == 0
+    assert ed.cursor_col == 0
+    assert not ed.is_done
+    assert not ed.is_dirty
+
+
+def test_prompt_editor_empty_initial_has_one_line() -> None:
+    ed = _PromptEditor("")
+    assert ed.lines == [""]
+
+
+def test_prompt_editor_insert_char() -> None:
+    ed = _PromptEditor("ab")
+    ed.cursor_col = 1
+    ed.handle_key(KeyEvent(char="X"))
+    assert ed.lines[0] == "aXb"
+    assert ed.cursor_col == 2
+    assert ed.is_dirty
+
+
+def test_prompt_editor_newline_splits_line() -> None:
+    ed = _PromptEditor("hello world")
+    ed.cursor_col = 5
+    ed.handle_key(KeyEvent(key=Key.ENTER))
+    assert ed.lines == ["hello", " world"]
+    assert ed.cursor_row == 1
+    assert ed.cursor_col == 0
+
+
+def test_prompt_editor_backspace_within_line() -> None:
+    ed = _PromptEditor("hello")
+    ed.cursor_col = 3
+    ed.handle_key(KeyEvent(key=Key.BACKSPACE))
+    assert ed.lines[0] == "helo"
+    assert ed.cursor_col == 2
+
+
+def test_prompt_editor_backspace_at_line_start_merges() -> None:
+    ed = _PromptEditor("hello\nworld")
+    ed.cursor_row = 1
+    ed.cursor_col = 0
+    ed.handle_key(KeyEvent(key=Key.BACKSPACE))
+    assert ed.lines == ["helloworld"]
+    assert ed.cursor_row == 0
+    assert ed.cursor_col == 5
+
+
+def test_prompt_editor_delete_within_line() -> None:
+    ed = _PromptEditor("hello")
+    ed.cursor_col = 2
+    ed.handle_key(KeyEvent(key=Key.DELETE))
+    assert ed.lines[0] == "helo"
+    assert ed.cursor_col == 2
+
+
+def test_prompt_editor_delete_at_line_end_merges_next() -> None:
+    ed = _PromptEditor("hello\nworld")
+    ed.cursor_row = 0
+    ed.cursor_col = 5
+    ed.handle_key(KeyEvent(key=Key.DELETE))
+    assert ed.lines == ["helloworld"]
+
+
+def test_prompt_editor_arrow_left_at_line_start_wraps_up() -> None:
+    ed = _PromptEditor("hello\nworld")
+    ed.cursor_row = 1
+    ed.cursor_col = 0
+    ed.handle_key(KeyEvent(key=Key.LEFT))
+    assert ed.cursor_row == 0
+    assert ed.cursor_col == 5
+
+
+def test_prompt_editor_arrow_right_at_line_end_wraps_down() -> None:
+    ed = _PromptEditor("hello\nworld")
+    ed.cursor_row = 0
+    ed.cursor_col = 5
+    ed.handle_key(KeyEvent(key=Key.RIGHT))
+    assert ed.cursor_row == 1
+    assert ed.cursor_col == 0
+
+
+def test_prompt_editor_up_clamps_col() -> None:
+    """Up arrow clamps cursor col to the new line's length."""
+    ed = _PromptEditor("hi\nlonger line")
+    ed.cursor_row = 1
+    ed.cursor_col = 10
+    ed.handle_key(KeyEvent(key=Key.UP))
+    assert ed.cursor_row == 0
+    assert ed.cursor_col == 2
+
+
+def test_prompt_editor_ctrl_s_commits() -> None:
+    ed = _PromptEditor("original")
+    ed.cursor_col = 8
+    for ch in " EDITED":
+        ed.handle_key(KeyEvent(char=ch))
+    ed.handle_key(KeyEvent(char="s", mods=MOD_CTRL))
+    assert ed.is_done
+    assert ed.result == "original EDITED"
+
+
+def test_prompt_editor_esc_cancels() -> None:
+    ed = _PromptEditor("original")
+    for ch in "WILL_DISCARD":
+        ed.handle_key(KeyEvent(char=ch))
+    ed.handle_key(KeyEvent(key=Key.ESC))
+    assert ed.is_done
+    assert ed.result is None
+
+
+def test_prompt_editor_char_count() -> None:
+    ed = _PromptEditor("hello\nworld")
+    assert ed.char_count() == 11
+
+
+def test_prompt_editor_home_end() -> None:
+    ed = _PromptEditor("hello world")
+    ed.cursor_col = 5
+    ed.handle_key(KeyEvent(key=Key.HOME))
+    assert ed.cursor_col == 0
+    ed.handle_key(KeyEvent(key=Key.END))
+    assert ed.cursor_col == 11
+
+
+def test_prompt_editor_dirty_tracking() -> None:
+    ed = _PromptEditor("hello")
+    assert not ed.is_dirty
+    ed.handle_key(KeyEvent(char="X"))
+    assert ed.is_dirty
+    ed.handle_key(KeyEvent(key=Key.BACKSPACE))
+    assert not ed.is_dirty
+
+
+# ─── Config menu MULTILINE integration ───
+
+
+def test_multiline_field_opens_prompt_editor(temp_config_dir: Path) -> None:
+    """Pressing Enter on the system_prompt field opens the prompt editor."""
+    menu = RoninConfig()
+    menu._focus = Focus.SETTINGS
+    menu._settings_cursor = _field_idx("system_prompt")
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+    assert menu._prompt_editor is not None
+    expected_lines = menu._current_profile().system_prompt.split("\n")
+    assert menu._prompt_editor.lines == expected_lines
+
+
+def test_multiline_save_commits_prompt_to_profile(temp_config_dir: Path) -> None:
+    """Ctrl+S in the prompt editor commits the new text to the profile."""
+    menu = RoninConfig()
+    menu._focus = Focus.SETTINGS
+    menu._settings_cursor = _field_idx("system_prompt")
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+    ed = menu._prompt_editor
+    ed.cursor_row = len(ed.lines) - 1
+    ed.cursor_col = len(ed.lines[-1])
+    for ch in "TESTED":
+        menu._handle_key(KeyEvent(char=ch))
+    menu._handle_key(KeyEvent(char="s", mods=MOD_CTRL))
+
+    assert menu._prompt_editor is None
+    assert menu._current_profile().system_prompt.endswith("TESTED")
+    assert menu._is_dirty(menu._current_profile().name, "system_prompt")
+
+
+def test_multiline_esc_cancels(temp_config_dir: Path) -> None:
+    menu = RoninConfig()
+    menu._focus = Focus.SETTINGS
+    menu._settings_cursor = _field_idx("system_prompt")
+    original = menu._current_profile().system_prompt
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+    for ch in "WILL_DISCARD":
+        menu._handle_key(KeyEvent(char=ch))
+    menu._handle_key(KeyEvent(key=Key.ESC))
+
+    assert menu._prompt_editor is None
+    assert menu._current_profile().system_prompt == original
+    assert not menu._is_dirty(menu._current_profile().name, "system_prompt")
+
+
+def test_multiline_save_persists_to_disk(temp_config_dir: Path) -> None:
+    """Edit prompt, Ctrl+S in editor, then s in menu — JSON file has new prompt."""
+    PROFILE_REGISTRY.reload()
+    menu = RoninConfig()
+    menu._focus = Focus.SETTINGS
+    active_name = menu._current_profile().name
+    menu._settings_cursor = _field_idx("system_prompt")
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+
+    ed = menu._prompt_editor
+    # Move cursor to end of document, then backspace until empty
+    ed.cursor_row = len(ed.lines) - 1
+    ed.cursor_col = len(ed.lines[-1])
+    while ed.lines != [""]:
+        ed.handle_key(KeyEvent(key=Key.BACKSPACE))
+    for ch in "you are a custom assistant":
+        ed.handle_key(KeyEvent(char=ch))
+    menu._handle_key(KeyEvent(char="s", mods=MOD_CTRL))
+
+    menu._handle_key(KeyEvent(char="s"))
+
+    target = temp_config_dir / "profiles" / f"{active_name}.json"
+    assert target.exists()
+    payload = json.loads(target.read_text())
+    assert payload["system_prompt"] == "you are a custom assistant"
+
+
+# ─── Profile JSON round-trip ───
 
 
 def test_profile_to_json_round_trip(temp_config_dir: Path) -> None:

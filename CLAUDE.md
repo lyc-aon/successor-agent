@@ -255,15 +255,35 @@ itself**: writing it required ZERO new primitives.
 **`rn config` menu** (`src/ronin/wizard/config.py`): three-pane App
 for ongoing tweaks. Profiles list (left) | settings tree (middle) |
 live preview (right). Tab cycles focus, ↑↓ navigates within the
-focused pane, Enter edits the selected setting. CYCLE fields (theme,
-density) open an inline anchored cycle-edit overlay; TOGGLE fields
-(mode, intro_animation) flip immediately. Dirty fields get a `*`
-marker, dirty profiles get a `*` next to their name in the left pane,
-the title bar shows a "N unsaved" pill. **S** saves all dirty profiles
-to disk + reloads the registry, **R** reverts. Esc with unsaved
-changes shows a warning toast first; second Esc discards. From inside
-the chat, `Ctrl+,` and `/config` open the menu, and the cli main
-loop handles the chat → config → chat re-entry seamlessly.
+focused pane, Enter edits the selected setting.
+
+Field kinds (FieldKind enum):
+  - **CYCLE** — inline overlay with ↑↓ pick (theme, density,
+    provider_type)
+  - **TOGGLE** — immediate flip on Enter (display_mode, intro_animation)
+  - **TEXT** — inline single-line editor with cursor model
+    (provider_model, provider_base_url)
+  - **NUMBER** — TEXT with int/float validation
+    (provider_temperature, provider_max_tokens)
+  - **SECRET** — TEXT but value displays as ••• when not editing,
+    plaintext while editing (provider_api_key)
+  - **MULTILINE** — opens a full-screen `_PromptEditor` overlay with
+    full text editor cursor model (system_prompt)
+  - READONLY — only `skills` and `tools` (those aren't wired)
+
+Dirty fields get a `*` marker, dirty profiles get a `*` next to their
+name in the left pane, the title bar shows a "N unsaved" pill. **S**
+saves all dirty profiles to disk + reloads the registry, **R** reverts.
+Esc with unsaved changes shows a warning toast first; second Esc
+discards. From inside the chat, `Ctrl+,` and `/config` open the menu,
+and the cli main loop handles the chat → config → chat re-entry
+seamlessly.
+
+**The system prompt editor** is a real text editor: row/col cursor,
+←→↑↓/Home/End/PgUp/PgDn navigation, Backspace/Delete/Enter editing,
+auto-scroll to keep cursor in view, line number gutter, character
+count display, Ctrl+S to save and Esc to cancel. No agent CLI has
+ever let you edit your system prompt directly inside the TUI before.
 
 **What's NOT yet built**: skill invocation strategy, agent loop,
 tool dispatch, framework docs.

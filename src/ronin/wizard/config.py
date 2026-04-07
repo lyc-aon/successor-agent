@@ -146,6 +146,10 @@ class FieldKind(Enum):
     """How a setting value is edited."""
     CYCLE = "cycle"            # ↑↓ through a fixed list (theme, density)
     TOGGLE = "toggle"          # binary flip on Enter (mode, intro)
+    TEXT = "text"              # inline single-line text input
+    NUMBER = "number"          # inline text input with int/float validation
+    SECRET = "secret"          # inline text input, displayed as ••• when not editing
+    MULTILINE = "multiline"    # full-screen text editor overlay
     READONLY = "readonly"      # hint-only, can't be edited from here
 
 
@@ -162,15 +166,32 @@ class _SettingField:
     kind: FieldKind
     # For CYCLE fields: a list-getter that returns the available options.
     # For TOGGLE fields: a list of two values.
-    # For READONLY fields: empty.
+    # For READONLY/TEXT/NUMBER/SECRET/MULTILINE fields: empty.
     options_getter: Any = None  # Callable[[], list[str]] | None
     # For READONLY fields: a hint shown after the value
     hint: str = ""
+    # For NUMBER fields: "int" or "float" to determine parser + display
+    number_kind: str = "int"
 
 
 # Settings tree definition. Order matters for navigation.
 def _theme_options() -> list[str]:
     return sorted(t.name for t in all_themes())
+
+
+def _provider_type_options() -> list[str]:
+    """Cycle options for the provider_type field — pulled from
+    PROVIDER_REGISTRY so adding a new backend automatically extends
+    the cycle list."""
+    from ..providers import PROVIDER_REGISTRY
+    # Use only the canonical names (filter out aliases like "llama"
+    # that point at the same constructor)
+    canonical = sorted({
+        cls.provider_type
+        for cls in PROVIDER_REGISTRY.values()
+        if hasattr(cls, "provider_type")
+    })
+    return canonical or ["llamacpp"]
 
 
 _SETTINGS_TREE: tuple[_SettingField, ...] = (
@@ -194,28 +215,31 @@ _SETTINGS_TREE: tuple[_SettingField, ...] = (
     ),
     _SettingField(
         name="system_prompt", label="prompt", section="",
-        kind=FieldKind.READONLY,
-        hint="edit JSON file to customize",
+        kind=FieldKind.MULTILINE,
     ),
     _SettingField(
         name="provider_type", label="type", section="provider",
-        kind=FieldKind.READONLY, hint="edit JSON file",
+        kind=FieldKind.CYCLE, options_getter=_provider_type_options,
     ),
     _SettingField(
         name="provider_model", label="model", section="",
-        kind=FieldKind.READONLY, hint="edit JSON file",
+        kind=FieldKind.TEXT,
     ),
     _SettingField(
         name="provider_base_url", label="base_url", section="",
-        kind=FieldKind.READONLY, hint="edit JSON file",
+        kind=FieldKind.TEXT,
+    ),
+    _SettingField(
+        name="provider_api_key", label="api_key", section="",
+        kind=FieldKind.SECRET,
     ),
     _SettingField(
         name="provider_temperature", label="temperature", section="",
-        kind=FieldKind.READONLY, hint="edit JSON file",
+        kind=FieldKind.NUMBER, number_kind="float",
     ),
     _SettingField(
         name="provider_max_tokens", label="max_tokens", section="",
-        kind=FieldKind.READONLY, hint="edit JSON file",
+        kind=FieldKind.NUMBER, number_kind="int",
     ),
     _SettingField(
         name="skills", label="skills", section="extensions",
@@ -256,6 +280,350 @@ class _SaveFlash:
     """Per-field green pulse that fades over SAVE_FLASH_S after a save."""
     field_keys: set[tuple[str, str]]  # (profile_name, field_name)
     started_at: float
+
+
+# ─── Inline text editor state (TEXT / NUMBER / SECRET fields) ───
+
+
+@dataclass
+class _InlineTextEdit:
+    """In-progress single-line text edit for a TEXT/NUMBER/SECRET field.
+
+    Held by the config menu while the user is typing into a field row.
+    Esc cancels (restores `snapshot`); Enter commits and parses if
+    needed (NUMBER fields validate the buffer parses to int/float
+    according to the field's number_kind).
+    """
+    field_idx: int
+    buffer: str
+    cursor: int  # byte offset into buffer
+    snapshot: Any  # original value at edit-open time, for cancel
+    kind: FieldKind  # mirror the field kind so the handler doesn't have to look it up
+
+
+# ─── Multiline prompt editor (MULTILINE fields) ───
+
+
+class _PromptEditor:
+    """Standalone multi-line text editor used as a modal overlay.
+
+    Not a full App — just a state container + input handler + paint
+    method that the config menu owns and renders. The cursor is a
+    (row, col) pair into a list of lines; navigation is the standard
+    arrow-keys/Home/End/Backspace/Delete/Enter set you'd expect from
+    any code editor.
+
+    The editor doesn't know about word wrap. Long lines clip
+    horizontally with a `›` marker on the right edge — the user can
+    break them with Enter manually. Adding soft wrap is the next
+    polish pass.
+
+    Lifecycle:
+        editor = _PromptEditor(initial="...")
+        # ...input dispatched to editor.handle_key(event)...
+        # ...config menu calls editor.paint(grid, x, y, w, h, theme)...
+        if editor.is_done:
+            if editor.result is not None:
+                # User saved — commit editor.result back to the profile
+            else:
+                # User cancelled — discard
+    """
+
+    def __init__(self, initial: str) -> None:
+        self._initial = initial
+        self.lines: list[str] = initial.split("\n") if initial else [""]
+        if not self.lines:
+            self.lines = [""]
+        self.cursor_row: int = 0
+        self.cursor_col: int = 0
+        # Vertical scroll offset — first visible row index
+        self.scroll_offset: int = 0
+        # Horizontal scroll offset for the cursor's row
+        self.horizontal_scroll: int = 0
+        # Lifecycle flags
+        self._done: bool = False
+        self._result: str | None = None  # None means cancelled
+
+    @property
+    def is_done(self) -> bool:
+        return self._done
+
+    @property
+    def result(self) -> str | None:
+        return self._result
+
+    @property
+    def is_dirty(self) -> bool:
+        return "\n".join(self.lines) != self._initial
+
+    def char_count(self) -> int:
+        return sum(len(l) for l in self.lines) + max(0, len(self.lines) - 1)
+
+    # ─── Input dispatch ───
+
+    def handle_key(self, event: KeyEvent) -> None:
+        if self._done:
+            return
+
+        # Ctrl+S commits
+        if event.is_ctrl and event.char == "s":
+            self._result = "\n".join(self.lines)
+            self._done = True
+            return
+
+        # Esc cancels (always — no two-stage warn for the inner editor;
+        # the config menu's outer Esc handler covers profile-level
+        # dirty state separately)
+        if event.key == Key.ESC:
+            self._result = None
+            self._done = True
+            return
+
+        # Navigation
+        if event.key == Key.LEFT:
+            self._cursor_left()
+            return
+        if event.key == Key.RIGHT:
+            self._cursor_right()
+            return
+        if event.key == Key.UP:
+            self._cursor_up()
+            return
+        if event.key == Key.DOWN:
+            self._cursor_down()
+            return
+        if event.key == Key.HOME:
+            self.cursor_col = 0
+            return
+        if event.key == Key.END:
+            self.cursor_col = len(self.lines[self.cursor_row])
+            return
+        if event.key == Key.PG_UP:
+            self.cursor_row = max(0, self.cursor_row - 10)
+            self._clamp_col()
+            return
+        if event.key == Key.PG_DOWN:
+            self.cursor_row = min(len(self.lines) - 1, self.cursor_row + 10)
+            self._clamp_col()
+            return
+
+        # Editing
+        if event.key == Key.BACKSPACE:
+            self._backspace()
+            return
+        if event.key == Key.DELETE:
+            self._delete()
+            return
+        if event.key == Key.ENTER:
+            self._insert_newline()
+            return
+
+        # Printable input
+        if event.is_char and event.char and not event.is_ctrl and not event.is_alt:
+            for ch in event.char:
+                if ch == "\n":
+                    self._insert_newline()
+                elif ord(ch) >= 0x20:
+                    self._insert_char(ch)
+
+    # ─── Cursor model operations ───
+
+    def _cursor_left(self) -> None:
+        if self.cursor_col > 0:
+            self.cursor_col -= 1
+        elif self.cursor_row > 0:
+            self.cursor_row -= 1
+            self.cursor_col = len(self.lines[self.cursor_row])
+
+    def _cursor_right(self) -> None:
+        if self.cursor_col < len(self.lines[self.cursor_row]):
+            self.cursor_col += 1
+        elif self.cursor_row < len(self.lines) - 1:
+            self.cursor_row += 1
+            self.cursor_col = 0
+
+    def _cursor_up(self) -> None:
+        if self.cursor_row > 0:
+            self.cursor_row -= 1
+            self._clamp_col()
+
+    def _cursor_down(self) -> None:
+        if self.cursor_row < len(self.lines) - 1:
+            self.cursor_row += 1
+            self._clamp_col()
+
+    def _clamp_col(self) -> None:
+        self.cursor_col = min(self.cursor_col, len(self.lines[self.cursor_row]))
+
+    def _insert_char(self, ch: str) -> None:
+        line = self.lines[self.cursor_row]
+        self.lines[self.cursor_row] = line[: self.cursor_col] + ch + line[self.cursor_col :]
+        self.cursor_col += 1
+
+    def _insert_newline(self) -> None:
+        line = self.lines[self.cursor_row]
+        before = line[: self.cursor_col]
+        after = line[self.cursor_col :]
+        self.lines[self.cursor_row] = before
+        self.lines.insert(self.cursor_row + 1, after)
+        self.cursor_row += 1
+        self.cursor_col = 0
+
+    def _backspace(self) -> None:
+        if self.cursor_col > 0:
+            line = self.lines[self.cursor_row]
+            self.lines[self.cursor_row] = line[: self.cursor_col - 1] + line[self.cursor_col :]
+            self.cursor_col -= 1
+        elif self.cursor_row > 0:
+            # Merge with previous line
+            prev_line = self.lines[self.cursor_row - 1]
+            cur_line = self.lines[self.cursor_row]
+            new_col = len(prev_line)
+            self.lines[self.cursor_row - 1] = prev_line + cur_line
+            del self.lines[self.cursor_row]
+            self.cursor_row -= 1
+            self.cursor_col = new_col
+
+    def _delete(self) -> None:
+        line = self.lines[self.cursor_row]
+        if self.cursor_col < len(line):
+            self.lines[self.cursor_row] = line[: self.cursor_col] + line[self.cursor_col + 1 :]
+        elif self.cursor_row < len(self.lines) - 1:
+            # Merge next line into current
+            next_line = self.lines[self.cursor_row + 1]
+            self.lines[self.cursor_row] = line + next_line
+            del self.lines[self.cursor_row + 1]
+
+    # ─── Paint ───
+
+    def paint(
+        self,
+        grid: Grid,
+        *,
+        x: int,
+        y: int,
+        w: int,
+        h: int,
+        theme: ThemeVariant,
+    ) -> None:
+        """Render the editor as a modal box at (x, y, w, h)."""
+        if w < 30 or h < 8:
+            return
+
+        # Box background + border
+        border_style = Style(fg=theme.accent, bg=theme.bg_input, attrs=ATTR_BOLD)
+        fill_style = Style(fg=theme.fg, bg=theme.bg_input)
+        paint_box(
+            grid, x, y, w, h,
+            style=border_style, fill_style=fill_style, chars=BOX_ROUND,
+        )
+
+        # Title bar
+        dirty_marker = " *" if self.is_dirty else ""
+        title = f" edit system prompt{dirty_marker} "
+        paint_text(
+            grid, title, x + 2, y,
+            style=Style(fg=theme.bg, bg=theme.accent, attrs=ATTR_BOLD),
+        )
+
+        # Right-anchored: line N/M · char count
+        info = f" line {self.cursor_row + 1}/{len(self.lines)} · {self.char_count()} chars "
+        info_x = x + w - len(info) - 2
+        if info_x > x + len(title) + 2:
+            paint_text(
+                grid, info, info_x, y,
+                style=Style(fg=theme.bg, bg=theme.accent, attrs=ATTR_BOLD),
+            )
+
+        # Footer keybinds
+        footer = " ↑↓←→ navigate · ⏎ newline · ⌫ delete · Ctrl+S save · Esc cancel "
+        if len(footer) <= w - 4:
+            fx = x + (w - len(footer)) // 2
+            paint_text(
+                grid, footer, fx, y + h - 1,
+                style=Style(fg=theme.bg, bg=theme.accent_warm, attrs=ATTR_BOLD),
+            )
+
+        # Text area
+        # Layout: 4-cell line number gutter, then a separator, then text
+        gutter_w = 5  # " 999 "
+        sep_w = 1
+        text_x = x + 2 + gutter_w + sep_w
+        text_y = y + 1
+        text_w = max(1, x + w - 2 - text_x)
+        text_h = max(1, h - 2)
+
+        # Auto-scroll vertically: keep cursor in view
+        if self.cursor_row < self.scroll_offset:
+            self.scroll_offset = self.cursor_row
+        elif self.cursor_row >= self.scroll_offset + text_h:
+            self.scroll_offset = self.cursor_row - text_h + 1
+        if self.scroll_offset < 0:
+            self.scroll_offset = 0
+
+        # Auto-scroll horizontally: keep cursor in view (per current row)
+        if self.cursor_col < self.horizontal_scroll:
+            self.horizontal_scroll = self.cursor_col
+        elif self.cursor_col >= self.horizontal_scroll + text_w:
+            self.horizontal_scroll = self.cursor_col - text_w + 1
+        if self.horizontal_scroll < 0:
+            self.horizontal_scroll = 0
+
+        # Paint visible lines
+        for i in range(text_h):
+            row_idx = self.scroll_offset + i
+            if row_idx >= len(self.lines):
+                break
+            line = self.lines[row_idx]
+            visible_line = line[self.horizontal_scroll : self.horizontal_scroll + text_w]
+            screen_y = text_y + i
+
+            # Line number
+            num_text = f"{row_idx + 1:>4} "
+            num_style = Style(
+                fg=theme.fg_subtle if row_idx != self.cursor_row else theme.accent_warm,
+                bg=theme.bg_input,
+                attrs=ATTR_DIM if row_idx != self.cursor_row else ATTR_BOLD,
+            )
+            paint_text(grid, num_text, x + 2, screen_y, style=num_style)
+
+            # Separator
+            paint_text(
+                grid, "│", x + 2 + gutter_w, screen_y,
+                style=Style(fg=theme.fg_subtle, bg=theme.bg_input),
+            )
+
+            # Line content
+            paint_text(
+                grid, visible_line, text_x, screen_y,
+                style=Style(fg=theme.fg, bg=theme.bg_input),
+            )
+
+            # Off-screen indicators (line longer than visible width)
+            if self.horizontal_scroll > 0:
+                paint_text(
+                    grid, "‹", text_x - 1, screen_y,
+                    style=Style(fg=theme.accent_warm, bg=theme.bg_input, attrs=ATTR_BOLD),
+                )
+            if len(line) > self.horizontal_scroll + text_w:
+                paint_text(
+                    grid, "›", text_x + text_w, screen_y,
+                    style=Style(fg=theme.accent_warm, bg=theme.bg_input, attrs=ATTR_BOLD),
+                )
+
+        # Cursor — paint over the appropriate cell
+        cursor_screen_row = self.cursor_row - self.scroll_offset
+        cursor_screen_col = self.cursor_col - self.horizontal_scroll
+        if 0 <= cursor_screen_row < text_h and 0 <= cursor_screen_col < text_w:
+            cy = text_y + cursor_screen_row
+            cx = text_x + cursor_screen_col
+            # Read the char under the cursor (or space if past EOL)
+            line = self.lines[self.cursor_row]
+            ch = line[self.cursor_col] if self.cursor_col < len(line) else " "
+            cursor_style = Style(
+                fg=theme.bg_input, bg=theme.fg, attrs=ATTR_BOLD,
+            )
+            grid.set(cy, cx, Cell(ch, cursor_style))
 
 
 # ─── The config App ───
@@ -326,6 +694,12 @@ class RoninConfig(App):
         self._editing_cursor: int = 0
         # Snapshot of the value at edit-open time, for cancel
         self._edit_snapshot: Any = None
+
+        # ─── Inline text edit state (TEXT / NUMBER / SECRET fields) ───
+        self._inline_text_edit: _InlineTextEdit | None = None
+
+        # ─── Multi-line prompt editor (MULTILINE fields) ───
+        self._prompt_editor: _PromptEditor | None = None
 
         # ─── Dirty tracking ───
         # Set of (profile_name, field_name) tuples that differ from
@@ -441,35 +815,41 @@ class RoninConfig(App):
         self._section_reveal_at = self.elapsed
 
     def _profile_value_for_field(self, profile: Profile, field: _SettingField) -> Any:
-        """Read the current value of a settings field from a profile.
+        """Read the current value of a settings field for DISPLAY.
 
-        Handles the provider_* fields by reading into the provider dict.
+        Truncates long values, masks SECRET fields, formats numbers.
+        Use `_profile_value_for_field_raw` for the raw value used in
+        dirty comparison and editing.
         """
-        if field.name == "theme":
-            return profile.theme
-        if field.name == "display_mode":
-            return profile.display_mode
-        if field.name == "density":
-            return profile.density
-        if field.name == "intro_animation":
-            return profile.intro_animation
         if field.name == "system_prompt":
-            # Show a truncated preview of the prompt
+            # Show a truncated preview of the prompt for the row label
             return (profile.system_prompt[:24] + "…") if len(profile.system_prompt) > 24 else profile.system_prompt
         if field.name == "skills":
             return f"({len(profile.skills)})"
         if field.name == "tools":
             return f"({len(profile.tools)})"
-        if field.name.startswith("provider_"):
-            key = field.name.removeprefix("provider_")
-            if profile.provider:
-                return profile.provider.get(key, "(unset)")
-            return "(unset)"
-        return ""
+
+        raw = self._profile_value_for_field_raw(profile, field)
+
+        # SECRET masks the value for display
+        if field.kind == FieldKind.SECRET:
+            if raw is None or raw == "":
+                return "(not set)"
+            return "•" * min(len(str(raw)), 16)
+
+        if raw is None:
+            return "(none)"
+        return str(raw)
 
     def _set_field_on_profile(self, profile_idx: int, field: _SettingField, new_value: Any) -> None:
-        """Mutate _working_profiles[profile_idx], updating dirty set + preview."""
+        """Mutate _working_profiles[profile_idx], updating dirty set + preview.
+
+        Handles the simple top-level fields (theme, display_mode,
+        density, intro_animation, system_prompt) AND the provider_*
+        fields, which mutate the provider dict.
+        """
         old_profile = self._working_profiles[profile_idx]
+
         if field.name == "theme":
             new_profile = replace(old_profile, theme=new_value)
         elif field.name == "display_mode":
@@ -478,6 +858,13 @@ class RoninConfig(App):
             new_profile = replace(old_profile, density=new_value)
         elif field.name == "intro_animation":
             new_profile = replace(old_profile, intro_animation=new_value)
+        elif field.name == "system_prompt":
+            new_profile = replace(old_profile, system_prompt=new_value)
+        elif field.name.startswith("provider_"):
+            key = field.name.removeprefix("provider_")
+            new_provider = dict(old_profile.provider) if old_profile.provider else {}
+            new_provider[key] = new_value
+            new_profile = replace(old_profile, provider=new_provider)
         else:
             return  # not editable
 
@@ -497,9 +884,11 @@ class RoninConfig(App):
             self._sync_preview()
 
     def _profile_value_for_field_raw(self, profile: Profile, field: _SettingField) -> Any:
-        """Like _profile_value_for_field but returns the raw value
-        (not the truncated/formatted display version) — used for
-        dirty comparison."""
+        """Read the RAW value of a field — no truncation, no masking.
+
+        Used for dirty comparison, edit-buffer initialization, and
+        anywhere the actual value matters rather than its display form.
+        """
         if field.name == "theme":
             return profile.theme
         if field.name == "display_mode":
@@ -508,6 +897,13 @@ class RoninConfig(App):
             return profile.density
         if field.name == "intro_animation":
             return profile.intro_animation
+        if field.name == "system_prompt":
+            return profile.system_prompt
+        if field.name.startswith("provider_"):
+            key = field.name.removeprefix("provider_")
+            if profile.provider:
+                return profile.provider.get(key)
+            return None
         return None
 
     def _is_dirty(self, profile_name: str, field_name: str | None = None) -> bool:
@@ -632,7 +1028,28 @@ class RoninConfig(App):
                 self._handle_key(event)
 
     def _handle_key(self, event: KeyEvent) -> None:
-        # If we're inside an inline edit, route to the edit handler
+        # ─── Modal sub-editors take exclusive input first ───
+
+        # Multi-line prompt editor (MULTILINE fields) — full screen modal
+        if self._prompt_editor is not None:
+            self._prompt_editor.handle_key(event)
+            if self._prompt_editor.is_done:
+                result = self._prompt_editor.result
+                if result is not None:
+                    # User saved — commit the new prompt to the profile
+                    field = next(
+                        f for f in _SETTINGS_TREE if f.name == "system_prompt"
+                    )
+                    self._set_field_on_profile(self._profile_cursor, field, result)
+                self._prompt_editor = None
+            return
+
+        # Inline text/number/secret editor — single-row modal
+        if self._inline_text_edit is not None:
+            self._handle_inline_text_key(event)
+            return
+
+        # Inline cycle-edit overlay
         if self._editing_field is not None:
             self._handle_edit_key(event)
             return
@@ -719,10 +1136,11 @@ class RoninConfig(App):
             return
 
     def _begin_edit(self) -> None:
-        """Open the inline edit for the cursor field, if editable."""
+        """Open the right editor for the cursor field, if editable."""
         field = self._current_field()
         if field.kind == FieldKind.READONLY:
             return
+
         if field.kind == FieldKind.TOGGLE:
             # Toggle is immediate — no inline overlay needed
             options = field.options_getter() if field.options_getter else []
@@ -736,6 +1154,7 @@ class RoninConfig(App):
             new_value = options[(idx + 1) % len(options)]
             self._set_field_on_profile(self._profile_cursor, field, new_value)
             return
+
         if field.kind == FieldKind.CYCLE:
             options = field.options_getter() if field.options_getter else []
             if not options:
@@ -748,6 +1167,121 @@ class RoninConfig(App):
             self._editing_field = self._settings_cursor
             self._editing_cursor = idx
             self._edit_snapshot = current
+            return
+
+        if field.kind in (FieldKind.TEXT, FieldKind.NUMBER, FieldKind.SECRET):
+            # Inline single-line text editor in the row itself
+            current_raw = self._profile_value_for_field_raw(self._current_profile(), field)
+            buffer = "" if current_raw is None else str(current_raw)
+            self._inline_text_edit = _InlineTextEdit(
+                field_idx=self._settings_cursor,
+                buffer=buffer,
+                cursor=len(buffer),
+                snapshot=current_raw,
+                kind=field.kind,
+            )
+            return
+
+        if field.kind == FieldKind.MULTILINE:
+            # Open the full-screen text editor overlay
+            current = self._profile_value_for_field_raw(self._current_profile(), field) or ""
+            self._prompt_editor = _PromptEditor(initial=str(current))
+            return
+
+    def _handle_inline_text_key(self, event: KeyEvent) -> None:
+        """Input handling while an inline TEXT/NUMBER/SECRET edit is open.
+
+        Esc cancels (restores snapshot). Enter commits (validates for
+        NUMBER fields). Arrow keys + Home/End move cursor. Backspace
+        deletes char before cursor. Printable input inserts at cursor.
+        """
+        edit = self._inline_text_edit
+        if edit is None:
+            return
+        field = _SETTINGS_TREE[edit.field_idx]
+
+        if event.key == Key.ESC:
+            # Cancel — restore the snapshot, no dirty change
+            self._set_field_on_profile(self._profile_cursor, field, edit.snapshot)
+            self._inline_text_edit = None
+            return
+
+        if event.key == Key.ENTER:
+            # Commit — validate if NUMBER, otherwise just save the buffer
+            if field.kind == FieldKind.NUMBER:
+                parsed = self._parse_number(edit.buffer, field.number_kind)
+                if parsed is None:
+                    # Validation failed — flash a warning toast
+                    self._toast = _Toast(
+                        f"'{edit.buffer}' is not a valid {field.number_kind}",
+                        self.elapsed,
+                        kind="warn",
+                    )
+                    return
+                self._set_field_on_profile(self._profile_cursor, field, parsed)
+            else:
+                # TEXT or SECRET — save the buffer as-is
+                self._set_field_on_profile(self._profile_cursor, field, edit.buffer)
+            self._inline_text_edit = None
+            return
+
+        if event.key == Key.LEFT:
+            edit.cursor = max(0, edit.cursor - 1)
+            return
+        if event.key == Key.RIGHT:
+            edit.cursor = min(len(edit.buffer), edit.cursor + 1)
+            return
+        if event.key == Key.HOME:
+            edit.cursor = 0
+            return
+        if event.key == Key.END:
+            edit.cursor = len(edit.buffer)
+            return
+
+        if event.key == Key.BACKSPACE:
+            if edit.cursor > 0:
+                edit.buffer = edit.buffer[: edit.cursor - 1] + edit.buffer[edit.cursor :]
+                edit.cursor -= 1
+            return
+        if event.key == Key.DELETE:
+            if edit.cursor < len(edit.buffer):
+                edit.buffer = edit.buffer[: edit.cursor] + edit.buffer[edit.cursor + 1 :]
+            return
+
+        # Printable input
+        if event.is_char and event.char and not event.is_ctrl and not event.is_alt:
+            for ch in event.char:
+                if ord(ch) >= 0x20 and ch != "\n":
+                    # NUMBER fields filter to digits + sign + decimal point
+                    if field.kind == FieldKind.NUMBER:
+                        if not self._is_valid_number_char(ch, field.number_kind):
+                            continue
+                    edit.buffer = edit.buffer[: edit.cursor] + ch + edit.buffer[edit.cursor :]
+                    edit.cursor += 1
+
+    @staticmethod
+    def _parse_number(buffer: str, kind: str) -> Any:
+        """Parse a number string, returning the parsed value or None on failure."""
+        s = buffer.strip()
+        if not s:
+            return None
+        try:
+            if kind == "int":
+                return int(s)
+            return float(s)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _is_valid_number_char(ch: str, kind: str) -> bool:
+        """Allow digits, sign, and (for floats) the decimal point."""
+        if ch.isdigit():
+            return True
+        if ch in ("-", "+"):
+            return True
+        if kind == "float" and ch in (".", "e", "E"):
+            return True
+        return False
 
     def _handle_edit_key(self, event: KeyEvent) -> None:
         """Input handling while an inline cycle-edit is open."""
@@ -867,16 +1401,33 @@ class RoninConfig(App):
         if rows >= 2:
             self._paint_footer(grid, chrome_variant, y=rows - 1, width=cols)
 
-        # ─── Toast (overlays everything) ───
-        self._paint_toast(grid, chrome_variant, cols, rows)
-
-        # ─── Inline edit overlay ───
+        # ─── Inline cycle-edit overlay ───
         if self._editing_field is not None:
             self._paint_edit_overlay(
                 grid, chrome_variant,
                 middle_x=middle_x, middle_w=middle_w,
                 body_top=body_top, body_bottom=body_bottom,
             )
+
+        # ─── Prompt editor overlay (MULTILINE fields) ───
+        # Painted AFTER the cycle-edit overlay so a prompt edit, if
+        # opened from inside the menu, sits on top of everything else.
+        # Toasts go above the prompt editor since save/cancel feedback
+        # should still be visible.
+        if self._prompt_editor is not None:
+            # Take ~80% of the screen, centered
+            ed_w = max(60, int(cols * 0.85))
+            ed_h = max(14, int(rows * 0.85))
+            ed_x = (cols - ed_w) // 2
+            ed_y = (rows - ed_h) // 2
+            self._prompt_editor.paint(
+                grid,
+                x=ed_x, y=ed_y, w=ed_w, h=ed_h,
+                theme=chrome_variant,
+            )
+
+        # ─── Toast (overlays EVERYTHING, even the prompt editor) ───
+        self._paint_toast(grid, chrome_variant, cols, rows)
 
     def _paint_too_small(self, grid: Grid, rows: int, cols: int) -> None:
         fill_region(grid, 0, 0, cols, rows, style=Style(bg=0x000000))
@@ -1089,12 +1640,19 @@ class RoninConfig(App):
                 break
 
             # Cursor highlight for the focused field
+            is_inline_text_editing = (
+                self._inline_text_edit is not None
+                and self._inline_text_edit.field_idx == idx
+            )
             is_cursor = (
                 idx == self._settings_cursor
                 and self._focus == Focus.SETTINGS
                 and self._editing_field is None
+                and not is_inline_text_editing
             )
-            is_being_edited = idx == self._editing_field
+            is_being_edited = (
+                idx == self._editing_field or is_inline_text_editing
+            )
 
             # Background fill for cursor row
             if is_cursor or is_being_edited:
@@ -1176,15 +1734,61 @@ class RoninConfig(App):
                 value_color = theme.fg
 
             max_value_w = max(0, w - (value_x - x) - 2)
-            if len(value_text) > max_value_w:
-                value_text = value_text[: max(0, max_value_w - 1)] + "…"
-            paint_text(
-                grid, value_text, value_x, cur_y,
-                style=Style(
-                    fg=value_color, bg=label_bg,
-                    attrs=ATTR_BOLD if (is_cursor or is_being_edited) else 0,
-                ),
-            )
+
+            # If this row is being inline-text-edited, draw the buffer
+            # + cursor instead of the static value text
+            if is_inline_text_editing and self._inline_text_edit is not None:
+                edit = self._inline_text_edit
+                # SECRET fields render the buffer in plaintext while
+                # editing (so the user can verify what they typed) but
+                # display masked when NOT editing — this matches every
+                # desktop password field's behavior.
+                buf = edit.buffer
+                # Soft-clip horizontally if the buffer is longer than the cell
+                if len(buf) > max_value_w:
+                    # Show the tail (where the cursor probably is)
+                    buf_display = "…" + buf[-(max_value_w - 1):]
+                    cursor_in_display = max_value_w - 1 - (len(buf) - edit.cursor)
+                else:
+                    buf_display = buf
+                    cursor_in_display = edit.cursor
+
+                paint_text(
+                    grid, buf_display, value_x, cur_y,
+                    style=Style(
+                        fg=theme.bg, bg=theme.accent_warm,
+                        attrs=ATTR_BOLD,
+                    ),
+                )
+
+                # Cursor blink — invert one cell at the cursor position
+                blink_visible = (int(self.elapsed * 3) % 2) == 0
+                if blink_visible and 0 <= cursor_in_display <= len(buf_display):
+                    cursor_x = value_x + cursor_in_display
+                    if cursor_x < x + w - 1:
+                        # Read the char at cursor (or space if past end)
+                        ch = (
+                            buf_display[cursor_in_display]
+                            if cursor_in_display < len(buf_display)
+                            else " "
+                        )
+                        grid.set(
+                            cur_y, cursor_x,
+                            Cell(ch, Style(
+                                fg=theme.accent_warm, bg=theme.bg,
+                                attrs=ATTR_BOLD,
+                            )),
+                        )
+            else:
+                if len(value_text) > max_value_w:
+                    value_text = value_text[: max(0, max_value_w - 1)] + "…"
+                paint_text(
+                    grid, value_text, value_x, cur_y,
+                    style=Style(
+                        fg=value_color, bg=label_bg,
+                        attrs=ATTR_BOLD if (is_cursor or is_being_edited) else 0,
+                    ),
+                )
 
             # Hint for read-only fields
             if fld.kind == FieldKind.READONLY and fld.hint:
@@ -1263,7 +1867,13 @@ class RoninConfig(App):
     ) -> None:
         fill_region(grid, 0, y, width, 1, style=Style(bg=theme.bg_footer))
 
-        if self._editing_field is not None:
+        if self._prompt_editor is not None:
+            keybinds = "↑↓←→ navigate · ⏎ newline · ⌫ delete · Ctrl+S save · esc cancel"
+        elif self._inline_text_edit is not None:
+            edit = self._inline_text_edit
+            kind_name = edit.kind.value
+            keybinds = f"editing {kind_name} · type to input · ←→ cursor · ⏎ confirm · esc cancel"
+        elif self._editing_field is not None:
             keybinds = "↑↓ pick · ⏎ confirm · esc cancel"
         elif self._focus == Focus.PROFILES:
             keybinds = "tab focus · ↑↓ profile · ⏎ activate · → settings · s save · r revert · esc back"

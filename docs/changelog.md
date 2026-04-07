@@ -492,6 +492,119 @@ profile's appearance fields to chat.json automatically.
 
 ---
 
+## Phase 4.6 — editable text fields + multiline prompt editor (2026-04-06)
+
+The config menu's READONLY fields (system prompt, provider settings)
+become fully editable. No agent CLI has ever let you edit your own
+system prompt directly inside the TUI — until now.
+
+### What landed
+
+- **Four new FieldKind enum values** in `wizard/config.py`:
+  - **TEXT** — inline single-line text editor with cursor model,
+    insert/delete, ←→/Home/End navigation. For `provider_model`
+    and `provider_base_url`.
+  - **NUMBER** — TEXT with int/float validation. Letters silently
+    filtered at input time; invalid buffer on Enter triggers a
+    warning toast and keeps the editor open. For `provider_temperature`
+    (float) and `provider_max_tokens` (int).
+  - **SECRET** — TEXT but the displayed value is `••••••` when not
+    editing; while editing, the buffer renders in plaintext so the
+    user can verify what they typed (matches every desktop password
+    field's behavior). For `provider_api_key`.
+  - **MULTILINE** — opens a full-screen modal text editor overlay.
+    For `system_prompt`.
+
+- **`provider_type` field** is now a CYCLE that walks through
+  registered provider types from `PROVIDER_REGISTRY` (currently
+  `llamacpp` and `openai_compat`).
+
+- **`_InlineTextEdit` dataclass** + `_handle_inline_text_key` handler
+  in `RoninConfig`. Holds the buffer, cursor position, snapshot for
+  cancel, and the field index. Esc restores the snapshot and closes.
+  Enter commits (with NUMBER validation) and closes.
+
+- **`_PromptEditor` helper class** — a self-contained multi-line text
+  editor with row/col cursor model, full navigation set (←→↑↓, Home,
+  End, PgUp, PgDn), insert/delete/backspace, newline insertion that
+  splits the current line, backspace-at-line-start that merges lines,
+  and Ctrl+S commit / Esc cancel. Auto-scrolls vertically and
+  horizontally to keep the cursor in view. Long lines clip with `›`
+  markers on the right edge (soft wrap deferred).
+
+- **Prompt editor overlay paint** in `on_tick` — centered modal at
+  ~85% of the screen, title bar with line N/M and char count, line
+  number gutter on the left, vertical separator, text area, footer
+  keybinds. Painted AFTER the cycle-edit overlay so the prompt
+  editor sits on top; toasts go above everything for save feedback.
+
+- **Provider dict mutation** in `_set_field_on_profile` — fields
+  starting with `provider_` mutate the profile's provider dict by
+  removing the prefix and setting the corresponding key. Works for
+  all of TEXT, NUMBER, SECRET, and CYCLE provider fields.
+
+- **Inline text rendering in the settings pane** — when the cursor
+  row is being inline-edited, the value cell paints the buffer + a
+  blinking cursor on top of an accent_warm background, distinguishing
+  it from the regular cursor highlight.
+
+- **Footer keybinds dispatch** based on the active editor mode:
+  - prompt editor: `↑↓←→ navigate · ⏎ newline · ⌫ delete · Ctrl+S save · esc cancel`
+  - inline text: `editing <kind> · type to input · ←→ cursor · ⏎ confirm · esc cancel`
+  - cycle overlay: `↑↓ pick · ⏎ confirm · esc cancel`
+  - normal navigation: tab/↑↓/⏎/esc combinations per pane
+
+### Tests (36 added — 291 total in suite)
+
+`tests/test_config_menu.py`:
+
+**Inline TEXT (7 tests):** opens edit on Enter, buffer starts with
+current value at cursor end, typing appends, backspace deletes,
+←→/Home/End move cursor, Enter commits + marks dirty, Esc cancels +
+restores
+
+**NUMBER (5 tests):** filters letters at input time, int field rejects
+decimal point, commits parsed float, commits parsed int, empty
+buffer on Enter shows warning toast and stays open
+
+**SECRET (3 tests):** displays masked when not editing, plaintext
+buffer while editing, commits to provider dict
+
+**Provider type CYCLE (1 test):** Enter opens the cycle overlay
+
+**_PromptEditor (15 unit tests):** initial state, empty initial
+defaults to one line, insert char, newline splits line, backspace
+within line, backspace at line start merges with previous line,
+delete within line, delete at line end merges next line, arrow
+left at line start wraps up, arrow right at line end wraps down,
+up arrow clamps col to new line length, Ctrl+S commits, Esc cancels,
+char count, Home/End within line, dirty tracking
+
+**MULTILINE integration (4 tests):** Enter on prompt opens editor,
+Ctrl+S commits to profile + marks dirty, Esc cancels with no change,
+full save flow persists to disk via the menu's `s` action
+
+### Notes
+
+- The prompt editor is NOT a sub-App — that would require new modal-
+  app machinery the App base class doesn't have. It's a helper class
+  the config menu owns and renders. All input dispatch goes through
+  `_handle_key`, which checks for the prompt editor first, then the
+  inline text editor, then the cycle-edit overlay, then per-pane
+  navigation.
+- Word wrap is deferred. The editor displays lines as-typed; long
+  lines clip horizontally with `›` markers. Most prompts are written
+  with explicit newlines anyway.
+- Undo/redo, find/replace, selection/copy-paste are all deferred to
+  future polish. The v0 editor handles 95% of practical prompt
+  editing.
+- Secret display: I went with simple "always show bullets when not
+  editing, plaintext when editing" rather than the briefly-show-last-
+  char pattern from phones. Local-first single-user usage, masking
+  is mostly cosmetic anyway.
+
+---
+
 ## What's next
 
 - **Skill invocation strategy** — pick always-on vs on-demand after
@@ -499,9 +612,10 @@ profile's appearance fields to chat.json automatically.
 - **Agent loop + tool dispatch** — wire `TOOL_REGISTRY` into the
   chat's response cycle once we've studied the llamacpp tool-call
   protocol surface deliberately
-- **Multi-line text editing** — would unlock editing system_prompt
-  and provider config fields directly in the config menu instead of
-  forcing the user to edit the JSON file
+- **Soft word wrap in the prompt editor** — display long lines wrapped
+  at the visible width while keeping the underlying line model intact
+- **Selection / copy-paste in the prompt editor** — Shift+arrows to
+  select, Ctrl+C/V via OSC 52
 - **Editing existing profiles via the wizard** — wizard re-entry mode
   that pre-populates state from a registered profile (still useful
   even with the config menu, since the wizard is more guided)
@@ -520,10 +634,11 @@ profile's appearance fields to chat.json automatically.
 | 6 (tool registry) | 15 | 172 |
 | 4 (setup wizard) | 35 | 207 |
 | 4.5 (config menu) | 33 | 240 |
+| 4.6 (editable text + multiline editor) | 36 | 276 |
 
 (Counts above are approximate by phase boundary; actual test
 collection may include additional small additions in subsequent
 commits.)
 
-Final: **255 tests, all passing, hermetic via `RONIN_CONFIG_DIR`,
+Final: **291 tests, all passing, hermetic via `RONIN_CONFIG_DIR`,
 no fake mocks, no `.skip()` or `.todo()`.**
