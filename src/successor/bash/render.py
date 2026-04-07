@@ -493,20 +493,44 @@ def measure_tool_card_running_height(
     return box_h + n_out_lines + 1  # +1 for status footer
 
 
-def _count_running_output_lines(
+def _wrap_running_output_lines(
     stdout: str, stderr: str, width: int,
-) -> int:
-    """Cheap line count for height measurement — matches the wrap
-    behavior of paint_running_output_lines below."""
-    lines = 0
-    for src in (stdout, stderr):
+) -> list[tuple[str, str]]:
+    """Wrap stdout + stderr into (text, kind) pairs ready to paint.
+
+    Each pair is a single visual row; `kind` is either "stdout" or
+    "stderr" so the painter can apply the warn tint to stderr rows.
+    Long lines are greedy-wrapped to the available width. Empty
+    trailing lines (from a trailing newline on the source text)
+    are dropped so the visual tail is always meaningful content.
+    """
+    rows: list[tuple[str, str]] = []
+    for src, kind in ((stdout, "stdout"), (stderr, "stderr")):
         if not src:
             continue
         for raw in src.split("\n"):
-            if not raw and src.endswith(raw):
+            if not raw:
                 continue
-            lines += max(1, (len(raw) + width - 1) // width)
-    return lines if lines > 0 else 1  # always reserve one row
+            offset = 0
+            while offset < len(raw):
+                rows.append((raw[offset:offset + width], kind))
+                offset += width
+    return rows
+
+
+def _count_running_output_lines(
+    stdout: str, stderr: str, width: int,
+) -> int:
+    """Height contribution of the live output region for the running
+    card. Capped at DEFAULT_MAX_OUTPUT_LINES (tail window) so the
+    card has a stable height regardless of how much output the
+    subprocess produces. Always reserves at least 1 row even when
+    there's no output yet so the status footer doesn't sit flush
+    against the box border.
+    """
+    wrapped = _wrap_running_output_lines(stdout, stderr, width)
+    n = min(len(wrapped), DEFAULT_MAX_OUTPUT_LINES)
+    return n if n > 0 else 1
 
 
 def paint_tool_card_running(
@@ -684,41 +708,40 @@ def _paint_running_output_lines(
     out_x: int,
     theme: ThemeVariant,
 ) -> int:
-    """Paint live runner stdout + stderr lines without going through
-    PreparedToolOutput. We don't want the verb-class-aware parsing
-    here — the running state should show the raw output as it streams,
-    so the user sees exactly what the subprocess produced moment-by-
-    moment. Wraps long lines greedily at the available width.
+    """Paint the LAST DEFAULT_MAX_OUTPUT_LINES wrapped rows of the
+    runner's live stdout + stderr as a tail-latest scrolling window.
+
+    No verb-class parsing here — the running state shows raw output
+    exactly as the subprocess produces it, letter-for-letter. The
+    window is a tail (not head) because the running state is about
+    "what just arrived"; the settled card shows a head window after
+    the subprocess exits. Both states cap at the same row count so
+    the card's visual weight stays constant through the transition.
+
+    Stderr rows get the warn-tint (accent_warn, dim). Stdout rows
+    use the theme's regular fg.
     """
+    wrapped = _wrap_running_output_lines(stdout, stderr, avail)
+    # Take the LAST N rows — the tail-latest window. Keeps the user's
+    # eye on fresh content during long-running commands (find, grep,
+    # seq-with-sleep). No overflow marker because new content is
+    # actively arriving; the status footer's "N lines" counter is the
+    # implicit signal of how much has been dropped.
+    tail = wrapped[-DEFAULT_MAX_OUTPUT_LINES:]
+
     cur_y = y
-
-    def paint_block(text: str, kind: str) -> None:
-        nonlocal cur_y
-        if not text:
-            return
-        if kind == "stderr":
-            style = Style(
-                fg=theme.accent_warn, bg=theme.bg_input, attrs=ATTR_DIM,
-            )
-        else:
-            style = Style(fg=theme.fg, bg=theme.bg_input)
-        for raw in text.split("\n"):
-            if not raw:
-                continue
-            # Greedy wrap for very long lines
-            offset = 0
-            while offset < len(raw):
-                if cur_y >= grid.rows:
-                    return
-                fragment = raw[offset:offset + avail]
-                fill_region(
-                    grid, x + 1, cur_y, w - 2, 1,
-                    style=Style(bg=theme.bg_input),
-                )
-                paint_text(grid, fragment, out_x, cur_y, style=style)
-                offset += avail
-                cur_y += 1
-
-    paint_block(stdout, "stdout")
-    paint_block(stderr, "stderr")
+    stdout_style = Style(fg=theme.fg, bg=theme.bg_input)
+    stderr_style = Style(
+        fg=theme.accent_warn, bg=theme.bg_input, attrs=ATTR_DIM,
+    )
+    for fragment, kind in tail:
+        if cur_y >= grid.rows:
+            break
+        fill_region(
+            grid, x + 1, cur_y, w - 2, 1,
+            style=Style(bg=theme.bg_input),
+        )
+        style = stderr_style if kind == "stderr" else stdout_style
+        paint_text(grid, fragment, out_x, cur_y, style=style)
+        cur_y += 1
     return cur_y
