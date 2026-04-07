@@ -47,7 +47,8 @@ from __future__ import annotations
 
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Callable
 
 from ..input.keys import (
     InputEvent,
@@ -123,22 +124,59 @@ THEME_TRANSITION_S = 0.4
 class Density:
     """A layout density preset for the chat content area.
 
-    gutter:                cells of left+right padding around the chat body
-    message_spacing:       blank rows between consecutive messages
-    max_content_width:     cap on the chat body width in cells
-                           (None means use the full available width)
+    gutter:             cells of left+right padding around the chat body
+    message_spacing:    blank rows between consecutive messages
+    max_content_width:  cap on the chat body width in cells. Use the
+                        sentinel _DENSITY_NO_CAP for "no cap"
+                        (clamping then degenerates to the available
+                        width). Storing as int (instead of int | None)
+                        keeps the lerp math simple during transitions.
     """
     name: str
     gutter: int
     message_spacing: int
-    max_content_width: int | None
+    max_content_width: int
 
+
+def blend_densities(a: Density, b: Density, t: float) -> Density:
+    """Lerp between two densities for smooth transitions.
+
+    max_content_width is the dominant visual signal — it's a continuous
+    int and lerps cleanly. The discrete fields (gutter, message_spacing)
+    snap to the destination's value rather than rounding through
+    intermediate steps that would look choppy.
+    """
+    if t <= 0.0:
+        return a
+    if t >= 1.0:
+        return b
+    return Density(
+        name=b.name,
+        gutter=b.gutter,
+        message_spacing=b.message_spacing,
+        max_content_width=int(round(
+            a.max_content_width + (b.max_content_width - a.max_content_width) * t
+        )),
+    )
+
+
+# How long density transitions take. Snappier than theme transitions
+# because the only thing actually animating is content width.
+DENSITY_TRANSITION_S = 0.25
+
+
+# Sentinel value for "no content-width cap" used by the compact density.
+# Using a large int instead of None lets us lerp this field across density
+# transitions without special-casing the "uncapped" state. The renderer
+# clamps to min(avail, max_content_width) so this just degenerates to the
+# available width when set to a huge number.
+_DENSITY_NO_CAP = 99999
 
 COMPACT = Density(
     name="compact",
     gutter=0,
     message_spacing=0,
-    max_content_width=None,
+    max_content_width=_DENSITY_NO_CAP,
 )
 
 NORMAL = Density(
@@ -213,25 +251,53 @@ WHEEL_SCROLL_LINES = 3
 # ─── Slash command registry ───
 #
 # Every slash command lives here as a SlashCommand instance. The
-# autocomplete dropdown reads this list to populate suggestions and
+# autocomplete dropdown reads this list to populate suggestions, and
 # the _submit handler matches commands by name. Adding a new command
-# is one entry in SLASH_COMMANDS plus a handler call in _submit.
+# is one entry in SLASH_COMMANDS plus a handler in _submit.
+#
+# Args completion: each command can supply a `complete_args` callable
+# that takes a partial-arg string and returns a list of full matches.
+# Static commands use the static_args() helper. Dynamic commands
+# (e.g. file paths) supply a custom callable.
 
 
-@dataclass(frozen=True, slots=True)
+def static_args(*choices: str) -> Callable[[str], list[str]]:
+    """Build a completer for a fixed set of choices.
+
+    Returns a function that takes a partial string and returns the
+    choices that start with it (case-insensitive). The original casing
+    of each choice is preserved in the returned list.
+    """
+    lower_choices = tuple(c.lower() for c in choices)
+
+    def completer(partial: str) -> list[str]:
+        p = partial.lower()
+        return [c for c, lc in zip(choices, lower_choices) if lc.startswith(p)]
+
+    return completer
+
+
+# We can't use frozen=True with a Callable field because functions
+# aren't hashable in a stable way across runs. Plain dataclass; the
+# instances are constructed once at import and never mutated.
+@dataclass(slots=True)
 class SlashCommand:
     """A registered slash command.
 
-    name:        canonical name (without leading slash)
-    aliases:     other names that match (e.g. "q" for "quit")
-    description: short one-line summary for the dropdown
-    args_hint:   short hint shown after the description, e.g.
-                 "[dark|light|forge]" — empty if the command takes no args
+    name:           canonical name (without leading slash)
+    aliases:        other names that match (e.g. "q" for "quit")
+    description:    short one-line summary for the dropdown
+    args_hint:      short hint shown after the description, e.g.
+                    "[dark|light|forge]" — empty if no args
+    complete_args:  optional callable taking a partial string,
+                    returning a list of full arg matches. None means
+                    the command takes no args.
     """
     name: str
     aliases: tuple[str, ...] = ()
     description: str = ""
     args_hint: str = ""
+    complete_args: Callable[[str], list[str]] | None = None
 
 
 SLASH_COMMANDS: tuple[SlashCommand, ...] = (
@@ -244,16 +310,19 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
         name="theme",
         description="switch color theme",
         args_hint="[dark|light|forge|cycle]",
+        complete_args=static_args("dark", "light", "forge", "cycle"),
     ),
     SlashCommand(
         name="density",
         description="adjust layout density",
         args_hint="[compact|normal|spacious|cycle]",
+        complete_args=static_args("compact", "normal", "spacious", "cycle"),
     ),
     SlashCommand(
         name="mouse",
         description="toggle mouse reporting",
         args_hint="[on|off|toggle]",
+        complete_args=static_args("on", "off", "toggle"),
     ),
 )
 
@@ -275,6 +344,55 @@ def filter_slash_commands(prefix: str) -> list[SlashCommand]:
                 break
     out.sort(key=lambda c: c.name)
     return out
+
+
+def find_slash_command(name: str) -> SlashCommand | None:
+    """Resolve a command name (or alias) to its SlashCommand."""
+    n = name.lower()
+    for cmd in SLASH_COMMANDS:
+        if cmd.name == n:
+            return cmd
+        if n in cmd.aliases:
+            return cmd
+    return None
+
+
+# ─── Autocomplete state machine ───
+#
+# The dropdown has three reachable states (plus None for hidden):
+#
+#   _NameMode   user is typing the command name; matches is the
+#               filtered list of SlashCommand candidates
+#   _ArgMode    user has accepted a command and is typing its arg;
+#               matches is the list of valid arg strings
+#   _NoMatches  buffer expects autocomplete but nothing matches;
+#               we render an informational popover instead of hiding
+
+
+@dataclass(slots=True)
+class _NameMode:
+    matches: list[SlashCommand]
+    selected: int
+    prefix: str  # what the user typed after the leading /
+
+
+@dataclass(slots=True)
+class _ArgMode:
+    command: SlashCommand
+    matches: list[str]
+    selected: int
+    partial: str  # what the user has typed for the arg so far
+
+
+@dataclass(slots=True)
+class _NoMatches:
+    mode: str             # "name" or "arg"
+    text: str             # the headline message ("no command matches '/xyz'")
+    valid_options: tuple[str, ...] = ()  # for arg mode, the valid choices
+    command: SlashCommand | None = None  # for arg mode, the resolved command
+
+
+_AutocompleteState = _NameMode | _ArgMode | _NoMatches | None
 
 
 # ─── Tunables ───
@@ -373,8 +491,11 @@ class RoninChat(App):
         # ─── Density state ───
         # Layout density (compact / normal / spacious) — the "font size
         # feel" widget. The terminal owns the actual font; this controls
-        # how Ronin uses cells.
+        # how Ronin uses cells. Transitions lerp the max_content_width
+        # over DENSITY_TRANSITION_S so the text smoothly slides in/out.
         self.density: Density = NORMAL
+        self._density_from: Density | None = None
+        self._density_t0: float = 0.0
 
         # ─── Mouse state ───
         # Mouse reporting is opt-in via /mouse on. When enabled, the
@@ -389,10 +510,17 @@ class RoninChat(App):
 
         # ─── Slash command autocomplete state ───
         # The dropdown is shown whenever the input buffer starts with
-        # '/' and contains no spaces. Selection is the index into the
-        # currently-filtered list. The list itself is computed on demand
-        # via _autocomplete_state() because it's cheap.
+        # '/' and the autocomplete state machine returns a non-None
+        # state. Selection is the index into the currently-active list
+        # (commands in name mode, args in arg mode). The state itself
+        # is computed on demand via _autocomplete_state() because the
+        # filter is cheap.
         self._autocomplete_selected: int = 0
+        # When True, the dropdown is hidden even though the buffer
+        # would otherwise show it. Set by Esc; cleared by any input
+        # mutation (typing or backspace) so the dropdown comes back
+        # the moment the user starts engaging again.
+        self._autocomplete_dismissed: bool = False
 
         # Probe the server immediately so we can show a useful greeting.
         server_up = self.client.health()
@@ -482,15 +610,27 @@ class RoninChat(App):
                 elif hb.action == "scroll_to_bottom":
                     self._scroll_to_bottom()
                 elif hb.action.startswith("slash:"):
-                    # Click on an autocomplete row — jump selection to
-                    # this command and accept it.
+                    # Click on an autocomplete name-mode row — jump
+                    # selection to this command and accept it.
                     name = hb.action[len("slash:"):]
-                    matches, _ = self._autocomplete_state()
-                    for i, cmd in enumerate(matches):
-                        if cmd.name == name:
-                            self._autocomplete_selected = i
-                            break
-                    self._autocomplete_accept()
+                    state = self._autocomplete_state()
+                    if isinstance(state, _NameMode):
+                        for i, cmd in enumerate(state.matches):
+                            if cmd.name == name:
+                                self._autocomplete_selected = i
+                                break
+                        self._autocomplete_accept()
+                elif hb.action.startswith("arg:"):
+                    # Click on an autocomplete arg-mode row — jump
+                    # selection to this arg and accept it.
+                    arg = hb.action[len("arg:"):]
+                    state = self._autocomplete_state()
+                    if isinstance(state, _ArgMode):
+                        for i, candidate in enumerate(state.matches):
+                            if candidate == arg:
+                                self._autocomplete_selected = i
+                                break
+                        self._autocomplete_accept()
                 return
 
     def _handle_key_event(self, event: KeyEvent) -> None:
@@ -581,37 +721,59 @@ class RoninChat(App):
             if self.input_buffer:
                 self.input_buffer = self.input_buffer[:-1]
                 # Reset autocomplete selection when the buffer changes,
-                # so the next dropdown render starts at the top.
+                # and clear the dismiss flag so the dropdown returns the
+                # moment the user starts engaging again.
                 self._autocomplete_selected = 0
+                self._autocomplete_dismissed = False
             return
         if event.key == Key.ENTER:
             if self._in_paste:
                 # Inside a paste, Enter is a literal newline.
                 self.input_buffer += "\n"
                 return
-            # If the autocomplete dropdown is open and the user has
-            # NOT yet typed the full selected command, accept the
-            # selection (replace the buffer). Otherwise submit.
-            matches, sel = self._autocomplete_state()
-            if matches:
-                cmd = matches[sel]
+            # Dispatch based on autocomplete state.
+            state = self._autocomplete_state()
+            if isinstance(state, _NameMode):
+                cmd = state.matches[state.selected]
                 expected = f"/{cmd.name}"
+                # If the buffer doesn't yet match the highlighted
+                # command, Enter accepts. For commands with no args,
+                # we accept-and-submit in one keystroke (single-key UX).
                 if self.input_buffer.rstrip() != expected:
                     self._autocomplete_accept()
+                    if cmd.complete_args is None:
+                        if self.input_buffer.strip():
+                            self._submit()
                     return
+                # Buffer already matches the command (no args, no
+                # remaining work) — submit.
+            elif isinstance(state, _ArgMode):
+                # In arg mode, Enter always accept-and-submits.
+                full_arg = state.matches[state.selected]
+                expected = f"/{state.command.name} {full_arg}"
+                if self.input_buffer.rstrip() != expected:
+                    self._autocomplete_accept()
+                if self.input_buffer.strip():
+                    self._submit()
+                return
+            # No dropdown open OR _NoMatches OR name-mode-already-matches
+            # — fall through to the normal submit path.
             if self.input_buffer.strip():
                 self._submit()
             return
         if event.key == Key.TAB:
-            # Tab always accepts the current autocomplete selection,
-            # never submits. If no dropdown is open, Tab is a no-op.
+            # Tab always accepts the current selection but NEVER submits.
+            # Lets users complete a command name or arg and then keep
+            # typing (e.g. accept /theme then keep editing the args).
+            # No-op when there's no selectable dropdown.
             if self._autocomplete_active():
                 self._autocomplete_accept()
             return
         if event.key == Key.ESC:
-            # Esc cancels an in-progress slash command. If the buffer
-            # doesn't start with /, Esc is a no-op (we don't want to
-            # blow away a long message the user is composing).
+            # Non-destructive: Esc hides the dropdown but leaves the
+            # buffer alone. The user can keep typing or backspace to
+            # recover. Esc is a no-op when the buffer doesn't start
+            # with / so we never blow away a long message.
             if self.input_buffer.startswith("/"):
                 self._autocomplete_dismiss()
             return
@@ -627,8 +789,10 @@ class RoninChat(App):
             )
             if safe:
                 self.input_buffer += safe
-                # New character → re-filter the autocomplete from the top.
+                # New character → re-filter the autocomplete from the top
+                # and bring the dropdown back if it was dismissed.
                 self._autocomplete_selected = 0
+                self._autocomplete_dismissed = False
             return
 
         # Anything else (unknown CSI, F-keys, etc.) silently ignored.
@@ -675,7 +839,11 @@ class RoninChat(App):
     # ─── Density management ───
 
     def _set_density(self, new_density: Density) -> None:
+        if new_density is self.density:
+            return
+        self._density_from = self._current_density()
         self.density = new_density
+        self._density_t0 = time.monotonic()
 
     def _density_step(self, delta: int) -> None:
         """Step density by +1 (toward spacious) or -1 (toward compact)."""
@@ -690,6 +858,23 @@ class RoninChat(App):
         if idx < 0:
             idx = 0
         self._set_density(DENSITIES[(idx + 1) % len(DENSITIES)])
+
+    def _current_density(self) -> Density:
+        """The density to use for THIS frame's render.
+
+        If a density transition is in progress, returns a blended
+        density partway between the source and the target. When the
+        transition completes, drops the source and returns self.density
+        directly.
+        """
+        if self._density_from is None:
+            return self.density
+        elapsed = time.monotonic() - self._density_t0
+        if elapsed >= DENSITY_TRANSITION_S:
+            self._density_from = None
+            return self.density
+        t = ease_out_cubic(elapsed / DENSITY_TRANSITION_S)
+        return blend_densities(self._density_from, self.density, t)
 
     # ─── Mouse mode toggle ───
 
@@ -707,55 +892,116 @@ class RoninChat(App):
 
     # ─── Slash command autocomplete ───
 
-    def _autocomplete_state(self) -> tuple[list[SlashCommand], int]:
-        """Return (matches, selected_index) for the current input buffer.
+    def _autocomplete_state(self) -> _AutocompleteState:
+        """Compute the current autocomplete state from the input buffer.
 
-        Returns ([], 0) if autocomplete should NOT be shown:
-          - input buffer doesn't start with '/'
-          - input buffer contains a space (we're past the command name)
-          - no commands match the typed prefix
+        Returns one of:
+          None        — dropdown is hidden (no slash, dismissed, etc.)
+          _NameMode   — user is typing a command name and there are matches
+          _ArgMode    — user is typing args for a known command and there
+                        are matches
+          _NoMatches  — slash mode but nothing matches (informational popover)
         """
+        if self._autocomplete_dismissed:
+            return None
+
         text = self.input_buffer
         if not text.startswith("/"):
-            return [], 0
+            return None
+
         rest = text[1:]
+
+        # Past the command name? (has a space — even just trailing)
         if " " in rest:
-            return [], 0
+            cmd_name, _, arg_partial = rest.partition(" ")
+            cmd = find_slash_command(cmd_name)
+            if cmd is None or cmd.complete_args is None:
+                # Unknown command, or this command takes no args.
+                # No autocomplete in either case.
+                return None
+            matches = cmd.complete_args(arg_partial)
+            if not matches:
+                # Show the no-matches popover with the valid options
+                # so the user knows what they can pick.
+                return _NoMatches(
+                    mode="arg",
+                    text=f"no {cmd.name} matches '{arg_partial}'",
+                    valid_options=tuple(cmd.complete_args("")),
+                    command=cmd,
+                )
+            sel = max(0, min(self._autocomplete_selected, len(matches) - 1))
+            return _ArgMode(
+                command=cmd,
+                matches=matches,
+                selected=sel,
+                partial=arg_partial,
+            )
+
+        # Name completion mode
         matches = filter_slash_commands(rest)
         if not matches:
-            return [], 0
+            return _NoMatches(
+                mode="name",
+                text=f"no command matches '/{rest}'",
+            )
         sel = max(0, min(self._autocomplete_selected, len(matches) - 1))
-        return matches, sel
+        return _NameMode(
+            matches=matches,
+            selected=sel,
+            prefix=rest,
+        )
 
     def _autocomplete_active(self) -> bool:
-        return bool(self._autocomplete_state()[0])
+        """True iff there's an active selectable dropdown right now."""
+        state = self._autocomplete_state()
+        return isinstance(state, (_NameMode, _ArgMode))
 
     def _autocomplete_move(self, delta: int) -> None:
-        matches, _ = self._autocomplete_state()
-        if not matches:
-            return
-        n = len(matches)
-        self._autocomplete_selected = (self._autocomplete_selected + delta) % n
+        """Move the highlighted selection in whichever dropdown is open."""
+        state = self._autocomplete_state()
+        if isinstance(state, _NameMode):
+            n = len(state.matches)
+            if n > 0:
+                self._autocomplete_selected = (state.selected + delta) % n
+        elif isinstance(state, _ArgMode):
+            n = len(state.matches)
+            if n > 0:
+                self._autocomplete_selected = (state.selected + delta) % n
 
-    def _autocomplete_accept(self) -> None:
-        """Replace the input buffer with the highlighted command name.
+    def _autocomplete_accept(self) -> bool:
+        """Accept the highlighted suggestion.
 
-        Adds a trailing space if the command takes args (giving the
-        user a place to keep typing) or leaves the buffer at just
-        '/cmd' if it doesn't.
+        In name mode: replace the buffer with /cmd (or /cmd<space> if
+        the command takes args).
+        In arg mode: replace the partial arg with the full match.
+
+        Returns True if anything was accepted (used by Enter handling
+        to decide whether to also submit afterward).
         """
-        matches, sel = self._autocomplete_state()
-        if not matches:
-            return
-        cmd = matches[sel]
-        self.input_buffer = f"/{cmd.name}"
-        if cmd.args_hint:
-            self.input_buffer += " "
-        self._autocomplete_selected = 0
+        state = self._autocomplete_state()
+        if isinstance(state, _NameMode):
+            cmd = state.matches[state.selected]
+            self.input_buffer = f"/{cmd.name}"
+            if cmd.complete_args is not None:
+                self.input_buffer += " "
+            self._autocomplete_selected = 0
+            return True
+        if isinstance(state, _ArgMode):
+            full_arg = state.matches[state.selected]
+            self.input_buffer = f"/{state.command.name} {full_arg}"
+            self._autocomplete_selected = 0
+            return True
+        return False
 
     def _autocomplete_dismiss(self) -> None:
-        """Cancel the in-progress slash command and reset selection."""
-        self.input_buffer = ""
+        """Hide the dropdown without clearing the buffer.
+
+        Esc calls this. The buffer is preserved so the user can keep
+        typing or backspace to recover. Any input mutation (typing,
+        backspace) clears the dismissed flag and the dropdown comes
+        back automatically.
+        """
+        self._autocomplete_dismissed = True
         self._autocomplete_selected = 0
 
     def _current_theme(self) -> Theme:
@@ -1094,15 +1340,16 @@ class RoninChat(App):
         if bottom <= top or width <= 2:
             return
 
-        # Density-driven layout: compact uses the full width with no
-        # gutter, normal/spacious add gutter cells on each side and
-        # cap the maximum content width. The effect is "less or more
-        # whitespace around the text" which is the closest the renderer
-        # can come to changing font size.
-        gutter = self.density.gutter
+        # Density-driven layout. Use _current_density() so content
+        # width smoothly slides during transitions instead of snapping.
+        # Compact uses no cap (the sentinel _DENSITY_NO_CAP degenerates
+        # to "no effective limit" because it's larger than any real
+        # terminal width). Normal/spacious cap to a comfortable reading
+        # width and add gutter cells on each side.
+        density = self._current_density()
+        gutter = density.gutter
         avail = max(1, width - 2 * gutter)
-        if self.density.max_content_width is not None:
-            avail = min(avail, self.density.max_content_width)
+        avail = min(avail, density.max_content_width)
         body_width = avail
         # Center the content column within the available cells so the
         # extra space (when content is capped) goes to both sides.
@@ -1169,7 +1416,7 @@ class RoninChat(App):
         out: list[tuple[str, int]] = []
         now = time.monotonic()
         n = len(self.messages)
-        spacing = self.density.message_spacing
+        spacing = self._current_density().message_spacing
         for i, msg in enumerate(self.messages):
             age = now - msg.created_at
             fade_t = (
@@ -1226,149 +1473,254 @@ class RoninChat(App):
         theme: Theme,
         input_y: int,
     ) -> None:
-        """Render the slash-command suggestions popover above the input.
+        """Render the autocomplete popover above the input area.
 
-        The popover is bordered, left-aligned with the prompt, and
-        sized to fit the longest entry. Each row records a hit box so
-        the row is clickable when mouse mode is on.
+        Dispatches to the appropriate painter based on the current
+        autocomplete state (name mode, arg mode, or no-matches).
         """
-        matches, sel = self._autocomplete_state()
-        if not matches:
+        state = self._autocomplete_state()
+        if state is None:
             return
-
         rows, cols = grid.rows, grid.cols
         if cols < 30 or input_y < 4:
-            # Not enough room — skip silently. The keyboard shortcuts
-            # still work; the dropdown just doesn't render.
             return
 
-        # ─── Compute the column widths and box size ───
-        # Cap the visible matches so the box never exceeds half the
-        # vertical space available above the input.
-        max_visible = max(1, min(len(matches), max(3, input_y - 3)))
-        visible = matches[:max_visible]
+        if isinstance(state, _NameMode):
+            self._paint_name_mode(grid, theme, input_y, state)
+        elif isinstance(state, _ArgMode):
+            self._paint_arg_mode(grid, theme, input_y, state)
+        elif isinstance(state, _NoMatches):
+            self._paint_no_matches(grid, theme, input_y, state)
+
+    def _blank_dropdown_rows(self, grid: Grid, theme: Theme, box_y: int, box_h: int) -> None:
+        """Blank the full row width of the rows the dropdown occupies.
+
+        Without this the chat content underneath would leak around the
+        dropdown's left and right edges. Doing this gives every dropdown
+        variant the same clean visual frame.
+        """
+        for blank_y in range(box_y, box_y + box_h):
+            if 0 <= blank_y < grid.rows:
+                fill_region(
+                    grid, 0, blank_y, grid.cols, 1,
+                    style=Style(bg=theme.bg),
+                )
+
+    def _paint_name_mode(
+        self,
+        grid: Grid,
+        theme: Theme,
+        input_y: int,
+        state: _NameMode,
+    ) -> None:
+        cols = grid.cols
+
+        # Cap visible rows so the box never exceeds the room above the input.
+        max_visible = max(1, min(len(state.matches), max(3, input_y - 3)))
+        visible = state.matches[:max_visible]
 
         cmd_col_w = max(len(f"/{c.name}") for c in visible)
-        desc_col_w = max(len(c.description) for c in visible) if visible else 0
-        hint_col_w = max(len(c.args_hint) for c in visible) if visible else 0
+        desc_col_w = max((len(c.description) for c in visible), default=0)
+        hint_col_w = max((len(c.args_hint) for c in visible), default=0)
 
-        # Inner content width: cmd  +  2  +  desc  +  (2 + hint if any)
         inner_w = cmd_col_w + 2 + desc_col_w
         if hint_col_w > 0:
             inner_w += 2 + hint_col_w
-        # Ensure a minimum width for visual heft.
         inner_w = max(inner_w, 36)
-        # Add 2 cells of horizontal padding inside the border.
-        box_w = inner_w + 4
-        # Don't exceed the available width.
-        box_w = min(box_w, cols - 2)
-
-        # Box height: top border + items + bottom border + hint row.
+        box_w = min(inner_w + 4, cols - 2)
         box_h = max_visible + 2
 
-        # Position: left-aligned with the prompt indent, sitting just
-        # above the input area with a 1-cell gap.
         box_x = max(0, PROMPT_WIDTH)
         box_y = input_y - box_h - 1
         if box_y < 1:
-            # Not enough vertical room — clamp.
             box_y = 1
             box_h = min(box_h, input_y - box_y - 1)
             if box_h < 3:
                 return
 
-        # ─── Blank out the rows the dropdown occupies ───
-        # The box's border doesn't cover the full row width, so without
-        # this the chat content underneath would "leak" around the
-        # dropdown's left and right edges. Filling the entire row first
-        # gives the dropdown a clean visual frame.
-        for blank_y in range(box_y, box_y + box_h):
-            if 0 <= blank_y < grid.rows:
-                fill_region(
-                    grid, 0, blank_y, cols, 1,
-                    style=Style(bg=theme.bg),
-                )
+        self._blank_dropdown_rows(grid, theme, box_y, box_h)
 
-        # ─── Draw the box ───
-        border_style = Style(
-            fg=theme.accent_warm,
-            bg=theme.bg_input,
-            attrs=ATTR_BOLD,
-        )
+        border_style = Style(fg=theme.accent_warm, bg=theme.bg_input, attrs=ATTR_BOLD)
         fill_style = Style(fg=theme.fg, bg=theme.bg_input)
         paint_box(
-            grid,
-            box_x,
-            box_y,
-            box_w,
-            box_h,
-            style=border_style,
-            fill_style=fill_style,
+            grid, box_x, box_y, box_w, box_h,
+            style=border_style, fill_style=fill_style,
         )
 
-        # ─── Draw the items ───
-        item_x = box_x + 2  # 2 cells of left padding inside the border
+        item_x = box_x + 2
         for i, cmd in enumerate(visible):
             row_y = box_y + 1 + i
             if row_y >= box_y + box_h - 1:
-                break  # ran out of vertical room
+                break
 
-            is_selected = i == sel
+            is_selected = i == state.selected
             row_bg = theme.accent if is_selected else theme.bg_input
             row_fg = theme.bg if is_selected else theme.fg
             dim_fg = theme.bg if is_selected else theme.fg_dim
             subtle_fg = theme.bg if is_selected else theme.fg_subtle
 
-            # Fill the row's background (so the highlight extends across)
             fill_region(
-                grid,
-                box_x + 1,
-                row_y,
-                box_w - 2,
-                1,
+                grid, box_x + 1, row_y, box_w - 2, 1,
                 style=Style(bg=row_bg),
             )
 
-            # Command name
             cmd_text = f"/{cmd.name}"
-            paint_text(
-                grid,
-                cmd_text,
-                item_x,
-                row_y,
-                style=Style(fg=row_fg, bg=row_bg, attrs=ATTR_BOLD),
-            )
+            paint_text(grid, cmd_text, item_x, row_y,
+                       style=Style(fg=row_fg, bg=row_bg, attrs=ATTR_BOLD))
 
-            # Description (right of the command, aligned column)
             desc_x = item_x + cmd_col_w + 2
-            paint_text(
-                grid,
-                cmd.description,
-                desc_x,
-                row_y,
-                style=Style(fg=dim_fg, bg=row_bg),
-            )
+            paint_text(grid, cmd.description, desc_x, row_y,
+                       style=Style(fg=dim_fg, bg=row_bg))
 
-            # Args hint (if any) — pushed to the right of the description
             if cmd.args_hint:
                 hint_x = desc_x + desc_col_w + 2
+                paint_text(grid, cmd.args_hint, hint_x, row_y,
+                           style=Style(fg=subtle_fg, bg=row_bg, attrs=ATTR_DIM))
+
+            # Hit box for clickable rows when mouse mode is on.
+            self._hit_boxes.append(
+                _HitBox(box_x + 1, row_y, box_w - 2, 1, f"slash:{cmd.name}")
+            )
+
+    def _paint_arg_mode(
+        self,
+        grid: Grid,
+        theme: Theme,
+        input_y: int,
+        state: _ArgMode,
+    ) -> None:
+        cols = grid.cols
+        cmd = state.command
+
+        max_visible = max(1, min(len(state.matches), max(3, input_y - 4)))
+        visible = state.matches[:max_visible]
+
+        # Header row shows "<cmd> · <arg hint>" so the user knows what
+        # they're picking from. The arg rows below show each option.
+        header = f" /{cmd.name} · {cmd.description} "
+        arg_col_w = max(len(a) for a in visible)
+        inner_w = max(len(header) - 2, arg_col_w + 4)
+        inner_w = max(inner_w, 36)
+        box_w = min(inner_w + 4, cols - 2)
+        # Box height: top border + header row + items + bottom border
+        box_h = 1 + max_visible + 2
+
+        box_x = max(0, PROMPT_WIDTH)
+        box_y = input_y - box_h - 1
+        if box_y < 1:
+            box_y = 1
+            box_h = min(box_h, input_y - box_y - 1)
+            if box_h < 4:
+                return
+
+        self._blank_dropdown_rows(grid, theme, box_y, box_h)
+
+        border_style = Style(fg=theme.accent, bg=theme.bg_input, attrs=ATTR_BOLD)
+        fill_style = Style(fg=theme.fg, bg=theme.bg_input)
+        paint_box(
+            grid, box_x, box_y, box_w, box_h,
+            style=border_style, fill_style=fill_style,
+        )
+
+        # Header (just below the top border)
+        header_y = box_y + 1
+        if header_y < box_y + box_h - 1:
+            fill_region(
+                grid, box_x + 1, header_y, box_w - 2, 1,
+                style=Style(bg=theme.bg_footer),
+            )
+            paint_text(
+                grid, header, box_x + 2, header_y,
+                style=Style(fg=theme.fg_dim, bg=theme.bg_footer, attrs=ATTR_BOLD),
+            )
+
+        # Item rows (start one row below the header)
+        item_x = box_x + 2
+        first_item_y = box_y + 2
+        for i, arg in enumerate(visible):
+            row_y = first_item_y + i
+            if row_y >= box_y + box_h - 1:
+                break
+
+            is_selected = i == state.selected
+            row_bg = theme.accent if is_selected else theme.bg_input
+            row_fg = theme.bg if is_selected else theme.fg
+            dim_fg = theme.bg if is_selected else theme.fg_dim
+
+            fill_region(
+                grid, box_x + 1, row_y, box_w - 2, 1,
+                style=Style(bg=row_bg),
+            )
+
+            # Highlight the matched prefix in the arg
+            paint_text(
+                grid, arg, item_x, row_y,
+                style=Style(fg=row_fg, bg=row_bg, attrs=ATTR_BOLD),
+            )
+            # Show the partial as a dim suffix to make matching obvious
+            if state.partial:
+                hint_x = item_x + arg_col_w + 2
+                hint_text = f"matched '{state.partial}'"
                 paint_text(
-                    grid,
-                    cmd.args_hint,
-                    hint_x,
-                    row_y,
-                    style=Style(fg=subtle_fg, bg=row_bg, attrs=ATTR_DIM),
+                    grid, hint_text, hint_x, row_y,
+                    style=Style(fg=dim_fg, bg=row_bg, attrs=ATTR_DIM),
                 )
 
-            # Record a hit box for this row so it's clickable.
             self._hit_boxes.append(
-                _HitBox(
-                    x=box_x + 1,
-                    y=row_y,
-                    w=box_w - 2,
-                    h=1,
-                    action=f"slash:{cmd.name}",
-                )
+                _HitBox(box_x + 1, row_y, box_w - 2, 1, f"arg:{arg}")
+            )
+
+    def _paint_no_matches(
+        self,
+        grid: Grid,
+        theme: Theme,
+        input_y: int,
+        state: _NoMatches,
+    ) -> None:
+        """Informational popover when nothing matches the typed prefix.
+
+        Dimmer styling than the regular dropdown — fg_dim border and
+        text — so it reads as 'FYI, no results' rather than an error.
+        """
+        cols = grid.cols
+
+        # Build the lines we want to display
+        lines: list[str] = [state.text]
+        if state.mode == "name":
+            lines.append("type / alone to see all commands")
+        elif state.mode == "arg" and state.valid_options:
+            valid = ", ".join(state.valid_options)
+            lines.append(f"valid: {valid}")
+
+        inner_w = max(len(l) for l in lines)
+        inner_w = max(inner_w, 32)
+        box_w = min(inner_w + 4, cols - 2)
+        box_h = len(lines) + 2  # top + bottom borders + lines
+
+        box_x = max(0, PROMPT_WIDTH)
+        box_y = input_y - box_h - 1
+        if box_y < 1:
+            return
+
+        self._blank_dropdown_rows(grid, theme, box_y, box_h)
+
+        # Quieter colors than the regular dropdown — this is informational.
+        border_style = Style(fg=theme.fg_dim, bg=theme.bg_input)
+        fill_style = Style(fg=theme.fg_dim, bg=theme.bg_input)
+        paint_box(
+            grid, box_x, box_y, box_w, box_h,
+            style=border_style, fill_style=fill_style,
+        )
+
+        for i, text in enumerate(lines):
+            row_y = box_y + 1 + i
+            if row_y >= box_y + box_h - 1:
+                break
+            # First line is the headline; subsequent lines are dimmer.
+            fg = theme.fg_dim if i == 0 else theme.fg_subtle
+            paint_text(
+                grid, text, box_x + 2, row_y,
+                style=Style(fg=fg, bg=theme.bg_input, attrs=ATTR_DIM),
             )
 
     # ─── Static footer ───
