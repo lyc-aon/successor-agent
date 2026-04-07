@@ -277,6 +277,27 @@ def test_head_with_n_flag() -> None:
     assert card.verb == "read-file-head"
 
 
+def test_head_with_posix_short_count() -> None:
+    """POSIX short form — `head -5 file` is equivalent to `-n 5`.
+    GNU coreutils, BSD userland, and busybox all honor this.
+    """
+    for cmd in ("head -5 file.txt", "head -25 file.txt"):
+        card = parse_bash(cmd)
+        p = dict(card.params)
+        assert p["path"] == "file.txt", cmd
+        expected_count = cmd.split()[1][1:]  # "-5" → "5"
+        assert p["lines"] == expected_count, cmd
+        assert card.verb == "read-file-head", cmd
+
+
+def test_tail_with_posix_short_count() -> None:
+    card = parse_bash("tail -3 /var/log/syslog")
+    p = dict(card.params)
+    assert p["lines"] == "3"
+    assert p["path"] == "/var/log/syslog"
+    assert card.verb == "read-file-tail"
+
+
 def test_tail_follow() -> None:
     card = parse_bash("tail -f /var/log/syslog")
     p = dict(card.params)

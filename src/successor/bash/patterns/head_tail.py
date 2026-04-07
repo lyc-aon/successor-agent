@@ -32,6 +32,17 @@ def _parse_head_or_tail(
             n_value = arg.split("=", 1)[1]
         elif arg in ("-f", "--follow"):
             follow = True
+        elif (
+            len(arg) > 1
+            and arg.startswith("-")
+            and arg[1:].isdigit()
+        ):
+            # POSIX short form: `head -5 file` is equivalent to
+            # `head -n 5 file`. GNU coreutils, BSD userland, and
+            # busybox all honor this. The parser now extracts the
+            # count so the card's `lines` param matches what the
+            # model actually asked for.
+            n_value = arg[1:]
         elif not arg.startswith("-"):
             paths.append(arg)
         i += 1
