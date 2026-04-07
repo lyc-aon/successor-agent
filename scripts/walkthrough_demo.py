@@ -640,6 +640,158 @@ def run_walkthrough_chat(driver: Driver) -> None:
     driver.section(27, "walkthrough complete")
 
 
+def run_walkthrough_showcase(driver: Driver) -> None:
+    """Model-driven feature showcase against the live qwen model.
+
+    This mode is the one to record for a feature video. The script
+    just types carefully-chosen prompts and waits — the MODEL drives
+    everything: thinking phase with the live spinner, tool_call
+    streaming with verb inference, animated tool cards with output
+    pumping, agent loop continuation where the model talks about
+    what it just ran.
+
+    Each prompt is designed to:
+
+      - Be safe (read-only or writes only to /tmp)
+      - Naturally pull the model toward the bash tool (imperative
+        phrasing like "use bash to ...")
+      - Generate enough output to be visually impressive on camera
+      - Demo a different bash verb so the verb classifier shows
+        its full range (list-directory, read-file, search-text,
+        find-files, git, write-file)
+
+    The last prompt is the moneyshot: a heredoc-based file write
+    followed by a read-back. This triggers the live verb-inference-
+    from-partial-streaming-arguments magic AND the agent loop
+    continuation across two tool calls.
+
+    ## Prerequisites
+
+      - Active profile must have bash tool enabled (the default
+        and successor-dev profiles both have it on)
+      - Local model must be reachable (this is a live model
+        showcase — there's no graceful fallback)
+      - Run from the successor repo root so the model's relative
+        paths (README.md, src/successor/) resolve correctly
+
+    Pump durations assume a snappy local model (~50 tok/sec
+    generation, ~5-15s reasoning per prompt). Bump them if your
+    model is slower; shrink them if it's faster.
+    """
+
+    # Section 1: empty-state hero panel — let the viewer see the
+    # active profile / provider / context window before anything
+    # starts happening.
+    driver.section(1, "empty-state hero panel")
+    driver.pump_for(5.0)
+
+    # ─── Prompt 1: list-directory verb ───
+    # `ls -la /tmp` is safe, universal, and produces enough output
+    # to make the tool card look full. Asking the model to also
+    # count items forces a continuation turn after the bash result
+    # comes back.
+    driver.section(2, "PROMPT 1: list /tmp — type")
+    type_string(
+        driver,
+        "Use bash to list everything in /tmp with `ls -la`, then tell me in one short sentence how many things are there.",
+    )
+    driver.pump_for(0.5)
+
+    driver.section(3, "PROMPT 1: submit + thinking + tool card + continuation")
+    press_enter(driver)
+    driver.pump_for(20.0)
+
+    # ─── Prompt 2: read-file verb ───
+    # README.md is in the repo root so the model can use a relative
+    # path. The continuation summarizes the file contents — shows
+    # the model actually reading the tool output.
+    driver.section(4, "PROMPT 2: read README — type")
+    type_string(
+        driver,
+        "Use bash to read this repo's README.md file, then summarize what successor is in two short sentences.",
+    )
+    driver.pump_for(0.5)
+
+    driver.section(5, "PROMPT 2: submit + read-file card + summary")
+    press_enter(driver)
+    driver.pump_for(25.0)
+
+    # ─── Prompt 3: search-text verb ───
+    # grep -r against the source tree. BrailleArt is a clean,
+    # specific symbol that returns 8-12 hits — enough to fill the
+    # tool card without overflowing.
+    driver.section(6, "PROMPT 3: grep BrailleArt — type")
+    type_string(
+        driver,
+        "Use bash to grep for 'BrailleArt' in src/successor/, then tell me in one sentence what it's used for.",
+    )
+    driver.pump_for(0.5)
+
+    driver.section(7, "PROMPT 3: submit + search-text card + answer")
+    press_enter(driver)
+    driver.pump_for(22.0)
+
+    # ─── Prompt 4: find-files verb ───
+    # `find` with structured output — different verb glyph than ls.
+    # Limiting to render/ keeps the output bounded.
+    driver.section(8, "PROMPT 4: find python files — type")
+    type_string(
+        driver,
+        "Use bash to find all Python files in src/successor/render/, then tell me how many you found.",
+    )
+    driver.pump_for(0.5)
+
+    driver.section(9, "PROMPT 4: submit + find-files card + count")
+    press_enter(driver)
+    driver.pump_for(18.0)
+
+    # ─── Prompt 5: git verb ───
+    # git log shows the per-commit verb glyph and the commit-line
+    # parsing in the output pipeline.
+    driver.section(10, "PROMPT 5: git log — type")
+    type_string(
+        driver,
+        "Use bash to show the last 5 commits in this repo with `git log --oneline -5`, then tell me what the most recent change was about.",
+    )
+    driver.pump_for(0.5)
+
+    driver.section(11, "PROMPT 5: submit + git card + summary")
+    press_enter(driver)
+    driver.pump_for(22.0)
+
+    # ─── Prompt 6: write-file via heredoc + read-back (MONEYSHOT) ───
+    # This is THE one to highlight in the video. The model emits
+    # `cat > /tmp/showcase.txt << 'EOF'` and the parser infers
+    # write-file from the partial command DURING streaming, before
+    # the heredoc body even arrives. Then the model runs cat to
+    # read it back — two tool calls in one prompt, continuation
+    # turn between them.
+    driver.section(12, "PROMPT 6: heredoc write + read-back — type")
+    type_string(
+        driver,
+        "Create a file at /tmp/successor-walkthrough.txt containing exactly three lines: first 'Hello from successor', second 'Generated by the walkthrough', third 'Safe to delete'. Then read the file back to confirm what you wrote.",
+    )
+    driver.pump_for(0.5)
+
+    driver.section(13, "PROMPT 6: submit + write card + read card + answer")
+    press_enter(driver)
+    driver.pump_for(35.0)
+
+    # ─── Settle + clean exit ───
+    driver.section(14, "settle — final card visible")
+    driver.pump_for(3.0)
+
+    driver.section(15, "type /quit")
+    type_string(driver, "/quit")
+    driver.pump_for(0.4)
+
+    driver.section(16, "submit /quit → exit")
+    press_enter(driver)
+    driver.pump_for(1.0)
+
+    driver.section(17, "walkthrough complete")
+
+
 # ─── Timeline preview ───
 
 
@@ -688,21 +840,24 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         prog="walkthrough_demo",
         description=(
-            "Scripted walkthrough driver for Successor. Two modes: "
-            "`setup` (drives the setup wizard against a temp config "
-            "dir, no model required) and `chat` (drives a live chat "
-            "against the user's active profile, needs a working model)."
+            "Scripted walkthrough driver for Successor. Three modes: "
+            "`setup` (drives the wizard, no model required), `chat` "
+            "(drives the chat UI showing slash commands and theme "
+            "cycling), and `showcase` (model-driven feature demo "
+            "where qwen does the cool stuff and the script just "
+            "feeds carefully-chosen prompts)."
         ),
     )
     parser.add_argument(
         "--mode",
-        choices=["setup", "chat"],
+        choices=["setup", "chat", "showcase"],
         default="setup",
         help=(
             "which walkthrough to run. setup = first-time profile "
-            "creation wizard arc (default, no model required). "
-            "chat = live chat against your active profile, showing "
-            "streaming reply, /bash, /budget, /burn, /compact, etc."
+            "creation wizard arc (no model required). chat = live "
+            "chat with manual UI feature drives. showcase = the one "
+            "to record for a feature video — model drives every "
+            "frame, script just types prompts and waits."
         ),
     )
     args = parser.parse_args()
@@ -727,10 +882,16 @@ def main() -> int:
         ))
         run_walkthrough = run_walkthrough_setup
         successor_argv = ["successor", "setup"]
-    else:
+    elif args.mode == "chat":
         # Chat mode: use the user's REAL active profile so the live
         # model is reachable. No temp config dir.
         run_walkthrough = run_walkthrough_chat
+        successor_argv = ["successor", "chat"]
+    else:
+        # Showcase mode: same as chat (real config, real model) but
+        # the walkthrough is purely prompts that ask the model to do
+        # things. The script types and waits; the model drives.
+        run_walkthrough = run_walkthrough_showcase
         successor_argv = ["successor", "chat"]
 
     print()
@@ -765,6 +926,15 @@ def main() -> int:
         print("  profile. If your local llama-server isn't running,")
         print("  the streaming sections will hit the friendly error")
         print("  message instead of a real reply.")
+        print()
+    if args.mode == "showcase":
+        print("⚠ Showcase mode needs:")
+        print("  - A reachable model on your active profile")
+        print("  - Bash tool enabled on the profile (default + dev")
+        print("    profiles both have it on)")
+        print("  - Run from the successor repo root so the model's")
+        print("    relative paths (README.md, src/successor/, etc.)")
+        print("    resolve correctly")
         print()
     print("START YOUR SCREEN RECORDING NOW, then press Enter to begin.")
     try:
