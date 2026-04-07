@@ -141,8 +141,29 @@ LIGHT_THEME: Theme = Theme(
 )
 
 
+# ─── Forge theme — the original samurai-red ronin palette ───
+#
+# Ported from the v0 chat hardcoded constants (commit 1286143's INK_*).
+# Atmospheric, dark, warm-toned. The "wandering samurai by a fire"
+# aesthetic that made the first few commits feel alive.
+FORGE_THEME: Theme = Theme(
+    name="forge",
+    icon="\u2726",  # ✦
+    bg=0x10070A,           # was INK_DEEP
+    bg_input=0x070204,     # was INK_DEEPER
+    bg_footer=0x1A0A0E,    # was INK_FOOTER
+    fg=0xE6D9B8,           # was INK_BONE
+    fg_dim=0x6B5A4A,       # was INK_DUST
+    fg_subtle=0x3A1418,    # was INK_DIM
+    accent=0xC1272D,       # was INK_BLOOD
+    accent_warm=0xFF6347,  # was INK_EMBER
+    accent_warn=0xFFCC33,  # was INK_GOLD
+)
+
+
 # Registry — order matters for cycling.
-THEMES: tuple[Theme, ...] = (DARK_THEME, LIGHT_THEME)
+# dark → light → forge → dark
+THEMES: tuple[Theme, ...] = (DARK_THEME, LIGHT_THEME, FORGE_THEME)
 
 
 def next_theme(current: Theme) -> Theme:

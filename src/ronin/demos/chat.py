@@ -45,7 +45,9 @@ communicate via a thread-safe queue.
 
 from __future__ import annotations
 
+import random
 import time
+from dataclasses import dataclass
 
 from ..input.keys import (
     Key,
@@ -77,6 +79,7 @@ from ..render.terminal import Terminal
 from ..render.text import PreparedText, ease_out_cubic, hard_wrap, lerp_rgb
 from ..render.theme import (
     DARK_THEME,
+    FORGE_THEME,
     LIGHT_THEME,
     THEMES,
     Theme,
@@ -91,6 +94,85 @@ from ..render.theme import (
 # care about animation cost; this is just a visual touch that shows
 # the entire UI smoothly fading from one palette to another.
 THEME_TRANSITION_S = 0.4
+
+
+# ─── Density (the "font size" widget) ───
+#
+# Terminal apps can't change the actual font in any portable way (the
+# terminal owns the font). What we CAN control is how Ronin uses cells:
+# how much padding around the chat content, how many blank rows between
+# messages, how wide the content column is allowed to grow.
+#
+# Three density modes give the same FEEL as font size without touching
+# the terminal's font:
+#
+#   compact   minimal padding, no inter-message spacing, full width.
+#             Maximum information density. Useful for reading long
+#             threads on small terminals.
+#   normal    1-cell padding, 1-line spacing, content width capped at
+#             120 cells on wide terminals. The default.
+#   spacious  4-cell gutter, 2-line spacing, content capped at 80 cells.
+#             Lots of breathing room. Each message has visual weight.
+#             Feels "bigger" because there's more whitespace per word.
+
+
+@dataclass(frozen=True, slots=True)
+class Density:
+    """A layout density preset for the chat content area.
+
+    gutter:                cells of left+right padding around the chat body
+    message_spacing:       blank rows between consecutive messages
+    max_content_width:     cap on the chat body width in cells
+                           (None means use the full available width)
+    """
+    name: str
+    gutter: int
+    message_spacing: int
+    max_content_width: int | None
+
+
+COMPACT = Density(
+    name="compact",
+    gutter=0,
+    message_spacing=0,
+    max_content_width=None,
+)
+
+NORMAL = Density(
+    name="normal",
+    gutter=1,
+    message_spacing=1,
+    max_content_width=120,
+)
+
+SPACIOUS = Density(
+    name="spacious",
+    gutter=4,
+    message_spacing=2,
+    max_content_width=80,
+)
+
+
+# Order matters for cycling: smaller → larger so Alt+= advances toward
+# spacious and Alt+- retreats toward compact.
+DENSITIES: tuple[Density, ...] = (COMPACT, NORMAL, SPACIOUS)
+
+
+def find_density(name: str) -> Density | None:
+    """Look up a density by name (case-insensitive)."""
+    n = name.strip().lower()
+    for d in DENSITIES:
+        if d.name == n:
+            return d
+    return None
+
+
+def density_index(d: Density) -> int:
+    """Return the position of d in DENSITIES, or -1 if not found."""
+    try:
+        return DENSITIES.index(d)
+    except ValueError:
+        return -1
 
 
 # ─── Tunables ───
@@ -186,6 +268,12 @@ class RoninChat(App):
         self._theme_from: Theme | None = None
         self._theme_t0: float = 0.0
 
+        # ─── Density state ───
+        # Layout density (compact / normal / spacious) — the "font size
+        # feel" widget. The terminal owns the actual font; this controls
+        # how Ronin uses cells.
+        self.density: Density = NORMAL
+
         # Probe the server immediately so we can show a useful greeting.
         server_up = self.client.health()
         if server_up:
@@ -248,6 +336,17 @@ class RoninChat(App):
         # ─── Theme cycle (always available, even mid-stream) ───
         if event.is_ctrl and event.char == "t":
             self._cycle_theme()
+            return
+
+        # ─── Density (font-size feel) — Alt+=/Alt+-/Ctrl+] always available ───
+        if event.is_alt and event.char in ("=", "+"):
+            self._density_step(+1)
+            return
+        if event.is_alt and event.char == "-":
+            self._density_step(-1)
+            return
+        if event.is_ctrl and event.char == "]":
+            self._cycle_density()
             return
 
         # ─── Scroll keys (always available, even mid-stream) ───
@@ -368,6 +467,25 @@ class RoninChat(App):
     def _cycle_theme(self) -> None:
         self._set_theme(next_theme(self.theme))
 
+    # ─── Density management ───
+
+    def _set_density(self, new_density: Density) -> None:
+        self.density = new_density
+
+    def _density_step(self, delta: int) -> None:
+        """Step density by +1 (toward spacious) or -1 (toward compact)."""
+        idx = density_index(self.density)
+        if idx < 0:
+            idx = DENSITIES.index(NORMAL)
+        new_idx = max(0, min(len(DENSITIES) - 1, idx + delta))
+        self._set_density(DENSITIES[new_idx])
+
+    def _cycle_density(self) -> None:
+        idx = density_index(self.density)
+        if idx < 0:
+            idx = 0
+        self._set_density(DENSITIES[(idx + 1) % len(DENSITIES)])
+
     def _current_theme(self) -> Theme:
         """The theme to use for THIS frame's render.
 
@@ -398,6 +516,7 @@ class RoninChat(App):
         # /theme       — show current theme and available options
         # /theme dark  — switch to dark theme
         # /theme light — switch to light theme
+        # /theme forge — switch to forge theme
         # /theme cycle — cycle to next theme
         if text.startswith("/theme"):
             parts = text.split(maxsplit=1)
@@ -425,6 +544,38 @@ class RoninChat(App):
                 )
                 return
             self._set_theme(target)
+            return
+
+        # /density       — show current density and available options
+        # /density compact / normal / spacious — set
+        # /density cycle — cycle to next
+        if text.startswith("/density"):
+            parts = text.split(maxsplit=1)
+            if len(parts) == 1:
+                names = ", ".join(d.name for d in DENSITIES)
+                hint = (
+                    f"current density: {self.density.name}. "
+                    f"Available: {names}. Use /density <name> or Alt+=/Alt+- "
+                    f"or Ctrl+] to cycle."
+                )
+                self.messages.append(_Message("ronin", hint, synthetic=True))
+                return
+            arg = parts[1].strip().lower()
+            if arg == "cycle":
+                self._cycle_density()
+                return
+            target = find_density(arg)
+            if target is None:
+                self.messages.append(
+                    _Message(
+                        "ronin",
+                        f"no density named '{arg}'. try one of: "
+                        f"{', '.join(d.name for d in DENSITIES)}.",
+                        synthetic=True,
+                    )
+                )
+                return
+            self._set_density(target)
             return
 
         # Add the user's message and start a stream.
@@ -547,13 +698,25 @@ class RoninChat(App):
         theme_x = max(0, cols - len(theme_label))
         paint_text(grid, theme_label, theme_x, 0, style=theme_style)
 
-        # ─── Scroll indicator (left of the theme widget when scrolled) ───
+        # ─── Density widget (just left of the theme widget) ───
+        # Different background color so it visually distinguishes from
+        # the theme widget. Its keybindings are Alt+=, Alt+-, Ctrl+].
+        density_label = f" {self.density.name} "
+        density_style = Style(
+            fg=theme.bg,
+            bg=theme.accent_warm,
+            attrs=ATTR_BOLD,
+        )
+        density_x = max(0, theme_x - len(density_label) - 1)
+        paint_text(grid, density_label, density_x, 0, style=density_style)
+
+        # ─── Scroll indicator (left of the density widget when scrolled) ───
         if self.scroll_offset > 0:
             if self._stream is not None:
                 indicator = f" ↑ {self.scroll_offset} · ronin responding · Ctrl+E newest "
             else:
                 indicator = f" ↑ {self.scroll_offset}/{self._max_scroll()} · End for newest "
-            ix = max(0, theme_x - len(indicator))
+            ix = max(0, density_x - len(indicator))
             paint_text(
                 grid,
                 indicator,
@@ -583,8 +746,19 @@ class RoninChat(App):
         if bottom <= top or width <= 2:
             return
 
-        body_width = max(1, width - 2)
-        body_x = 1
+        # Density-driven layout: compact uses the full width with no
+        # gutter, normal/spacious add gutter cells on each side and
+        # cap the maximum content width. The effect is "less or more
+        # whitespace around the text" which is the closest the renderer
+        # can come to changing font size.
+        gutter = self.density.gutter
+        avail = max(1, width - 2 * gutter)
+        if self.density.max_content_width is not None:
+            avail = min(avail, self.density.max_content_width)
+        body_width = avail
+        # Center the content column within the available cells so the
+        # extra space (when content is capped) goes to both sides.
+        body_x = max(gutter, (width - body_width) // 2)
         chat_h = bottom - top
 
         # Build the flat list of committed-message lines.
@@ -647,6 +821,7 @@ class RoninChat(App):
         out: list[tuple[str, int]] = []
         now = time.monotonic()
         n = len(self.messages)
+        spacing = self.density.message_spacing
         for i, msg in enumerate(self.messages):
             age = now - msg.created_at
             fade_t = (
@@ -663,8 +838,10 @@ class RoninChat(App):
                 fg = base_color
             for line in msg.body.lines(body_width):
                 out.append((line, fg))
+            # Density-driven spacer rows between messages.
             if i < n - 1:
-                out.append(("", fg))
+                for _ in range(spacing):
+                    out.append(("", fg))
         return out
 
     def _build_streaming_lines(

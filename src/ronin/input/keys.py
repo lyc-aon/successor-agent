@@ -344,6 +344,24 @@ class KeyDecoder:
             out.append(KeyEvent(char=letter, mods=MOD_CTRL))
             return
 
+        # Extended Ctrl-prefix codes:
+        #   0x1c FS = Ctrl+\
+        #   0x1d GS = Ctrl+]
+        #   0x1e RS = Ctrl+^
+        #   0x1f US = Ctrl+_
+        if byte == 0x1C:
+            out.append(KeyEvent(char="\\", mods=MOD_CTRL))
+            return
+        if byte == 0x1D:
+            out.append(KeyEvent(char="]", mods=MOD_CTRL))
+            return
+        if byte == 0x1E:
+            out.append(KeyEvent(char="^", mods=MOD_CTRL))
+            return
+        if byte == 0x1F:
+            out.append(KeyEvent(char="_", mods=MOD_CTRL))
+            return
+
         # Printable ASCII
         if 0x20 <= byte < 0x7F:
             out.append(KeyEvent(char=chr(byte)))
