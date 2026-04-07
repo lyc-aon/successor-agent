@@ -363,21 +363,41 @@ WHEEL_SCROLL_LINES = 3
 
 
 def _serialize_tool_card_for_api(card: ToolCard) -> str:
-    """Serialize a ToolCard as plain text for the model's API context.
+    """Serialize a ToolCard as an XML tool-result block for the model.
 
-    Mirrors what `agent.log.LogMessage.to_api_dict()` does on the agent
-    side: emit `$ command\\n<output>\\n[exit N]` so the model can read
-    its own previous bash invocations and the output that came back.
-    The model treats this as if it had emitted the command itself.
+    The old format was `$ command\\n<output>`. The problem: the model
+    saw `$ cmd` in its own history and learned to imitate the format,
+    emitting `$ cat missing.txt` as plain text INSTEAD of a fenced
+    bash block — no tool card would fire, the command never ran, the
+    user just saw raw text.
+
+    XML tags are harder to imitate accidentally (models don't emit
+    `<tool-output>` unless specifically asked) AND they're visibly
+    distinct from command-invocation syntax, so the model's context
+    clearly separates "this is what I ran" from "this is what
+    happened next". The system prompt reinforces this: commands go
+    in fenced bash blocks, tool-output tags are read-only history.
+
+    Format:
+      <tool-output name="bash" exit="N">
+      [stdout]
+      [stderr lines prefixed with "stderr:"]
+      </tool-output>
     """
-    body_lines = [f"$ {card.raw_command}"]
+    lines: list[str] = []
+    exit_attr = f' exit="{card.exit_code}"' if card.exit_code is not None else ""
+    lines.append(f'<tool-output name="bash"{exit_attr}>')
+    body: list[str] = []
     if card.output:
-        body_lines.append(card.output.rstrip())
+        body.append(card.output.rstrip())
     if card.stderr and card.stderr.strip():
-        body_lines.append(f"[stderr] {card.stderr.rstrip()}")
-    if card.exit_code is not None and card.exit_code != 0:
-        body_lines.append(f"[exit {card.exit_code}]")
-    return "\n".join(body_lines)
+        stderr_text = card.stderr.rstrip()
+        body.append("\n".join(f"stderr: {line}" for line in stderr_text.split("\n")))
+    if not body:
+        body.append("(no output)")
+    lines.append("\n".join(body))
+    lines.append("</tool-output>")
+    return "\n".join(lines)
 
 
 def static_args(*choices: str) -> Callable[[str], list[str]]:
@@ -2224,6 +2244,7 @@ class SuccessorChat(App):
                     allow_mutating=bash_cfg.allow_mutating,
                     timeout=bash_cfg.timeout_s,
                     max_output_bytes=bash_cfg.max_output_bytes,
+                    cwd=bash_cfg.working_directory,
                 )
             except RefusedCommand as exc:
                 # Show the refused card (preview-only, no execution)
@@ -2485,6 +2506,21 @@ class SuccessorChat(App):
             tools_section = build_system_prompt_tools_section(list(enabled_tools))
             if tools_section:
                 sys_prompt = f"{sys_prompt}\n\n{tools_section}"
+            # If bash is enabled AND the profile pins a working
+            # directory, tell the model the truth about where its
+            # commands run. Otherwise it has to guess from echoes
+            # of pwd / ls output.
+            if "bash" in enabled_tools:
+                bash_cfg = resolve_bash_config(self.profile)
+                if bash_cfg.working_directory:
+                    sys_prompt = (
+                        f"{sys_prompt}\n\n"
+                        f"## Bash working directory\n\n"
+                        f"Every bash command you emit runs with "
+                        f"`cwd={bash_cfg.working_directory}`. Relative "
+                        f"paths resolve from there. You do not need "
+                        f"to prefix file names with an absolute path."
+                    )
 
         # Build the conversation history for the model. Walk in API
         # order (summary at the START — chronologically correct) and
@@ -3097,24 +3133,31 @@ class SuccessorChat(App):
                 if self._stream_bash_detector is not None:
                     self._stream_bash_detector.feed(ev.text)
             elif isinstance(ev, StreamEnded):
-                full_content = "".join(self._stream_content)
+                # Flush the detector BEFORE committing the assistant
+                # message so we can use its cleaned text — the stream
+                # text with every fenced bash block elided. Without
+                # this, the assistant body would double-render the
+                # block as a markdown code block AND the tool card
+                # below would show the same command again.
+                if self._stream_bash_detector is not None:
+                    self._stream_bash_detector.flush()
+                    full_content = self._stream_bash_detector.cleaned_text().strip()
+                    all_blocks = self._stream_bash_detector.completed()
+                    self._stream_bash_detector = None
+                else:
+                    full_content = "".join(self._stream_content).strip()
+                    all_blocks = []
                 if not full_content:
-                    full_content = "(no answer — model produced only reasoning)"
+                    full_content = "(ran the commands — see cards below)" if all_blocks else "(no answer — model produced only reasoning)"
                 self.messages.append(_Message("successor", full_content))
                 self._last_usage = ev.usage
                 self._stream = None
                 self._stream_content = []
                 self._stream_reasoning_chars = 0
-                # If bash detection was active, drain any final blocks
-                # (flush() resolves fences without trailing newlines and
-                # appends to _completed) then dispatch the cumulative
-                # list. Tool cards appear AFTER the assistant message
-                # in the chat — visually: assistant text, then tool
-                # cards stacked below as separate _Message instances.
-                if self._stream_bash_detector is not None:
-                    self._stream_bash_detector.flush()
-                    all_blocks = self._stream_bash_detector.completed()
-                    self._stream_bash_detector = None
+                # Tool cards appear AFTER the assistant message in the
+                # chat — visually: assistant text, then tool cards
+                # stacked below as separate _Message instances.
+                if all_blocks:
                     self._dispatch_streamed_bash_blocks(all_blocks)
             elif isinstance(ev, StreamError):
                 partial = "".join(self._stream_content)
@@ -3156,6 +3199,7 @@ class SuccessorChat(App):
                     allow_mutating=bash_cfg.allow_mutating,
                     timeout=bash_cfg.timeout_s,
                     max_output_bytes=bash_cfg.max_output_bytes,
+                    cwd=bash_cfg.working_directory,
                 )
             except RefusedCommand as exc:
                 # Show the refused (preview) card so the user sees

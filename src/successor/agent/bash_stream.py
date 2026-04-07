@@ -96,6 +96,12 @@ class BashStreamDetector:
     _block_buffer: str = ""  # content of the in-progress block
     _completed: list[str] = field(default_factory=list)
     _at_line_start: bool = True  # are we at the beginning of a line?
+    # Cleaned stream text — every char consumed outside of a fenced
+    # bash block gets appended here. Chars inside a block (including
+    # the fence markers themselves) are dropped. After end-of-stream,
+    # `cleaned_text()` returns this so the chat can commit an assistant
+    # message that doesn't re-render the bash block as markdown code.
+    _cleaned_chars: list[str] = field(default_factory=list)
 
     # ─── Public API ───
 
@@ -141,14 +147,19 @@ class BashStreamDetector:
                         else:
                             self._state = _State.IN_OTHER
                         # Open fence consumes through the newline →
-                        # next char is start of a new line
+                        # next char is start of a new line. Note: the
+                        # fence chars are NOT appended to _cleaned_chars
+                        # so the cleaned text has the block + fence
+                        # completely elided.
                         self._at_line_start = True
                         continue
                     # Otherwise this might be a partial fence — buffer
                     # the rest of the chunk and try again next call
                     self._carry = text[i:]
                     return new_completed
-                # Just a regular char — track newline state and skip
+                # Just a regular char outside any block — keep it in
+                # the cleaned output and advance
+                self._cleaned_chars.append(ch)
                 self._at_line_start = (ch == "\n")
                 i += 1
                 continue
@@ -237,6 +248,18 @@ class BashStreamDetector:
         """All bash commands completed since construction (or last reset)."""
         return list(self._completed)
 
+    def cleaned_text(self) -> str:
+        """The original stream text MINUS every fenced bash block
+        (both the fence markers AND the block content). This is what
+        the chat commits as the assistant message body so the block
+        doesn't get re-rendered as markdown code below the tool card.
+
+        Example:
+          fed: "let me check\n```bash\nls\n```\n\ndone"
+          cleaned_text: "let me check\n\ndone"
+        """
+        return "".join(self._cleaned_chars)
+
     def partial_buffer(self) -> str:
         """The in-progress block buffer (for diagnostics / UI hints)."""
         return self._block_buffer
@@ -248,6 +271,7 @@ class BashStreamDetector:
         self._carry = ""
         self._block_buffer = ""
         self._completed = []
+        self._cleaned_chars = []
         self._at_line_start = True
 
     def is_inside_block(self) -> bool:

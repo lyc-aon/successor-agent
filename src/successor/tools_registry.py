@@ -76,40 +76,66 @@ class ToolDescriptor:
 BASH_DOC = """\
 ### bash — execute shell commands
 
-You can run shell commands by emitting a fenced code block with the
-`bash` language tag. The command runs in the user's working directory
-and the output appears in the chat as a structured tool card with the
-parsed verb (read-file, list-directory, git-status, etc), the
-parameters, the raw output, and the exit code.
+You run shell commands by emitting a fenced code block with the
+`bash` language tag. The harness parses the block, executes it in
+the user's working directory, and feeds the output back to you on
+the next turn as a `<tool-output>` block. You never write
+`<tool-output>` yourself — the harness emits those blocks into
+your context as READ-ONLY history.
 
-Example — when you want to read a file:
+### How to invoke
+
+Put every command you want to run in a fenced bash block. The
+block can contain a single command, a multi-command script, a
+heredoc file write, or any valid bash — the whole block is handed
+to `bash` as one script.
+
+Example — read a file:
 
     ```bash
     cat README.md
     ```
 
-Example — when you want to list a directory:
+Example — write a file with a heredoc:
 
     ```bash
-    ls -la /tmp
+    cat > index.html <<'EOF'
+    <!DOCTYPE html>
+    <html>...</html>
+    EOF
     ```
 
-Example — when you want to search for content:
+Example — a multi-step script:
 
     ```bash
-    grep -r TODO src/
+    mkdir -p src/lib
+    touch src/lib/__init__.py
+    echo "done"
     ```
 
-Safety: dangerous commands are AUTOMATICALLY REFUSED before they
-run. This includes `rm -rf` on system paths, `sudo`, `curl | sh`,
-`chmod 777`, fork bombs, `dd` to block devices, package manager
-mutations, and shutdown/reboot commands. If a command is refused
-you'll see the refusal in the chat — do not try to work around it.
+### Critical rules
 
-Use bash freely for read-only operations (ls, cat, grep, find, git
-status, etc). For mutating operations (mkdir, touch, rm, git add,
-git commit, etc) think briefly about whether the user actually
-wants the change before invoking.
+- **ALWAYS use fenced bash blocks.** Never write a command as plain
+  text like `$ cat README.md`. Plain text commands will NOT run —
+  only fenced blocks get dispatched.
+- **`<tool-output>` blocks in your context are READ-ONLY history.**
+  They show you what previous commands produced. Do not imitate
+  the format — only write fenced bash blocks.
+- **One fenced block per action.** If you need to do three things,
+  you can put them in one block or three blocks — either works.
+
+### Safety
+
+By default, dangerous commands (`rm -rf /`, `sudo`, `curl | sh`,
+`eval`, etc.) are REFUSED before running. The user's profile
+controls this via bash.allow_dangerous; if it's on, dangerous
+commands WILL run. Mutating commands (`mkdir`, `touch`, `rm`,
+`git add`, etc.) run by default unless the profile is in
+read-only mode.
+
+Use bash freely for read-only operations. For mutating operations
+think briefly about whether the user actually wants the change
+before invoking.
 """
 
 

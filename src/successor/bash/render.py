@@ -160,6 +160,27 @@ def _paint_output_line(
         cursor += len(span.text)
 
 
+def _first_line_of_raw_command(raw: str) -> tuple[str, int]:
+    """Return (first_line, count_of_additional_lines).
+
+    Heredoc writes, multi-step scripts, function definitions and
+    control structures all produce multi-line raw_commands. The tool
+    card's bottom border can only show ONE physical row, so we split
+    off the first line and report how many more exist so the painter
+    can append a "(+N lines)" hint.
+
+    Blank / whitespace-only trailing lines are NOT counted because
+    bash blocks often have a trailing newline that the split would
+    otherwise see as a "phantom" extra line.
+    """
+    if not raw:
+        return ("", 0)
+    lines = raw.split("\n")
+    first = lines[0].strip()
+    remaining = [ln for ln in lines[1:] if ln.strip()]
+    return (first, len(remaining))
+
+
 def _verb_glyph_for_card(card: ToolCard) -> str:
     """Glyph that prefixes the verb in the card header.
 
@@ -316,8 +337,16 @@ def paint_tool_card(
             )
 
     # ─── Raw command on the bottom border ───
-    raw = card.raw_command
-    raw_label = f" $ {raw} "
+    # The bottom border is a SINGLE row — any newlines in the raw
+    # command (heredocs, function bodies, if/then/fi blocks) would
+    # cause paint_text to bleed into rows BELOW the card box,
+    # breaking the layout. Clip to the first physical line, then
+    # append a "+N lines" hint if the command was multi-line.
+    raw_first, extra_line_count = _first_line_of_raw_command(card.raw_command)
+    if extra_line_count > 0:
+        raw_label = f" $ {raw_first}  (+{extra_line_count} lines) "
+    else:
+        raw_label = f" $ {raw_first} "
     max_raw = box_w - 4
     if len(raw_label) > max_raw:
         raw_label = raw_label[: max(0, max_raw - 1)] + "…"

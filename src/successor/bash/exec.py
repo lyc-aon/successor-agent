@@ -93,6 +93,13 @@ class BashConfig:
     allow_mutating: bool = True
     timeout_s: float = DEFAULT_TIMEOUT_S
     max_output_bytes: int = MAX_OUTPUT_BYTES
+    # Working directory for every dispatched command. None means
+    # "inherit from the Python process". Profile writers can set
+    # this to a project directory so the model can write files
+    # without prefixing every path with an absolute path, and the
+    # harness doesn't dump them wherever the binary was launched.
+    # Supports ~/home expansion and environment variables.
+    working_directory: str | None = None
 
 
 def resolve_bash_config(profile: Any) -> BashConfig:
@@ -108,11 +115,21 @@ def resolve_bash_config(profile: Any) -> BashConfig:
     tool_config = getattr(profile, "tool_config", None) or {}
     raw = tool_config.get("bash") or {}
     try:
+        working_dir_raw = raw.get("working_directory")
+        working_dir: str | None = None
+        if working_dir_raw:
+            # Expand ~ and env vars so the profile JSON stays portable
+            expanded = os.path.expandvars(os.path.expanduser(str(working_dir_raw)))
+            if os.path.isdir(expanded):
+                working_dir = expanded
+            # Silently drop invalid paths — dispatch falls back to
+            # the process cwd rather than crashing
         return BashConfig(
             allow_dangerous=bool(raw.get("allow_dangerous", False)),
             allow_mutating=bool(raw.get("allow_mutating", True)),
             timeout_s=float(raw.get("timeout_s", DEFAULT_TIMEOUT_S)),
             max_output_bytes=int(raw.get("max_output_bytes", MAX_OUTPUT_BYTES)),
+            working_directory=working_dir,
         )
     except (TypeError, ValueError):
         # Malformed JSON — fall back to pure defaults rather than
