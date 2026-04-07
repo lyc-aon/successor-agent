@@ -146,6 +146,109 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_record(args: argparse.Namespace) -> int:
+    """Run the chat with a recorder attached, saving every input byte.
+
+    Use `rn replay <file>` afterward to play it back. The recording
+    file is JSONL — one event per line — and can be inspected or
+    hand-edited.
+    """
+    from .demos.chat import RoninChat
+    from .recorder import Recorder
+
+    path = Path(args.output)
+    print(f"recording to {path} (Ctrl+C to stop)")
+    with Recorder(path) as rec:
+        chat = RoninChat(recorder=rec)
+        chat.run()
+    print(f"\\nrecording saved: {path}")
+    return 0
+
+
+def cmd_replay(args: argparse.Namespace) -> int:
+    """Replay a recording into a fresh chat instance.
+
+    Feeds the recorded bytes into the chat at original timing (or
+    faster with --speed). Useful for bug repro and demos.
+
+    NOTE: replay does NOT talk to the model — the recorded bytes are
+    INPUT only (keystrokes), not the model's responses. The model
+    will be re-queried during replay if the user submits messages,
+    so the responses may differ. For deterministic playback, the
+    consumer would need to also record the model output, which is
+    deferred to a future commit.
+    """
+    from .demos.chat import RoninChat
+    from .recorder import Player
+
+    path = Path(args.input)
+    if not path.exists():
+        print(f"ronin: no such file: {path}", file=sys.stderr)
+        return 1
+
+    player = Player(path, speed=args.speed)
+    chat = RoninChat()
+
+    # Drive the chat by feeding bytes through on_key. We have to run
+    # the chat's main loop ourselves so the renderer ticks during
+    # playback. We use a simple thread to feed bytes while the chat's
+    # main loop runs.
+    import threading
+    import time as time_mod
+
+    def _feeder():
+        # Wait for the chat to enter its terminal context
+        time_mod.sleep(0.5)
+        player.play_into(chat.on_key)
+        # When playback is done, leave a short tail so the user can
+        # see the final state, then call stop() to break the run loop.
+        # stop() sets _running = False which the App.run() loop checks
+        # at the next select wakeup.
+        time_mod.sleep(1.0)
+        chat.stop()
+
+    feeder_thread = threading.Thread(target=_feeder, daemon=True)
+    feeder_thread.start()
+    chat.run()
+    return 0
+
+
+def cmd_snapshot(args: argparse.Namespace) -> int:
+    """Render a chat scenario to ANSI / plain text without a TTY.
+
+    Useful for marketing material, documentation, bug-repro screenshots,
+    and verifying the renderer in CI without needing a real terminal.
+    """
+    from .snapshot import (
+        chat_demo_snapshot,
+        render_grid_to_ansi,
+        render_grid_to_plain,
+    )
+
+    grid = chat_demo_snapshot(
+        rows=args.rows,
+        cols=args.cols,
+        theme_name=args.theme,
+        density_name=args.density,
+        scenario=args.scenario,
+    )
+
+    if args.format == "ansi":
+        output = render_grid_to_ansi(grid)
+    else:
+        output = render_grid_to_plain(grid) + "\n"
+
+    if args.output == "-":
+        sys.stdout.write(output)
+    else:
+        path = Path(args.output)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(output, encoding="utf-8")
+        print(f"wrote {len(output):,} bytes to {path}")
+
+    return 0
+
+
 def cmd_bench(args: argparse.Namespace) -> int:
     from .render.braille import interpolate_frame, load_frame
     from .render.cells import Grid, Style
@@ -235,6 +338,56 @@ def build_parser() -> argparse.ArgumentParser:
     p_bench.add_argument("--rows", type=int, default=40, help="grid rows")
     p_bench.add_argument("--cols", type=int, default=120, help="grid cols")
     p_bench.set_defaults(func=cmd_bench)
+
+    p_snapshot = sub.add_parser(
+        "snapshot",
+        help="render a chat scenario to text/ANSI without a TTY",
+    )
+    p_snapshot.add_argument("--rows", type=int, default=30, help="grid rows")
+    p_snapshot.add_argument("--cols", type=int, default=100, help="grid cols")
+    p_snapshot.add_argument(
+        "--theme", default="dark",
+        choices=["dark", "light", "forge"],
+        help="color theme",
+    )
+    p_snapshot.add_argument(
+        "--density", default="normal",
+        choices=["compact", "normal", "spacious"],
+        help="layout density",
+    )
+    p_snapshot.add_argument(
+        "--scenario", default="showcase",
+        choices=["blank", "showcase", "thinking", "search", "help", "autocomplete"],
+        help="which chat state to render",
+    )
+    p_snapshot.add_argument(
+        "--format", default="ansi",
+        choices=["ansi", "text"],
+        help="output format (ansi for `cat`, text for plain)",
+    )
+    p_snapshot.add_argument(
+        "--output", "-o", default="-",
+        help="output file or '-' for stdout",
+    )
+    p_snapshot.set_defaults(func=cmd_snapshot)
+
+    p_record = sub.add_parser(
+        "record",
+        help="run the chat with a recorder, saving every input byte",
+    )
+    p_record.add_argument("output", help="output recording file (JSONL)")
+    p_record.set_defaults(func=cmd_record)
+
+    p_replay = sub.add_parser(
+        "replay",
+        help="play back a recording into a fresh chat",
+    )
+    p_replay.add_argument("input", help="recording file to play back")
+    p_replay.add_argument(
+        "--speed", type=float, default=1.0,
+        help="playback speed multiplier (1.0=real time, 2.0=2x, 0=instant)",
+    )
+    p_replay.set_defaults(func=cmd_replay)
 
     return p
 

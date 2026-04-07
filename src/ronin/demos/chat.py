@@ -562,6 +562,7 @@ class RoninChat(App):
         *,
         client: LlamaCppClient | None = None,
         theme: Theme | None = None,
+        recorder=None,
     ) -> None:
         super().__init__(
             target_fps=30.0,
@@ -569,6 +570,9 @@ class RoninChat(App):
             terminal=Terminal(bracketed_paste=True),
         )
         self.client = client if client is not None else LlamaCppClient()
+        # Optional recorder — captures every input byte to a JSONL file.
+        # Set via the `rn record <file>` subcommand. None for normal use.
+        self._recorder = recorder
 
         # ─── Persisted preferences ───
         # Loaded from ~/.config/ronin/chat.json on startup. Saved on
@@ -706,6 +710,15 @@ class RoninChat(App):
         the byte stream encodes. Mouse events only arrive when mouse
         reporting is enabled (via /mouse on).
         """
+        # Record EVERY raw byte before decoding so the recording is a
+        # faithful reproduction of the input stream — including escape
+        # sequences, multi-byte UTF-8, and bracketed paste markers.
+        if self._recorder is not None:
+            try:
+                self._recorder.record_byte(byte)
+            except Exception:
+                pass
+
         for event in self._key_decoder.feed(byte):
             if isinstance(event, MouseEvent):
                 self._handle_mouse_event(event)
