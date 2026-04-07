@@ -60,7 +60,8 @@ src/successor/tools/         @tool decorator + ToolRegistry (Python imports, gat
 src/successor/wizard/        successor setup wizard with live preview pane (the showcase)
 
 src/successor/builtin/       package-shipped data files loaded by the registries
-  themes/steel.json                       the default theme — instrument-panel oklch
+  themes/steel.json                       cool blue instrument-panel oklch (default)
+  themes/forge.json                       warm red blacksmith-by-the-fire (alternate)
   profiles/default.json                   general-purpose profile
   profiles/successor-dev.json             harness-development profile (uses successor intro)
   skills/successor-rendering-pattern.md   the One Rule + five-layer architecture
@@ -75,9 +76,6 @@ src/successor/snapshot.py    headless render via chat_demo_snapshot() / wizard_d
 src/successor/recorder.py    record/replay session traces
 src/successor/cli.py         argparse subcommand dispatch (`successor` binary)
 src/successor/__main__.py    `python -m successor` entry point
-
-docs/example-themes/     copy these into ~/.config/successor/themes/ to install
-  forge.json             warm red, hand-tuned hex palette
 
 tests/                   pytest suite — 187 tests, hermetic via SUCCESSOR_CONFIG_DIR
   conftest.py            temp_config_dir fixture
