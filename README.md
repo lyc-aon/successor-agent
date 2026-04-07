@@ -8,9 +8,12 @@ tools, configurability, and a terminal renderer that doesn't fight you.
 Phase 0 + framework infra (loader pattern, themes, profiles, providers,
 skills/tools scaffolding, setup wizard, three-pane config menu, multi-line
 prompt editor with soft wrap + selection + OSC 52 clipboard, bundled
-emergence intro). The agent loop and tool dispatch are intentionally not
-built yet — they wait until we study the llamacpp tool-call protocol
-deliberately. 356 tests passing, all hermetic.
+emergence intro) + Phase 5.0 bash-masking subsystem (parser + risk
+classifier + executor + structured tool card renderer + `/bash` slash
+command). The agent loop proper is the next piece — but the
+`dispatch_bash` entry point is already in place, so wiring it into
+streaming model output will be incremental. 487 tests passing, all
+hermetic.
 
 ## Layout
 
@@ -29,6 +32,13 @@ src/successor/
   loader.py              # Generic Registry[T] for themes/profiles/skills
   config.py              # ~/.config/successor/chat.json + v1→v2 migration
   chat.py                # SuccessorChat — chat interface (real llama.cpp)
+  bash/                  # Bash-masking: parse model bash → structured cards
+    cards.py             # ToolCard frozen dataclass
+    parser.py            # @bash_parser registry + parse_bash + clip_at_operators
+    risk.py              # Independent risk classifier (safe/mutating/dangerous)
+    exec.py              # dispatch_bash — parse + classify + run + truncate
+    render.py            # paint_tool_card pure paint function
+    patterns/            # 12 pattern files (ls, cat, grep, find, git, ...)
   intros/                # Intro animations played before chat opens
     successor.py         # 11-frame braille emergence with held title portrait
   profiles/              # Profile dataclass + JSON loader + active resolver
@@ -43,7 +53,7 @@ src/successor/
     tools/read_file.py
     intros/successor/{00..10}-*.txt
 docs/                    # rendering-superpowers, concepts, plan, llamacpp, changelog
-tests/                   # 356 tests, hermetic via SUCCESSOR_CONFIG_DIR
+tests/                   # 487 tests, hermetic via SUCCESSOR_CONFIG_DIR
 ```
 
 ## Install
@@ -79,6 +89,8 @@ Inside `successor chat`:
 - `Ctrl+C` or `/quit` — exit
 - `Ctrl+,` or `/config` — open the three-pane config menu
 - `Ctrl+P` — cycle profile · `Ctrl+T` cycle theme · `Alt+D` toggle dark/light · `Ctrl+]` cycle density
+- `/bash <command>` — run a bash command and render it as a structured tool card
+  (parse + risk classify + execute + paint, dangerous commands refused with explanation)
 
 ## Why a custom renderer
 

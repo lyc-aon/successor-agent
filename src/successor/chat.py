@@ -93,6 +93,14 @@ from .render.cells import (
     Grid,
     Style,
 )
+from .bash import (
+    DangerousCommandRefused,
+    ToolCard,
+    dispatch_bash,
+    measure_tool_card_height,
+    paint_tool_card,
+    preview_bash,
+)
 from .render.markdown import (
     LaidOutLine,
     LaidOutSpan,
@@ -403,6 +411,11 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
         description="leave the chat",
     ),
     SlashCommand(
+        name="bash",
+        description="run a bash command and render it as a structured tool card",
+        args_hint="<command>",
+    ),
+    SlashCommand(
         name="config",
         description="open the profile config menu",
     ),
@@ -560,18 +573,33 @@ class _Message:
 
     raw_text is the original content (without prefix) — what we send
     to the model in the conversation history.
+
+    tool_card, when non-None, marks this message as a structured bash
+    action card instead of a markdown body. The chat painter detects
+    this and renders the message via paint_tool_card instead of the
+    normal span flow. Tool messages are NEVER sent to the model in
+    the conversation history (synthetic-by-construction).
     """
 
-    __slots__ = ("role", "raw_text", "body", "created_at", "synthetic")
+    __slots__ = ("role", "raw_text", "body", "created_at", "synthetic", "tool_card")
 
-    def __init__(self, role: str, content: str, *, synthetic: bool = False) -> None:
-        self.role = role  # "user" | "successor"
+    def __init__(
+        self,
+        role: str,
+        content: str,
+        *,
+        synthetic: bool = False,
+        tool_card: ToolCard | None = None,
+    ) -> None:
+        self.role = role  # "user" | "successor" | "tool"
         self.raw_text = content
         self.body = PreparedMarkdown(content)
         self.created_at = time.monotonic()
         # Synthetic messages (the greeting, error notices) are NOT sent
-        # to the model in the conversation history.
-        self.synthetic = synthetic
+        # to the model in the conversation history. Tool cards are
+        # forced synthetic since they aren't part of the model's voice.
+        self.synthetic = synthetic or (tool_card is not None)
+        self.tool_card = tool_card
 
 
 # Prefix strings shown at the start of every message.
@@ -596,6 +624,11 @@ class _RenderedRow:
     line_tag:       optional row treatment from the markdown layout
     body_indent:    cells of indent within the body region (after the
                     leading prefix), used by blockquotes and code blocks
+    prepainted_cells: when non-empty, the painter copies these Cells
+                    directly to the grid at body_x and skips the normal
+                    span flow. Used by tool card messages where the
+                    paint_tool_card primitive has already produced
+                    fully-styled cells in a sub-grid.
     """
     leading_text: str = ""
     leading_attrs: int = 0
@@ -604,6 +637,7 @@ class _RenderedRow:
     base_color: int = 0
     line_tag: str = ""
     body_indent: int = 0
+    prepainted_cells: tuple = ()  # tuple of Cell — pre-rendered tool card row
 
 
 # ─── The chat App ───
@@ -1628,6 +1662,57 @@ class SuccessorChat(App):
             self.stop()
             return
 
+        # /bash <command> — run a bash command client-side and render
+        # it as a structured tool card. The user message preserves the
+        # /bash command verbatim; a tool-message follows with the parsed
+        # ToolCard. The model never sees this exchange (both messages
+        # are synthetic by construction). When the agent loop lands the
+        # SAME dispatch_bash() will be called from the tool-call path —
+        # this is the v0 proof.
+        if text.startswith("/bash"):
+            parts = text.split(maxsplit=1)
+            if len(parts) < 2 or not parts[1].strip():
+                self.messages.append(_Message(
+                    "successor",
+                    "usage: /bash <command>. The command runs locally and "
+                    "renders as a structured tool card. Dangerous commands "
+                    "(rm -rf /, sudo, curl|sh, etc.) are refused with an "
+                    "explanation.",
+                    synthetic=True,
+                ))
+                return
+            command = parts[1].strip()
+            # Echo the command as a synthetic user-style message so the
+            # scrollback shows the input that triggered the card
+            self.messages.append(_Message(
+                "user",
+                f"`{command}`",
+                synthetic=True,
+            ))
+            try:
+                card = dispatch_bash(command)
+            except DangerousCommandRefused as exc:
+                # Show the refused card (preview-only, no execution)
+                # so the user sees WHY it was refused
+                self.messages.append(_Message(
+                    "tool", "",
+                    tool_card=exc.card,
+                ))
+                self.messages.append(_Message(
+                    "successor",
+                    f"refused: {exc.reason}. To run anyway, you'd need to "
+                    f"override the gate (not yet wired in v0).",
+                    synthetic=True,
+                ))
+                self._scroll_to_bottom()
+                return
+            self.messages.append(_Message(
+                "tool", "",
+                tool_card=card,
+            ))
+            self._scroll_to_bottom()
+            return
+
         # /profile         — show current profile and available options
         # /profile <name>  — switch to a registered profile by name
         # /profile cycle   — cycle to the next profile in registry order
@@ -2129,7 +2214,22 @@ class SuccessorChat(App):
         border, header rule, horizontal rule) and per-span tag color
         resolution. Empty rows (no leading, no spans) just leave the
         background fill from `_paint_chat_area`'s clear pass.
+
+        For tool-card rows (prepainted_cells set), copy cells verbatim
+        to the chat region — bypassing the entire span/leading flow
+        because the bash renderer has already produced fully-styled cells.
         """
+        # ─── Pre-painted (tool card) row — fast path ───
+        if row.prepainted_cells:
+            for col_offset, cell in enumerate(row.prepainted_cells):
+                cx = x + col_offset
+                if cx >= grid.cols or col_offset >= body_width:
+                    break
+                if cell.wide_tail:
+                    continue
+                grid.set(y, cx, cell)
+            return
+
         # ─── Row-level treatments ───
         line_bg = theme.bg
         if row.line_tag in ("code_block", "code_lang"):
@@ -2280,6 +2380,21 @@ class SuccessorChat(App):
             if fade_t < 1.0:
                 base_color = lerp_rgb(theme.fg_subtle, base_color, fade_t)
 
+            # ─── Tool card message ───
+            # Pre-paint the card into a sub-grid sized to body_width,
+            # then emit one _RenderedRow per row of the sub-grid carrying
+            # the cells verbatim. This keeps the chat's flat-row scroll
+            # model intact while letting paint_tool_card own the visuals.
+            if msg.tool_card is not None:
+                card_rows = self._render_tool_card_rows(
+                    msg.tool_card, body_width, theme,
+                )
+                out.extend(card_rows)
+                if i < n - 1:
+                    for _ in range(spacing):
+                        out.append(_RenderedRow(base_color=base_color))
+                continue
+
             prefix = _USER_PREFIX if msg.role == "user" else _SUCCESSOR_PREFIX
             md_lines = msg.body.lines(md_width)
 
@@ -2320,6 +2435,56 @@ class SuccessorChat(App):
                 for _ in range(spacing):
                     out.append(_RenderedRow(base_color=base_color))
         return out
+
+    def _render_tool_card_rows(
+        self,
+        card: ToolCard,
+        body_width: int,
+        theme: ThemeVariant,
+    ) -> list[_RenderedRow]:
+        """Pre-paint a ToolCard into a sub-grid and convert each row
+        into a _RenderedRow with prepainted_cells set.
+
+        The chat's row-based scroll model expects each visible line to
+        correspond to one entry in a flat list. paint_tool_card writes
+        directly into a Grid, so we render it into a temporary sub-grid
+        of (height x body_width), then walk row-by-row, snapshotting
+        each row's cells into a tuple that the painter copies verbatim.
+        """
+        # Compute the height the card will need at this width.
+        height = measure_tool_card_height(
+            card, width=body_width, show_output=card.executed,
+        )
+        if height <= 0:
+            return []
+
+        # Paint the card into a sub-grid. The sub-grid is exactly the
+        # right size — no clipping, no scroll inside the card.
+        sub = Grid(height, body_width)
+        paint_tool_card(
+            sub, card, x=0, y=0, w=body_width, theme=theme,
+        )
+
+        # Snapshot each row of the sub-grid as an immutable tuple of
+        # Cells. The painter just copies these to the chat region.
+        rows: list[_RenderedRow] = []
+        for sy in range(height):
+            cells: list[Cell] = []
+            for sx in range(body_width):
+                cells.append(sub.at(sy, sx))
+            rows.append(
+                _RenderedRow(
+                    leading_text="",
+                    leading_attrs=0,
+                    leading_color_kind="accent",
+                    body_spans=(),
+                    base_color=theme.fg,
+                    line_tag="tool_card",
+                    body_indent=0,
+                    prepainted_cells=tuple(cells),
+                )
+            )
+        return rows
 
     def _render_md_lines_with_search(
         self,

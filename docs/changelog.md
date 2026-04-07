@@ -997,6 +997,255 @@ In `tests/test_config_menu.py` under "Delete profile flow":
 
 ---
 
+## Phase 5.0 — bash-masking subsystem (2026-04-07)
+
+The first piece of the agent loop. We don't ask the model to learn a
+structured tool-call schema (`docs/llamacpp-protocol.md` notes that
+Qwen 3.5 distill is unreliable at tool calling). Instead the model
+writes bash in fenced code blocks — its strongest mode — and we parse
+it client-side into structured `ToolCard`s that the renderer paints
+in place of plain bash. Best of both worlds: the model is fluent at
+the work, the user sees clean structured actions with risk
+classification.
+
+This phase ships the entire bash-masking subsystem **decoupled from
+the agent loop**. The `/bash <command>` slash command is the v0 proof:
+type bash in the chat and watch it render as a structured card with
+the real subprocess output beneath. When the agent loop lands later,
+the same `dispatch_bash()` entry point becomes the tool dispatch
+target — no rework.
+
+### What landed (`src/successor/bash/`)
+
+- **`cards.py`** — `ToolCard` frozen dataclass: verb, params (ordered
+  tuple of (key, value)), risk literal ("safe"/"mutating"/"dangerous"),
+  raw_command (always preserved), confidence (0-1, parser self-assessment),
+  parser_name, output, stderr, exit_code, duration_ms, truncated.
+  `executed` and `succeeded` properties for callers. Cards are
+  immutable; the executor uses `dataclasses.replace()` to build
+  enriched cards from parsed cards.
+
+- **`parser.py`** — `@bash_parser("name")` decorator + `_PARSERS`
+  registry + `parse_bash(cmd)` entry point. Shlex-splits the command,
+  looks up the first token, dispatches. Fall-through paths for empty
+  input, malformed quoting (shlex ValueError), buggy parser exceptions,
+  and unknown command names — each returns a generic card with
+  appropriately low confidence so the chat never crashes on weird
+  input. **`clip_at_operators(args)`** is a critical helper: shlex
+  knows nothing about shell grammar, so `'ls foo | grep bar'` tokenizes
+  as `['ls', 'foo', '|', 'grep', 'bar']` and a naive parser would
+  absorb everything past `foo` as more "paths". `clip_at_operators`
+  truncates argv at the first operator token (`|`, `||`, `&&`, `;`,
+  `>`, `2>`, `<`, `&>`, etc.) so each parser sees only its own
+  command segment.
+
+- **`risk.py`** — independent risk classifier that runs IN ADDITION
+  to the parser's own risk declaration. The classifier walks regex
+  patterns over the raw command string and finds:
+  - **dangerous**: rm-rf at /, ~, /etc, /var, /usr, /bin, /sbin,
+    /boot, /sys, /proc, /dev, /lib, /lib64, /root, /home; sudo; su;
+    curl|sh; wget|sh; eval; chmod 777 / chmod +s; redirect into
+    system path; dd to block device; fork bomb (`:(){ :|:& };:`);
+    mkfs/fdisk/parted/wipefs; shutdown/reboot/halt/poweroff; kill
+    PID 1; iptables flush
+  - **mutating**: file-writing redirects (excluding /dev/null and
+    friends — we mirror that exclusion list); mkdir/touch/cp/mv/rm/
+    chmod/chown/ln; sed -i; package manager mutations (apt/yum/dnf/
+    pacman/brew/pip/npm/cargo/gem/go install|remove|update); git
+    mutating subcommands
+  - **safe**: everything else
+  Returns `(risk, reason)`. The dispatch layer takes
+  `max_risk(parser_risk, classifier_risk)` so either layer can
+  escalate but not de-escalate.
+
+- **`exec.py`** — `dispatch_bash(cmd, *, allow_dangerous=False,
+  timeout=30, cwd=None, env=None)` is the public dispatch entry
+  point. Parses, classifies, runs via `subprocess.run(shell=True,
+  executable="/bin/bash", capture_output=True, text=True)`. Refuses
+  dangerous commands by raising `DangerousCommandRefused(card,
+  reason)` — the exception carries the gated card so callers can
+  show the user WHAT was blocked WITH all its parsed params. Output
+  is truncated at 8KB via `_truncate_output()` which handles UTF-8
+  boundaries correctly (no broken codepoints when clipping in the
+  middle of a multi-byte char). Timeout produces `exit_code=-1` with
+  partial output preserved. `preview_bash(cmd)` is the parse-only
+  variant the renderer uses to show a card BEFORE execution (for
+  confirmation modals, refused-card display, etc).
+
+- **`render.py`** — `paint_tool_card(grid, card, *, x, y, w, theme,
+  show_output=True, max_output_lines=12)` is a pure paint function
+  that draws a card and returns the height consumed. Layout:
+  ```
+  ╭── ▸ list-directory ──────────────────────╮
+  │    path  /etc                            │
+  │  hidden  yes                             │
+  │  format  long                            │
+  ╰── $ ls -la /etc ─────────────────────────╯
+     total 184
+     drwxr-xr-x 100 root root 4096 Apr 7 ...
+       ↳ ✓ exit 0 in 4ms
+  ```
+  Top section is the parsed verb header pill + key/value param table
+  inside a rounded box (`BOX_ROUND`). Bottom border carries the raw
+  command verbatim prefixed with `$ ` (dim italic — always visible
+  so the user can spot parser misses). Below the box: command output
+  with code-tinted background bars + status footer. Risk-tinted
+  border + verb glyph: `▸` safe (`theme.accent`), `✎` mutating
+  (`theme.accent_warm`), `⚠` dangerous (`theme.accent_warn`).
+  Confidence < 0.7 adds a `?` badge after the verb. `measure_tool_card_height()`
+  is the matching pure measurer for callers that need geometry before
+  paint. Output truncation: lines beyond `max_output_lines` collapse
+  into a `⋯ N more lines ⋯` marker.
+
+- **`patterns/`** — 12 pattern files covering 24 command names:
+  - `ls.py` — `list-directory` (long/hidden/recursive/human-sizes)
+  - `cat.py` — `read-file` / `concatenate-files` / `read-stdin`
+  - `head_tail.py` — `read-file-head` / `read-file-tail` (-n, -f)
+  - `grep.py` — `search-content` (grep/rg/ripgrep, bundled flags
+    like `-rin` and `--ignore-case`/`--recursive` long forms)
+  - `find.py` — `find-files` (find with -name/-type/-maxdepth, fd/fdfind
+    with simpler grammar)
+  - `pwd_echo.py` — `working-directory` / `print-text` / `noop`
+  - `mkdir.py` — `create-directory` / `create-file` (touch)
+  - `rm.py` — `delete-file` (mutating) / `delete-tree` (mutating
+    if -r alone, dangerous if -rf)
+  - `cp_mv.py` — `copy-files` / `move-files` (mutating)
+  - `git.py` — per-subcommand: status/diff/log/show/blame/branch/...
+    safe; add/commit/checkout/push/pull/fetch/merge/rebase/reset
+    mutating; `git push --force` ESCALATED to dangerous
+  - `python.py` — `run-python-inline` / `run-python-module` /
+    `run-python-script` (python and python3, all mutating)
+  - `which.py` — `locate-binary` / `describe-command`
+  Every parser calls `clip_at_operators(args)` first to scope its
+  argument list to the current command segment.
+
+### Chat integration (`src/successor/chat.py`)
+
+- **`_Message`** gained an optional `tool_card: ToolCard | None`
+  field. Non-None forces `synthetic=True` (tool messages are never
+  sent to the model in the conversation history). The `__slots__`
+  was updated.
+
+- **`_RenderedRow`** gained `prepainted_cells: tuple[Cell, ...] = ()`.
+  When non-empty, `_paint_chat_row` copies the cells verbatim to
+  the chat region and skips the entire span/leading flow.
+
+- **`_build_message_lines`** detects tool-card messages and routes
+  them through `_render_tool_card_rows`, which paints the card into
+  a temporary sub-grid sized to `body_width` and snapshots each row's
+  cells into a tuple. The result is N `_RenderedRow`s with `line_tag
+  = "tool_card"` and the prepainted cells attached. The chat's flat-row
+  scroll model stays intact — tool cards are just rows with a fast
+  paint path.
+
+- **`/bash <command>`** slash command in `_submit`. Echoes the
+  command as a synthetic user message, runs `dispatch_bash`, appends
+  a tool message with the resulting card. On `DangerousCommandRefused`
+  the refused (preview-only) card is shown along with a synthetic
+  refusal explanation, so the user sees WHAT was blocked and WHY.
+  Added to the `SLASH_COMMANDS` registry so autocomplete picks it up.
+
+### Tests (131 new — 487 total, all passing)
+
+Across 4 new test files:
+
+- **`test_bash_parser.py`** (73 tests):
+  - registry plumbing (population, has_parser, fallback, defensive)
+  - empty/blank input, unbalanced quotes, buggy parser isolation
+  - `clip_at_operators` (all operators, mutation safety)
+  - one happy-path test per registered command + edge cases
+  - parametrized `classify_risk` table (28 cases covering all 3 risks)
+  - `/dev/null` redirect is correctly NOT flagged mutating
+  - `max_risk` ordering exhaustive (3x3 matrix)
+
+- **`test_bash_exec.py`** (25 tests):
+  - happy path (echo, pwd, cwd, success, failure, command-not-found)
+  - stderr capture, pipes, redirects, subshells (shell=True works)
+  - dangerous refusal: rm -rf /, sudo, curl|sh
+  - `allow_dangerous=True` bypass
+  - mutating runs without flag (only dangerous gated)
+  - classifier escalates parser risk (sudo ls is dangerous)
+  - classifier doesn't de-escalate (parser-flagged rm -rf stays dangerous)
+  - output truncation: short passthrough, at-limit, UTF-8 boundary
+  - real truncation E2E (head -c 16K | tr)
+  - timeout sets exit_code -1 with reason
+  - preview_bash doesn't execute, includes classifier risk
+  - card immutability (parser card unchanged after dispatch)
+
+- **`test_bash_render.py`** (21 tests):
+  - smoke + structure (executed card vs preview)
+  - all 4 risk-tinted glyphs (▸ ✎ ⚠ ?)
+  - low/high confidence ? badge presence
+  - param table renders, no-params placeholder
+  - raw command on bottom border, long-command truncation
+  - output rendering, status line, failure glyph
+  - (no output) placeholder
+  - max_output_lines truncation marker
+  - measure ≡ paint height consistency
+  - executed card taller than preview
+  - too-narrow refusal, grid overflow graceful
+  - output indent alignment
+
+- **`test_chat_bash.py`** (12 tests):
+  - `/bash` dispatches and appends a tool message
+  - `/bash` no-args / blank shows usage
+  - dangerous command shows refused card + explanation
+  - tool messages always synthetic (never sent to model)
+  - `_Message(tool_card=...)` auto-sets synthetic
+  - chat grid contains card structure
+  - tool rows have prepainted_cells
+  - multiple cards stack vertically
+  - mixed tool + regular messages render together
+  - failed command shows ✗ glyph
+  - unknown command renders generic card with ? badge
+
+### Renderer features the bash subsystem exercises
+
+| concepts.md cat | feature | where |
+|---|---|---|
+| Cat 1 (mutable cells) | the same row region paints either a structured card or plain markdown depending on `_Message.tool_card` | `_paint_chat_row` short-circuit on `prepainted_cells` |
+| Cat 2 (smooth animation) | risk-tinted border colors blend with theme accents during `blend_variants` transitions | `_border_color` reads `theme.accent_*` live |
+| Cat 3 (multi-region UI) | tool card + status footer paint at distinct vertical sections within the same chat scroll region | `paint_tool_card` returns height consumed |
+| Cat 5 (deterministic) | every card visual is a function of `(card, theme, width)` — fully snapshot-testable | `test_bash_render.py` snapshots |
+| Cat 6 (inline media) | tool cards render INSIDE the chat scroll region, not as overlays | `_render_tool_card_rows` snapshots cells into the flat row list |
+| Cat 7 (programmatic UI) | the renderer transforms a model's bash command string into a structured action card the model never knew existed | `dispatch_bash` → `paint_tool_card` |
+
+### The architectural insight
+
+`docs/llamacpp-protocol.md` line 388: *"Qwen3.5-27B-Opus-Distilled is
+less reliable at [tool use]."* This is the local-mid-grade-model
+reality: tool-call schemas are out-of-distribution, bash is in. Every
+attempt to teach the model a JSON tool schema is friction. So we
+inverted the contract: the model's tool is bash, the structured card
+is purely cosmetic, and the renderer is the layer that converts
+between the two. The model writes the way it's strongest. The user
+sees the structured action they wanted. The risk gate is a render-time
+concern, never a prompting concern.
+
+This works because of the renderer's diff layer — no other agent
+harness can rewrite cells after they're committed, so they're stuck
+showing raw bash output in scrollback. We can intercept, parse, and
+present a clean structured card that lives inside the chat scroll
+region with full theme integration.
+
+### Notes
+
+- Visual verification was the bug detector. The first painted card
+  showed `2>/dev/null` being absorbed by the ls parser and the
+  redirect-to-/dev/null being flagged as mutating. Both fixed via
+  the visual feedback loop, then locked in by tests. This is exactly
+  why the user's directive is "visual verification E2E" — it catches
+  things tests for narrow units would miss.
+- The registry is shared mutable state. Tests use `_PARSERS.copy()`
+  + restore to install temporary parsers for buggy-parser-isolation
+  tests without leaking state.
+- The bash package's `__init__` imports patterns BEFORE risk.py and
+  exec.py because `from . import patterns` triggers all the
+  `@bash_parser` decorators, which need `parser.py` already loaded.
+  Order is documented in the file with `noqa: E402` comments.
+
+---
+
 ## What's next
 
 - **Skill invocation strategy** — pick always-on vs on-demand after
@@ -1030,10 +1279,11 @@ In `tests/test_config_menu.py` under "Delete profile flow":
 | 4.6 (editable text + multiline editor) | 36 | 276 |
 | 4.7 (prompt editor v2: soft wrap + selection + clipboard) | 48 | 324 |
 | 4.9 (delete profile from config menu) | 17 | 356 |
+| 5.0 (bash-masking subsystem: parser + risk + exec + render + chat) | 131 | 487 |
 
 (Counts above are approximate by phase boundary; actual test
 collection may include additional small additions in subsequent
 commits.)
 
-Final: **356 tests, all passing, hermetic via `SUCCESSOR_CONFIG_DIR`,
+Final: **487 tests, all passing, hermetic via `SUCCESSOR_CONFIG_DIR`,
 no fake mocks, no `.skip()` or `.todo()`.**

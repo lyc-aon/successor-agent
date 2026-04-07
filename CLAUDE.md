@@ -57,6 +57,13 @@ src/successor/profiles/      Profile dataclass + JSON loader + active-profile re
 src/successor/providers/     ChatProvider protocol + factory + llamacpp/openai_compat
 src/successor/skills/        Skill dataclass + frontmatter parser + registry (loader-only)
 src/successor/tools/         @tool decorator + ToolRegistry (Python imports, gated user dir)
+src/successor/bash/          bash-masking subsystem — parse model bash → structured cards
+  cards.py               ToolCard frozen dataclass (verb/params/risk/raw/output/exit_code)
+  parser.py              @bash_parser registry, parse_bash(), clip_at_operators
+  risk.py                independent risk classifier (safe/mutating/dangerous)
+  exec.py                dispatch_bash() — parse + classify + run, refuse dangerous
+  render.py              paint_tool_card() — pure paint function for the cards
+  patterns/              one file per command family (ls, cat, grep, find, git, ...)
 src/successor/wizard/        successor setup wizard with live preview pane (the showcase)
 
 src/successor/builtin/       package-shipped data files loaded by the registries
@@ -77,7 +84,7 @@ src/successor/recorder.py    record/replay session traces
 src/successor/cli.py         argparse subcommand dispatch (`successor` binary)
 src/successor/__main__.py    `python -m successor` entry point
 
-tests/                   pytest suite — 356 tests, hermetic via SUCCESSOR_CONFIG_DIR
+tests/                   pytest suite — 487 tests, hermetic via SUCCESSOR_CONFIG_DIR
   conftest.py            temp_config_dir fixture
   test_loader.py         Registry pattern tests
   test_theme.py          color parsing, variant resolver, blend math, registry
@@ -88,6 +95,10 @@ tests/                   pytest suite — 356 tests, hermetic via SUCCESSOR_CONF
   test_chat_profiles.py  SuccessorChat ↔ Profile integration, hot swap
   test_skills.py         frontmatter parser, registry
   test_tools.py          @tool decorator, ToolRegistry, user gating
+  test_bash_parser.py    parse_bash + 12 pattern parsers + classify_risk
+  test_bash_exec.py      dispatch_bash, refusal, truncation, timeout, preview
+  test_bash_render.py    paint_tool_card per-risk visual + measure consistency
+  test_chat_bash.py      /bash slash command + tool message integration
 
 docs/                    architectural docs (read these)
   rendering-plan.md      original five-layer architecture decisions
@@ -116,6 +127,7 @@ Available subcommands (use either `successor` or `sx`):
 successor              help
 successor -V           version
 successor chat         chat interface (real llama.cpp streaming, intro plays first)
+                       — inside chat: /bash <cmd> renders the command as a tool card
 successor setup        profile creation wizard with live preview
 successor config       three-pane profile config menu (browse + edit + live preview)
 successor doctor       terminal capabilities + measure samples
@@ -323,8 +335,100 @@ a real text editor with the full feature set you'd expect:
 No agent CLI has ever let you edit your system prompt directly inside
 the TUI before, with proper word wrap and selection.
 
-**What's NOT yet built**: skill invocation strategy, agent loop,
-tool dispatch, framework docs.
+## Bash-masking subsystem (added 2026-04-07, phase 5.0)
+
+The premise: mid-grade local models (Qwen 3.5 27B distilled and friends)
+are *fluent* in bash because they've eaten millions of bash commands in
+pretraining. They are *unreliable* with structured tool-call schemas
+(`docs/llamacpp-protocol.md` calls this out explicitly). So we don't
+ask them to learn a tool schema. We let them write bash in fenced code
+blocks, parse the bash CLIENT-SIDE, and render it as a structured tool
+card with verb + params + risk + output.
+
+The renderer is uniquely positioned for this — the diff layer can
+rewrite cells AFTER the fact, so we can intercept a bash command, paint
+a structured card with the parser's interpretation, and stream the
+output beneath. The model emits raw bash; the user sees a clean
+structured action card with risk classification and exit status.
+
+**`src/successor/bash/`** is the whole subsystem:
+
+- **`cards.py`** — `ToolCard` frozen dataclass: verb, params, risk
+  ("safe"/"mutating"/"dangerous"), raw_command, confidence (0-1),
+  parser_name, output, stderr, exit_code, duration_ms, truncated.
+  Cards are immutable; the executor builds enriched cards via
+  `dataclasses.replace()`.
+
+- **`parser.py`** — `@bash_parser("name")` decorator that registers
+  pattern parsers in `_PARSERS`. `parse_bash(cmd)` shlex-splits and
+  dispatches; unknown commands fall back to a generic "bash ?" card
+  with confidence 0.5. **`clip_at_operators(args)`** truncates argv
+  at the first shell operator (`|`, `||`, `&&`, `;`, `>`, `2>`, ...)
+  so parsers don't bleed into pipelined commands.
+
+- **`risk.py`** — `classify_risk(cmd)` runs IN ADDITION to the parser
+  on the raw command string. Detects rm-rf-on-system-paths, sudo,
+  curl|sh, eval, chmod 777, redirect-into-system-path, dd-to-block-device,
+  fork bombs, mkfs/fdisk, shutdown/reboot, kill PID 1, iptables flush.
+  Returns `(Risk, reason)`. The dispatch layer takes
+  `max_risk(parser_risk, classifier_risk)` so either layer can escalate.
+
+- **`exec.py`** — `dispatch_bash(cmd, *, allow_dangerous=False)` is
+  the public entry point. Parse + classify + run via
+  `subprocess.run(shell=True, executable="/bin/bash")` with timeout
+  (default 30s) and 8KB output truncation. Dangerous commands raise
+  `DangerousCommandRefused` (carrying the refused card so the UI
+  can show what was blocked). `preview_bash(cmd)` is the parse-only
+  path used by the renderer to show the card BEFORE execution.
+
+- **`render.py`** — `paint_tool_card(grid, card, *, x, y, w, theme)`
+  pure paint function. Top section: verb header pill + key/value
+  param table inside a rounded box. Bottom border: the raw command
+  prefixed with `$ ` (dim italic — always preserved so users can
+  spot parser misses). Below the box: command output with code-tinted
+  bg + status footer (`✓ exit 0 in 12ms` or `✗ exit 1`). Risk-tinted
+  border + verb glyph: `▸` safe (theme.accent), `✎` mutating
+  (theme.accent_warm), `⚠` dangerous (theme.accent_warn). Confidence
+  < 0.7 adds a `?` badge after the verb. `measure_tool_card_height()`
+  is the matching pure measurer for callers that need to lay out
+  cards before painting.
+
+- **`patterns/`** — one file per command family. v0 ships parsers
+  for: ls, cat, head/tail, grep/rg/ripgrep, find/fd/fdfind, pwd,
+  echo, true/false, mkdir, touch, rm, cp/mv, git (with per-subcommand
+  risk + git-push-force escalation), python/python3, which/type. The
+  package `__init__` imports them all so the decorators run at
+  registry-init time.
+
+**Chat integration** (`src/successor/chat.py`): `_Message` gained an
+optional `tool_card: ToolCard | None` field — non-None marks the message
+as a tool card and forces synthetic=True (never sent to the model).
+`_RenderedRow` gained `prepainted_cells: tuple[Cell, ...]` for the
+fast path. `_render_tool_card_rows()` paints the card into a sub-grid
+once and snapshots each row's cells; `_paint_chat_row` short-circuits
+to copy them verbatim. The chat's flat-row scroll model is preserved.
+
+**`/bash <command>` slash command** is the v0 proof: type
+`/bash ls -la /etc` in the chat and you get a structured `list-directory`
+card with the parsed params, the raw command on the bottom border, the
+real `ls` output beneath, and the exit code + duration in the status
+footer. When the agent loop lands, the SAME `dispatch_bash()` becomes
+the tool dispatch entry point — no rework.
+
+**Why this is the right architecture for local models**:
+1. The model's `tools`/`tool_choice` API path is never used (Qwen 3.5
+   distill is unreliable at it per `docs/llamacpp-protocol.md`)
+2. The model emits bash in its strongest mode (fenced code blocks)
+3. Risk classification is a render-time concern, not a prompting concern
+4. Every level of the pipeline degrades gracefully — unknown command
+   becomes a generic "bash ?" card that still executes
+5. The user always sees the raw command on the bottom border so they
+   can verify the parser's interpretation
+
+**What's NOT yet built**: skill invocation strategy, agent loop
+proper (the `dispatch_bash` entry point exists, but nothing yet
+detects bash blocks in the model's STREAMED content and routes them —
+that's the next phase), context compaction, framework docs.
 
 See [`docs/changelog.md`](docs/changelog.md) for the per-phase notes.
 
