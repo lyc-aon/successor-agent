@@ -106,19 +106,29 @@ def cmd_setup(args: argparse.Namespace) -> int:
     the actual chat renderer to show the user's choices in real time.
     On save, transitions directly into the chat with the new profile
     active.
+
+    First-launch flourish: the SUCCESSOR emergence animation plays
+    before the wizard opens, so a user typing `successor setup` for
+    the first time sees the brand portrait morph in. Skippable with
+    any keypress (the intro App handles that).
     """
     from .chat import SuccessorChat
     from .wizard import run_setup_wizard
+
+    # Play the bundled SUCCESSOR intro animation BEFORE the wizard
+    # opens. Always plays — first-time users will see this; repeat
+    # users can skip with any key. If the bundled frames are missing
+    # (broken install) the helper exits cleanly.
+    _play_intro_animation("successor")
 
     saved_profile = run_setup_wizard()
     if saved_profile is None:
         # User cancelled — exit cleanly without launching the chat
         return 0
 
-    # Optionally play the intro animation the user just configured,
-    # then drop into the chat with the new profile active.
-    if saved_profile.intro_animation:
-        _play_intro_animation(saved_profile.intro_animation)
+    # Drop straight into the chat with the new profile active. We
+    # do NOT replay the intro here — the user already saw it before
+    # the wizard, and watching it twice is annoying.
     SuccessorChat(profile=saved_profile).run()
     return 0
 

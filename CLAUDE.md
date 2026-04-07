@@ -86,7 +86,7 @@ src/successor/recorder.py    record/replay session traces
 src/successor/cli.py         argparse subcommand dispatch (`successor` binary)
 src/successor/__main__.py    `python -m successor` entry point
 
-tests/                       pytest suite — 826+ tests, hermetic via SUCCESSOR_CONFIG_DIR
+tests/                       pytest suite — 864+ tests, hermetic via SUCCESSOR_CONFIG_DIR
 
 scripts/                     manual-run scripts (no auto-execution)
   e2e_chat_driver.py     scripted scenarios that drive a real chat against
@@ -191,6 +191,18 @@ this pattern:
 - **`hard_wrap` checks `\n` BEFORE `cw == 0`** because newlines have
   zero display width and would otherwise attach as literal control
   chars. If you write a new wrapper, do the same.
+- **Provider URL handling**: both `LlamaCppClient` and
+  `OpenAICompatClient` accept `base_url` with or without `/v1`. The
+  `_api_root()` helper detects which form was passed. If you build a
+  new endpoint method, use `_api_root()` for OpenAI-compat endpoints
+  and the bare `base_url` (or `_server_root()` on llama.cpp) for
+  server-root endpoints like `/props`, `/tokenize`, `/health`.
+- **Context window auto-detection**: don't read
+  `profile.provider.context_window` directly. Call
+  `chat._resolve_context_window()` which consults profile override →
+  `client.detect_context_window()` → `CONTEXT_MAX` and caches the
+  result on the chat. The detection paths probe `/props` (llama.cpp)
+  or `/v1/models` + a hardcoded OpenAI prefix table (openai_compat).
 
 ## How to extend the renderer
 

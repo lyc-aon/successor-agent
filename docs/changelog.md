@@ -2839,5 +2839,131 @@ position, every class-specific body layout works:
 collection may include additional small additions in subsequent
 commits.)
 
-Final: **756 tests, all passing, hermetic via `SUCCESSOR_CONFIG_DIR`,
-no fake mocks, no `.skip()` or `.todo()`.**
+End of Phase 5 series: **756 tests, all passing, hermetic via
+`SUCCESSOR_CONFIG_DIR`, no fake mocks, no `.skip()` or `.todo()`.**
+
+---
+
+## Phase 5.9 — async bash dispatch + agent loop continuation + native Qwen tool calls (2026-04-07)
+
+The harness's first live E2E against qwopus surfaced four hard
+problems that blocked it from feeling like a real agent:
+
+1. **No agent-loop continuation.** After tool dispatch the chat
+   stopped cold. The model never saw its own tool output until the
+   user typed another message.
+2. **Tool execution blocked the tick loop.** `subprocess.run` was
+   synchronous, so during a 30-second build the entire chat froze.
+3. **The model didn't know its actual cwd.** Files landed in the
+   wrong directory because the system prompt only mentioned the
+   workspace pinning when `tool_config.bash.working_directory` was
+   explicitly set.
+4. **Streaming tool_call arguments were invisible.** The user saw
+   nothing for several seconds while the model emitted partial
+   `tool_call.function.arguments` JSON, then a fully-formed card
+   appeared all at once.
+
+Fixed with: continue-loop in `_pump_stream` (caps at 25 turns), an
+`async BashRunner` that spawns subprocess.Popen in a background thread
+and pumps stdout/stderr lines via a thread-safe queue, an unconditional
+cwd injection into the system prompt, a streaming-tool-call preview
+that infers verb + parameters from partial JSON, a sticky verb cache
+keyed by `(stream_id, call_index)`, native Qwen `tool_calls` format
+via the chat template's `<tool_call>`/`<tool_response>` tags, and a
+heredoc body strip in the bash parser to fix shlex apostrophe crashes.
+
+Tests: 756 → 811. Live E2E: 11 scenarios × 5 stability runs all green.
+
+---
+
+## Phase 6.0 — first public release prep (2026-04-07)
+
+Repo hygiene and v0.1.0 launch readiness. None of this changed
+behavior; it scrubbed personal references, added a license,
+rewrote the README, and generated visual assets.
+
+- LICENSE (Apache 2.0)
+- pyproject bumped to 0.1.0 with license/keywords/classifiers/URLs
+- `.gitignore` cleanup (`Ronin` → `Successor`)
+- README rewrite leading with a tool-card screenshot and the
+  diff.py-only-stdout-writer hook
+- `assets/` with text-format snapshots
+- `qwopus` and other personal references generified to `local`
+  in default profiles, factory examples, llama provider defaults,
+  wizard, config menu mock, e2e driver, and tests
+- `scripts/swap_to_a3b.sh` and `swap_to_qwopus.sh` deleted
+- CLAUDE.md trimmed from 700+ lines
+- Paste handling: CRLF normalization, tab expansion, orphan focus
+  tail strip, "↑ N more lines" overflow indicator on the input box
+- Real `hard_wrap` bug fixed: `\n` was being short-circuited by the
+  zero-width character branch and never produced row breaks
+- Friendly `StreamError` rendering for connection refused / DNS /
+  unreachable cases
+
+Tests: 811 → 826.
+
+---
+
+## Phase 6.1 — provider auto-detection + OpenRouter wizard step (2026-04-07)
+
+Found while testing the harness against OpenRouter from a clean
+profile: the OpenAI-compat client appended `/v1/chat/completions`
+to base_url, but every popular hosted provider treats `/v1` as part
+of base_url. Result was `https://openrouter.ai/api/v1/v1/chat/completions`
+→ 404. The same bug was latent in the llama.cpp client.
+
+Also: there was no auto-detection of context window from any
+provider. The chat read `provider.context_window` from profile JSON
+with a hardcoded 262_144 fallback. So a user pointed at a 64K model
+without manually setting context_window would have compaction
+thresholds set against the wrong number, never proactively fire
+autocompact, and eventually hit the model's real ceiling with an
+opaque "context length exceeded" error.
+
+Fixed with: `_api_root()` URL helper on both clients (detects
+trailing `/v1` and skips the append), `detect_context_window()` on
+both clients (llama.cpp probes `/props`, openai_compat probes
+`/v1/models`), `_resolve_context_window()` on the chat with profile
+override → detection → CONTEXT_MAX precedence (cached on the chat),
+new `Step.PROVIDER` in the wizard with a 2-way picker (llamacpp /
+openrouter) and inline api_key + model fields, friendly error
+extensions for HTTP 401 / 402 / 429.
+
+Tests: 826 → 858.
+
+---
+
+## Phase 6.2 — OpenAI as a first-class option + sysprompt makeover + setup intro (2026-04-07)
+
+Three small but high-leverage additions before going public:
+
+1. **OpenAI in the wizard.** PROVIDER step grew to a 3-way picker
+   (llamacpp / openai / openrouter). Space cycles forward through
+   all three. Default model auto-swaps to `gpt-4o-mini` for openai,
+   `openai/gpt-oss-20b:free` for openrouter, unless the user typed
+   something custom.
+
+2. **OpenAI fallback context table.** OpenAI's `/v1/models` returns
+   120+ models but exposes none of the `context_length` fields that
+   OpenRouter's listing has, so the live detection always returned
+   None for OpenAI direct usage. Added a hardcoded prefix table
+   covering GPT-5, GPT-4.1, GPT-4o, GPT-4-turbo, GPT-4, GPT-3.5,
+   and the o1/o3/o4 reasoning families. Prefix-matched in declaration
+   order so dated suffixes (`gpt-4o-2024-11-20`) resolve to the
+   base entry. The live probe still wins when it returns a real
+   value (e.g. OpenRouter proxying an OpenAI model).
+
+3. **SUCCESSOR intro animation plays at the start of `successor setup`.**
+   First-time users see the harness's signature visual moment before
+   the wizard opens. Skippable with any keypress.
+
+4. **Default + dev system prompts rewritten.** Default prompt is
+   model-agnostic now (no Qwen-specific suppression rules), tells
+   the model it's running in a TUI with full markdown support, and
+   establishes bash tool usage expectations. Dev prompt reflects the
+   current architecture (bash subsystem, agent loop, async runner,
+   native Qwen tool calls, compaction animation, provider
+   auto-detection) so a fresh model knows what's actually in the
+   codebase.
+
+Tests: 858 → 864.

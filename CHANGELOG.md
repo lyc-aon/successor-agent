@@ -3,6 +3,70 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
+## v0.1.1 — 2026-04-07
+
+Post-release polish around hosted providers and the first-run experience.
+
+### Provider support
+
+- **OpenAI as a first-class option.** Wizard PROVIDER step now offers
+  three choices: local llama.cpp, OpenAI, OpenRouter. OpenAI uses
+  `https://api.openai.com/v1` and the default `gpt-4o-mini` model.
+  Same `OpenAICompatClient` as OpenRouter — verified live against
+  api.openai.com.
+- **Auto-detected context window.** No more manual `context_window`
+  in profile JSON. The chat probes the provider on first use:
+  - llama.cpp `/props` → `default_generation_settings.n_ctx`
+  - OpenRouter `/v1/models` → per-model `context_length`
+  - OpenAI `/v1/models` → no context_length field, fall back to a
+    hardcoded prefix table covering GPT-5, GPT-4.1, GPT-4o,
+    GPT-4-turbo, GPT-4, GPT-3.5, and o1/o3/o4 reasoning families
+- **`/v1` URL handling.** Both `LlamaCppClient` and `OpenAICompatClient`
+  tolerate `base_url` with or without `/v1`, matching the OpenAI SDK
+  convention. Earlier you'd get a 404 if you typed `https://openrouter.ai/api/v1`
+  because the client appended `/v1` again.
+- **Friendly error rendering.** Connection refused, DNS failures,
+  timeouts, HTTP 401 (unauthorized), 402 (out of credits), and 429
+  (rate limited) all translate into actionable hints that name the
+  active profile's `base_url` instead of leaking raw urllib stack
+  traces.
+
+### First-run experience
+
+- **SUCCESSOR emergence animation plays at the start of `successor setup`**,
+  before the wizard opens. Skippable with any keypress. First-time users
+  see the harness's signature visual moment within seconds of installing.
+- **Wizard PROVIDER step** with a 3-way picker, inline api_key field
+  with bullet display, model field with smart defaults that auto-swap
+  when toggling between hosted providers (gpt-4o-mini for openai,
+  openai/gpt-oss-20b:free for openrouter), and validation glow if
+  required fields are missing on advance.
+- **Default + dev system prompts rewritten.** Default prompt is now
+  model-agnostic (no Qwen-specific suppression rules), tells the model
+  it's running in a TUI with full markdown support, and establishes
+  bash tool usage expectations. Dev prompt reflects the current
+  architecture (bash subsystem, agent loop, async runner, native Qwen
+  tool calls, compaction animation, provider auto-detection) so a
+  fresh model knows what's actually in the codebase.
+
+### Paste handling
+
+- **Multi-line paste with overflow indicator.** CRLF/CR normalize to
+  `\n`, tabs expand to 4 spaces, orphan focus tails (`[I` / `[O`) get
+  stripped, control chars below 0x20 dropped. When a paste exceeds the
+  visible input rows, an `↑ N more lines` badge appears on the topmost
+  visible row so the user knows the content didn't get truncated.
+- **`hard_wrap` newline fix.** Found while writing the overflow tests:
+  `\n` was being short-circuited by the zero-width character branch
+  and never producing line breaks, so multi-line input rendered as one
+  long visual row. Long-standing latent bug, now fixed.
+
+### Tests
+
+826 → 864 passing. New coverage for paste handling, stream errors,
+provider URL handling, context window detection (mocked HTTP), and
+the wizard's openai/openrouter full flows.
+
 ## v0.1.0 — 2026-04-07
 
 First public cut. Everything below works against any OpenAI-compatible

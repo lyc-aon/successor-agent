@@ -87,39 +87,50 @@ annotate after the fact.
 
 ## Quick start
 
-You need a running llama.cpp server first. The standard quickstart:
-
-```bash
-llama-server -m <your-model.gguf> --host 0.0.0.0 --port 8080
-```
-
-Then install Successor:
-
 ```bash
 git clone https://github.com/lyc-aon/successor-agent
 cd successor-agent
 pip install -e .
+successor setup
 ```
 
-The install registers two binaries in `~/.local/bin`:
+The install registers `successor` and the `sx` two-letter alias in
+`~/.local/bin`. Python 3.11 or newer. No third-party runtime
+dependencies — pure stdlib for the renderer, chat, tool dispatch,
+compaction, and everything shipped in the package.
 
-- `successor` — the canonical command
-- `sx` — a two-letter alias for daily use
+`successor setup` plays the SUCCESSOR emergence animation, then walks
+you through a 9-step profile creation wizard with a live preview pane:
+name, theme, dark/light, density, intro animation, **provider**,
+tools, review, save. The provider step gives you three choices:
 
-Both point at the same entry. Python 3.11 or newer. No third-party
-runtime dependencies — pure stdlib for the renderer, chat, tool
-dispatch, compaction, and everything shipped in the package.
+| Provider | Auth | Notes |
+|---|---|---|
+| **local llama.cpp** | none | run `llama-server -m <model.gguf> --host 0.0.0.0 --port 8080` first |
+| **openai** | API key | uses `https://api.openai.com/v1`, default model `gpt-4o-mini` |
+| **openrouter** | API key | uses `https://openrouter.ai/api/v1`, default model `openai/gpt-oss-20b:free` |
 
-Then:
+The wizard saves your profile to `~/.config/successor/profiles/<name>.json`
+and drops straight into the chat. The context window is auto-detected
+from each provider on first use:
 
-```bash
-successor chat
-```
+- **llama.cpp** probes `/props` and reads the `n_ctx` the server was
+  launched with (your `-c` flag)
+- **OpenRouter** reads per-model `context_length` from `/v1/models`
+- **OpenAI** falls back to a hardcoded prefix-matched table covering
+  GPT-5, GPT-4.1, GPT-4o, GPT-4-turbo, GPT-4, GPT-3.5, and the
+  o1/o3/o4 reasoning families (because OpenAI's `/v1/models` doesn't
+  expose context lengths)
 
-If the chat opens but your first message reports
-`[no llama.cpp server at http://localhost:8080]`, the server isn't
-running yet. The hint message names the URL the chat tried so you can
-verify the active profile.
+The detected window drives the compaction thresholds and the live
+fill bar in the chat footer, so the harness knows when to compact
+without you having to set anything manually.
+
+If you skip the wizard and run `successor chat` directly, you get the
+default profile pointed at `http://localhost:8080`. If your first
+message reports `[no server at http://localhost:8080]`, the local
+server isn't running yet — the hint message names the URL the chat
+tried so you can verify or open `/config` to point elsewhere.
 
 ## Commands
 
