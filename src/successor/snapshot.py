@@ -244,6 +244,7 @@ def wizard_demo_snapshot(
     display_mode: str = "dark",
     density: str = "normal",
     intro_animation: str | None = None,
+    enabled_tools: tuple[str, ...] | None = None,
     elapsed: float = 0.5,
 ) -> Grid:
     """Build a Grid showing the setup wizard at a chosen step.
@@ -268,17 +269,23 @@ def wizard_demo_snapshot(
     `successor snapshot` for marketing material.
     """
     from .wizard.setup import SuccessorSetup, Step, _WizardState
+    from .tools_registry import default_enabled_tools
 
     wizard = SuccessorSetup()
 
     # Apply state directly. The wizard's _sync_preview_to_state takes
     # care of pushing into the preview chat.
+    tools_tuple = (
+        tuple(enabled_tools) if enabled_tools is not None
+        else default_enabled_tools()
+    )
     wizard.state = _WizardState(
         name=name,
         theme_name=theme_name,
         display_mode=display_mode,
         density=density,
         intro_animation=intro_animation,
+        enabled_tools=tools_tuple,
     )
     wizard._sync_preview_to_state()
 

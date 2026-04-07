@@ -16,10 +16,40 @@ from pathlib import Path
 
 import pytest
 
+from successor.agent.bash_stream import BashStreamDetector
 from successor.bash import ToolCard, dispatch_bash, preview_bash
 from successor.chat import SuccessorChat, _Message
+from successor.providers.llama import ContentChunk, StreamEnded, StreamStarted
 from successor.render.cells import Grid
 from successor.snapshot import render_grid_to_plain
+
+
+class _FakeStream:
+    """Minimal ChatStream stand-in for driving _pump_stream in tests.
+
+    Only implements the surface _pump_stream touches: a `drain()`
+    method that returns events. Tests build a FakeStream with a
+    preloaded event list and hand it to chat._stream.
+    """
+
+    def __init__(self, events: list) -> None:
+        self._events = list(events)
+
+    def drain(self) -> list:
+        out = list(self._events)
+        self._events = []
+        return out
+
+    def close(self) -> None:
+        pass
+
+
+def _content(text: str) -> ContentChunk:
+    return ContentChunk(text=text)
+
+
+def _stream_end() -> StreamEnded:
+    return StreamEnded(finish_reason="stop")
 
 
 # ─── /bash slash command ───
@@ -202,3 +232,87 @@ def test_unknown_command_renders_with_question_badge(temp_config_dir: Path) -> N
     assert "$ wc -l README.md" in plain
     # And the question badge
     assert "?" in plain
+
+
+# ─── Streamed bash detection ───
+
+
+def test_stream_end_dispatches_detected_bash_block(tmp_path) -> None:
+    """When bash is in profile.tools, streamed ```bash blocks are
+    detected and become tool cards after StreamEnded."""
+    chat = SuccessorChat()
+    chat.messages = []
+    # Simulate the bash detector being primed by _submit
+    chat._stream_bash_detector = BashStreamDetector()
+    # Pretend a stream is in flight with chunks that contain a fenced
+    # bash block. The detector feeds off ContentChunk events.
+    chat._stream = _FakeStream([
+        _content("sure, let me check\n\n"),
+        _content("```bash\n"),
+        _content("echo hello\n"),
+        _content("```\n"),
+        _stream_end(),
+    ])
+    chat._pump_stream()
+    # The assistant message should be committed first
+    assert any(m.role == "successor" for m in chat.messages)
+    # And a tool card for the echo command should have been appended
+    tool_msgs = [m for m in chat.messages if m.tool_card is not None]
+    assert len(tool_msgs) == 1
+    assert "echo" in tool_msgs[0].tool_card.raw_command
+
+
+def test_stream_end_dispatches_multiple_blocks(tmp_path) -> None:
+    """Multiple bash blocks in one stream become separate tool cards
+    in emission order."""
+    chat = SuccessorChat()
+    chat.messages = []
+    chat._stream_bash_detector = BashStreamDetector()
+    chat._stream = _FakeStream([
+        _content("step one:\n```bash\necho one\n```\n"),
+        _content("and step two:\n```bash\necho two\n```\n"),
+        _stream_end(),
+    ])
+    chat._pump_stream()
+    tool_msgs = [m for m in chat.messages if m.tool_card is not None]
+    assert len(tool_msgs) == 2
+    assert "echo one" in tool_msgs[0].tool_card.raw_command
+    assert "echo two" in tool_msgs[1].tool_card.raw_command
+
+
+def test_stream_without_detector_ignores_bash_fences() -> None:
+    """If bash is NOT enabled (detector is None), fenced bash blocks
+    in the stream are treated as plain text — no tool cards."""
+    chat = SuccessorChat()
+    chat.messages = []
+    chat._stream_bash_detector = None  # chat-only mode
+    chat._stream = _FakeStream([
+        _content("here's some bash:\n```bash\nrm -rf /\n```\n"),
+        _stream_end(),
+    ])
+    chat._pump_stream()
+    # No tool cards should be created
+    assert all(m.tool_card is None for m in chat.messages)
+    # The assistant message should still land
+    assert any(m.role == "successor" for m in chat.messages)
+
+
+def test_dangerous_command_in_stream_shows_refusal() -> None:
+    """A dangerous command streamed by the model is caught at dispatch
+    time — the refused card is shown plus a synthetic note."""
+    chat = SuccessorChat()
+    chat.messages = []
+    chat._stream_bash_detector = BashStreamDetector()
+    chat._stream = _FakeStream([
+        _content("let me clean up\n"),
+        _content("```bash\nrm -rf /\n```\n"),
+        _stream_end(),
+    ])
+    chat._pump_stream()
+    # The refused card should appear
+    tool_msgs = [m for m in chat.messages if m.tool_card is not None]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0].tool_card.risk == "dangerous"
+    # And a synthetic 'refused' note
+    synthetic = [m for m in chat.messages if m.synthetic and "refused" in m.raw_text.lower()]
+    assert len(synthetic) >= 1

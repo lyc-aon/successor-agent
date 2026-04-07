@@ -102,6 +102,7 @@ from .agent import (
     TokenCounter,
     compact as agent_compact,
 )
+from .agent.bash_stream import BashStreamDetector
 from .bash import (
     DangerousCommandRefused,
     ToolCard,
@@ -109,6 +110,12 @@ from .bash import (
     measure_tool_card_height,
     paint_tool_card,
     preview_bash,
+)
+from .tools_registry import (
+    AVAILABLE_TOOLS,
+    build_system_prompt_tools_section,
+    default_enabled_tools,
+    filter_known,
 )
 from .render.markdown import (
     LaidOutLine,
@@ -348,6 +355,24 @@ WHEEL_SCROLL_LINES = 3
 # that takes a partial-arg string and returns a list of full matches.
 # Static commands use the static_args() helper. Dynamic commands
 # (e.g. file paths) supply a custom callable.
+
+
+def _serialize_tool_card_for_api(card: ToolCard) -> str:
+    """Serialize a ToolCard as plain text for the model's API context.
+
+    Mirrors what `agent.log.LogMessage.to_api_dict()` does on the agent
+    side: emit `$ command\\n<output>\\n[exit N]` so the model can read
+    its own previous bash invocations and the output that came back.
+    The model treats this as if it had emitted the command itself.
+    """
+    body_lines = [f"$ {card.raw_command}"]
+    if card.output:
+        body_lines.append(card.output.rstrip())
+    if card.stderr and card.stderr.strip():
+        body_lines.append(f"[stderr] {card.stderr.rstrip()}")
+    if card.exit_code is not None and card.exit_code != 0:
+        body_lines.append(f"[exit {card.exit_code}]")
+    return "\n".join(body_lines)
 
 
 def static_args(*choices: str) -> Callable[[str], list[str]]:
@@ -1240,6 +1265,12 @@ class SuccessorChat(App):
         # Best-effort approximate token count for status display
         # (chars / 4, since average tokens are ~3-4 chars).
         self._last_usage: dict | None = None
+        # Bash detector for the current stream — when bash is in
+        # profile.tools, _submit creates one of these and _pump_stream
+        # feeds ContentChunk text to it. After StreamEnded, we drain
+        # the detector and dispatch each completed bash command,
+        # appending tool cards to self.messages.
+        self._stream_bash_detector: BashStreamDetector | None = None
 
         # ─── Scrollback state ───
         self.scroll_offset: int = 0
@@ -2413,12 +2444,29 @@ class SuccessorChat(App):
         self.messages.append(_Message("user", text))
         self._scroll_to_bottom()
 
+        # Resolve which tools are enabled for THIS turn from the active
+        # profile. filter_known() drops any unrecognized names so a
+        # stale profile referencing a future tool doesn't crash us.
+        enabled_tools = filter_known(self.profile.tools or ())
+
+        # Build the system prompt for THIS turn. When tools are enabled,
+        # append the "## Available Tools" section so the model knows
+        # what it can call. The base profile system_prompt is unchanged
+        # — we only ADD the tools listing on top.
+        sys_prompt = self.system_prompt
+        if enabled_tools:
+            tools_section = build_system_prompt_tools_section(list(enabled_tools))
+            if tools_section:
+                sys_prompt = f"{sys_prompt}\n\n{tools_section}"
+
         # Build the conversation history for the model. Walk in API
         # order (summary at the START — chronologically correct) and
-        # skip synthetic non-summary messages (greetings, error notes).
-        # The summary IS included because it carries the harness-injected
-        # context that the model uses to understand older content.
-        api_messages: list[dict] = [{"role": "system", "content": self.system_prompt}]
+        # skip synthetic non-summary, non-tool-card messages (greetings,
+        # error notes). The summary AND tool card messages ARE included
+        # because they carry context the model needs:
+        #   - summary: older conversation content
+        #   - tool cards: previous bash outputs the model already saw
+        api_messages: list[dict] = [{"role": "system", "content": sys_prompt}]
         for m in self._api_ordered_messages():
             if m.is_summary:
                 api_messages.append({
@@ -2430,6 +2478,18 @@ class SuccessorChat(App):
                     ),
                 })
                 continue
+            if m.tool_card is not None:
+                # Serialize the tool card as if the model itself had run
+                # the command — `$ command\n<output>\n[exit N]`. This
+                # gives the model continuity across turns: it sees the
+                # bash command it emitted and the output that came back,
+                # and it can decide whether to call more tools or
+                # respond to the user.
+                api_messages.append({
+                    "role": "assistant",
+                    "content": _serialize_tool_card_for_api(m.tool_card),
+                })
+                continue
             if m.synthetic:
                 continue
             api_role = "user" if m.role == "user" else "assistant"
@@ -2438,6 +2498,14 @@ class SuccessorChat(App):
         self._stream = self.client.stream_chat(messages=api_messages)
         self._stream_content = []
         self._stream_reasoning_chars = 0
+        # Initialize the bash detector for this stream — only when bash
+        # is enabled in the active profile. The detector consumes
+        # ContentChunk text and queues completed `」```bash...`」`」` blocks
+        # for execution after StreamEnded.
+        if "bash" in enabled_tools:
+            self._stream_bash_detector = BashStreamDetector()
+        else:
+            self._stream_bash_detector = None
 
     # ─── Agent loop adapter (for /budget /burn /compact) ───
     #
@@ -2976,7 +3044,13 @@ class SuccessorChat(App):
             self._cache_warmer = None
 
     def _pump_stream(self) -> None:
-        """Drain any pending stream events and update accumulators."""
+        """Drain any pending stream events and update accumulators.
+
+        When bash is enabled in the active profile, ContentChunk text
+        is also fed to the BashStreamDetector. After StreamEnded, any
+        completed bash blocks are dispatched and tool cards appended
+        to self.messages, BELOW the assistant message.
+        """
         if self._stream is None:
             return
 
@@ -2988,6 +3062,13 @@ class SuccessorChat(App):
                 self._stream_reasoning_chars += len(ev.text)
             elif isinstance(ev, ContentChunk):
                 self._stream_content.append(ev.text)
+                # Feed the bash detector incrementally so we catch
+                # blocks as they arrive. Detection of completed blocks
+                # is queued internally; we drain the queue after
+                # StreamEnded so tool cards always appear AFTER the
+                # full assistant message in the chat flow.
+                if self._stream_bash_detector is not None:
+                    self._stream_bash_detector.feed(ev.text)
             elif isinstance(ev, StreamEnded):
                 full_content = "".join(self._stream_content)
                 if not full_content:
@@ -2997,6 +3078,17 @@ class SuccessorChat(App):
                 self._stream = None
                 self._stream_content = []
                 self._stream_reasoning_chars = 0
+                # If bash detection was active, drain any final blocks
+                # (flush() resolves fences without trailing newlines and
+                # appends to _completed) then dispatch the cumulative
+                # list. Tool cards appear AFTER the assistant message
+                # in the chat — visually: assistant text, then tool
+                # cards stacked below as separate _Message instances.
+                if self._stream_bash_detector is not None:
+                    self._stream_bash_detector.flush()
+                    all_blocks = self._stream_bash_detector.completed()
+                    self._stream_bash_detector = None
+                    self._dispatch_streamed_bash_blocks(all_blocks)
             elif isinstance(ev, StreamError):
                 partial = "".join(self._stream_content)
                 if partial:
@@ -3007,6 +3099,50 @@ class SuccessorChat(App):
                 self._stream = None
                 self._stream_content = []
                 self._stream_reasoning_chars = 0
+                # Drop the bash detector — partial bash blocks in a
+                # failed stream aren't safe to execute
+                self._stream_bash_detector = None
+
+    def _dispatch_streamed_bash_blocks(self, blocks: list[str]) -> None:
+        """Execute each bash block detected during streaming and append
+        the resulting tool cards to self.messages.
+
+        Each block becomes its own _Message with a tool_card attached.
+        Cards stack BELOW the assistant message that produced them.
+        Dangerous commands are auto-refused — the refused card is
+        still appended so the user sees what was blocked.
+
+        Failures other than DangerousCommandRefused are caught and
+        logged as a synthetic message — bash dispatch should never
+        crash the chat path.
+        """
+        if not blocks:
+            return
+        for command in blocks:
+            try:
+                card = dispatch_bash(command)
+            except DangerousCommandRefused as exc:
+                # Show the refused (preview) card so the user sees
+                # what was blocked and why
+                self.messages.append(_Message(
+                    "tool", "", tool_card=exc.card,
+                ))
+                self.messages.append(_Message(
+                    "successor",
+                    f"refused: {exc.reason}.",
+                    synthetic=True,
+                ))
+                continue
+            except Exception as exc:
+                self.messages.append(_Message(
+                    "successor",
+                    f"bash dispatch failed for {command!r}: {exc}",
+                    synthetic=True,
+                ))
+                continue
+            self.messages.append(_Message(
+                "tool", "", tool_card=card,
+            ))
 
     # ─── Layout helpers ───
 

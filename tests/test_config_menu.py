@@ -1312,3 +1312,109 @@ def test_delete_revert_modal_says_revert(temp_config_dir: Path) -> None:
     from successor.snapshot import render_grid_to_plain
     plain = render_grid_to_plain(g)
     assert "revert profile?" in plain
+
+
+# ─── Tools multi-select ───
+
+
+def test_tools_edit_opens_overlay(temp_config_dir: Path) -> None:
+    """Enter on the tools row opens the multi-select overlay."""
+    menu = SuccessorConfig()
+    menu._settings_cursor = _field_idx("tools")
+    menu._begin_edit()
+    assert menu._tools_edit is not None
+    assert menu._tools_edit.field_idx == _field_idx("tools")
+
+
+def test_tools_edit_space_toggles_live(temp_config_dir: Path) -> None:
+    """Space toggles each tool on/off in the live profile state."""
+    menu = SuccessorConfig()
+    menu._settings_cursor = _field_idx("tools")
+    menu._begin_edit()
+    initial = menu._current_profile().tools
+    # Toggle the cursor'd tool (bash) — flips its enabled state
+    menu._handle_tools_edit_key(KeyEvent(char=" "))
+    after_first = menu._current_profile().tools
+    assert after_first != initial
+    # Toggle back — should match the original
+    menu._handle_tools_edit_key(KeyEvent(char=" "))
+    after_second = menu._current_profile().tools
+    assert after_second == initial
+
+
+def test_tools_edit_esc_restores_snapshot(temp_config_dir: Path) -> None:
+    """Esc on the tools overlay restores the pre-edit tuple."""
+    menu = SuccessorConfig()
+    menu._settings_cursor = _field_idx("tools")
+    snapshot = menu._current_profile().tools
+    menu._begin_edit()
+    # Make a change
+    menu._handle_tools_edit_key(KeyEvent(char=" "))
+    assert menu._current_profile().tools != snapshot
+    # Esc reverts
+    menu._handle_tools_edit_key(KeyEvent(key=Key.ESC))
+    assert menu._tools_edit is None
+    assert menu._current_profile().tools == snapshot
+
+
+def test_tools_edit_enter_commits(temp_config_dir: Path) -> None:
+    """Enter on the tools overlay commits the live edit and closes."""
+    menu = SuccessorConfig()
+    menu._settings_cursor = _field_idx("tools")
+    menu._begin_edit()
+    # Toggle on
+    menu._handle_tools_edit_key(KeyEvent(char=" "))
+    toggled = menu._current_profile().tools
+    menu._handle_tools_edit_key(KeyEvent(key=Key.ENTER))
+    assert menu._tools_edit is None
+    assert menu._current_profile().tools == toggled
+
+
+def test_tools_edit_marks_dirty(temp_config_dir: Path) -> None:
+    """Toggling a tool marks the tools field dirty."""
+    menu = SuccessorConfig()
+    menu._settings_cursor = _field_idx("tools")
+    menu._begin_edit()
+    # Toggle changes state — should be dirty now
+    menu._handle_tools_edit_key(KeyEvent(char=" "))
+    assert menu._is_dirty(menu._current_profile().name, "tools")
+    # Toggle back to original — dirty bit clears
+    menu._handle_tools_edit_key(KeyEvent(char=" "))
+    assert not menu._is_dirty(menu._current_profile().name, "tools")
+
+
+def test_tools_edit_persists_to_disk(temp_config_dir: Path) -> None:
+    """A toggled tools selection saves and shows up in the JSON file."""
+    PROFILE_REGISTRY.reload()
+    menu = SuccessorConfig()
+    menu._settings_cursor = _field_idx("tools")
+    profile_name = menu._current_profile().name
+    original = tuple(menu._current_profile().tools)
+    menu._begin_edit()
+    menu._handle_tools_edit_key(KeyEvent(char=" "))
+    menu._handle_tools_edit_key(KeyEvent(key=Key.ENTER))
+    edited = tuple(menu._current_profile().tools)
+    assert edited != original
+
+    menu._save()
+    target = temp_config_dir / "profiles" / f"{profile_name}.json"
+    assert target.exists()
+    payload = json.loads(target.read_text())
+    assert tuple(payload.get("tools", ())) == edited
+
+
+def test_snapshot_tools_overlay_renders(temp_config_dir: Path) -> None:
+    """The tools overlay paints checkboxes + descriptions when open."""
+    menu = SuccessorConfig()
+    menu._settings_cursor = _field_idx("tools")
+    menu._begin_edit()
+
+    from successor.render.cells import Grid
+    g = Grid(30, 120)
+    menu.on_tick(g)
+    plain = render_grid_to_plain(g)
+    assert "bash" in plain
+    # Checkbox glyph should appear
+    assert ("[✓]" in plain) or ("[ ]" in plain)
+    # Header of the overlay
+    assert "space toggles" in plain

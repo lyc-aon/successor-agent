@@ -113,6 +113,7 @@ from ..render.theme import (
     normalize_display_mode,
     toggle_display_mode,
 )
+from ..tools_registry import AVAILABLE_TOOLS
 from .prompt_editor import PromptEditor
 
 
@@ -151,6 +152,7 @@ class FieldKind(Enum):
     NUMBER = "number"          # inline text input with int/float validation
     SECRET = "secret"          # inline text input, displayed as ••• when not editing
     MULTILINE = "multiline"    # full-screen text editor overlay
+    TOOLS_TOGGLE = "tools"     # multi-select overlay of enabled tools
     READONLY = "readonly"      # hint-only, can't be edited from here
 
 
@@ -248,7 +250,7 @@ _SETTINGS_TREE: tuple[_SettingField, ...] = (
     ),
     _SettingField(
         name="tools", label="tools", section="",
-        kind=FieldKind.READONLY, hint="phase 6 not yet wired",
+        kind=FieldKind.TOOLS_TOGGLE,
     ),
 )
 
@@ -300,6 +302,24 @@ class _InlineTextEdit:
     cursor: int  # byte offset into buffer
     snapshot: Any  # original value at edit-open time, for cancel
     kind: FieldKind  # mirror the field kind so the handler doesn't have to look it up
+
+
+@dataclass
+class _ToolsEdit:
+    """In-progress tools multi-select edit.
+
+    When the user presses Enter on the tools row, an overlay opens
+    that lists every tool in AVAILABLE_TOOLS with a checkbox. The
+    user arrows through the list; space toggles each; Enter commits
+    the working selection; Esc restores the snapshot.
+
+    The edit is LIVE — toggling a tool updates the profile immediately
+    so the dirty marker + preview refresh as the user works. Esc
+    undoes every change back to `snapshot`.
+    """
+    field_idx: int
+    cursor: int
+    snapshot: tuple[str, ...]  # original value for cancel
 
 
 # ─── Delete confirmation modal state ───
@@ -392,6 +412,9 @@ class SuccessorConfig(App):
 
         # ─── Inline text edit state (TEXT / NUMBER / SECRET fields) ───
         self._inline_text_edit: _InlineTextEdit | None = None
+
+        # ─── Tools multi-select edit state ───
+        self._tools_edit: _ToolsEdit | None = None
 
         # ─── Multi-line prompt editor (MULTILINE fields) ───
         self._prompt_editor: PromptEditor | None = None
@@ -525,7 +548,9 @@ class SuccessorConfig(App):
         if field.name == "skills":
             return f"({len(profile.skills)})"
         if field.name == "tools":
-            return f"({len(profile.tools)})"
+            if not profile.tools:
+                return "(none — chat only)"
+            return ", ".join(profile.tools)
 
         raw = self._profile_value_for_field_raw(profile, field)
 
@@ -558,6 +583,8 @@ class SuccessorConfig(App):
             new_profile = replace(old_profile, intro_animation=new_value)
         elif field.name == "system_prompt":
             new_profile = replace(old_profile, system_prompt=new_value)
+        elif field.name == "tools":
+            new_profile = replace(old_profile, tools=tuple(new_value))
         elif field.name.startswith("provider_"):
             key = field.name.removeprefix("provider_")
             new_provider = dict(old_profile.provider) if old_profile.provider else {}
@@ -597,6 +624,8 @@ class SuccessorConfig(App):
             return profile.intro_animation
         if field.name == "system_prompt":
             return profile.system_prompt
+        if field.name == "tools":
+            return tuple(profile.tools)
         if field.name.startswith("provider_"):
             key = field.name.removeprefix("provider_")
             if profile.provider:
@@ -911,6 +940,11 @@ class SuccessorConfig(App):
             self._handle_edit_key(event)
             return
 
+        # Tools multi-select overlay
+        if self._tools_edit is not None:
+            self._handle_tools_edit_key(event)
+            return
+
         # Esc → exit. If there are unsaved changes, the FIRST esc warns
         # via toast and consumes the keypress; the SECOND exits.
         if event.key == Key.ESC:
@@ -1057,6 +1091,18 @@ class SuccessorConfig(App):
             )
             return
 
+        if field.kind == FieldKind.TOOLS_TOGGLE:
+            # Open the multi-select overlay. Snapshot the current tools
+            # tuple so Esc can restore it if the user cancels.
+            current = self._profile_value_for_field_raw(self._current_profile(), field)
+            snapshot = tuple(current) if current else ()
+            self._tools_edit = _ToolsEdit(
+                field_idx=self._settings_cursor,
+                cursor=0,
+                snapshot=snapshot,
+            )
+            return
+
     def _handle_inline_text_key(self, event: KeyEvent) -> None:
         """Input handling while an inline TEXT/NUMBER/SECRET edit is open.
 
@@ -1185,6 +1231,54 @@ class SuccessorConfig(App):
             )
             return
 
+    def _handle_tools_edit_key(self, event: KeyEvent) -> None:
+        """Input handling while the tools multi-select overlay is open.
+
+        ↑↓ moves the cursor between tools. Space toggles the currently
+        highlighted tool on or off (updates the live profile immediately
+        so the dirty marker and preview refresh in real time). Enter
+        commits the working selection and closes the overlay. Esc
+        restores the snapshot and closes the overlay — all intermediate
+        toggles are undone.
+        """
+        edit = self._tools_edit
+        if edit is None:
+            return
+        field = _SETTINGS_TREE[edit.field_idx]
+        tool_names = tuple(AVAILABLE_TOOLS.keys())
+        if not tool_names:
+            self._tools_edit = None
+            return
+
+        if event.key == Key.ESC:
+            # Cancel — revert to the pre-edit snapshot
+            self._set_field_on_profile(self._profile_cursor, field, edit.snapshot)
+            self._tools_edit = None
+            return
+        if event.key == Key.ENTER:
+            # Commit — current profile tools already reflect the working
+            # state (we toggle live). Just close.
+            self._tools_edit = None
+            return
+        if event.key == Key.UP:
+            edit.cursor = (edit.cursor - 1) % len(tool_names)
+            return
+        if event.key == Key.DOWN:
+            edit.cursor = (edit.cursor + 1) % len(tool_names)
+            return
+        if event.is_char and event.char == " ":
+            # Toggle the highlighted tool on/off in the live profile
+            name = tool_names[edit.cursor]
+            current = list(
+                self._profile_value_for_field_raw(self._current_profile(), field) or ()
+            )
+            if name in current:
+                current.remove(name)
+            else:
+                current.append(name)
+            self._set_field_on_profile(self._profile_cursor, field, tuple(current))
+            return
+
     # ─── Render ───
 
     def on_tick(self, grid: Grid) -> None:
@@ -1273,6 +1367,14 @@ class SuccessorConfig(App):
         # ─── Inline cycle-edit overlay ───
         if self._editing_field is not None:
             self._paint_edit_overlay(
+                grid, chrome_variant,
+                middle_x=middle_x, middle_w=middle_w,
+                body_top=body_top, body_bottom=body_bottom,
+            )
+
+        # ─── Tools multi-select overlay ───
+        if self._tools_edit is not None:
+            self._paint_tools_edit_overlay(
                 grid, chrome_variant,
                 middle_x=middle_x, middle_w=middle_w,
                 body_top=body_top, body_bottom=body_bottom,
@@ -1519,14 +1621,20 @@ class SuccessorConfig(App):
                 self._inline_text_edit is not None
                 and self._inline_text_edit.field_idx == idx
             )
+            is_tools_editing = (
+                self._tools_edit is not None
+                and self._tools_edit.field_idx == idx
+            )
             is_cursor = (
                 idx == self._settings_cursor
                 and self._focus == Focus.SETTINGS
                 and self._editing_field is None
                 and not is_inline_text_editing
+                and not is_tools_editing
             )
             is_being_edited = (
                 idx == self._editing_field or is_inline_text_editing
+                or is_tools_editing
             )
 
             # Background fill for cursor row
@@ -1753,6 +1861,8 @@ class SuccessorConfig(App):
             keybinds = f"editing {kind_name} · type to input · ←→ cursor · ⏎ confirm · esc cancel"
         elif self._editing_field is not None:
             keybinds = "↑↓ pick · ⏎ confirm · esc cancel"
+        elif self._tools_edit is not None:
+            keybinds = "↑↓ move · space toggle · ⏎ confirm · esc cancel"
         elif self._focus == Focus.PROFILES:
             keybinds = "tab focus · ↑↓ profile · ⏎ activate · → settings · D delete · s save · r revert · esc back"
         else:
@@ -1915,6 +2025,120 @@ class SuccessorConfig(App):
                 grid, f" {cursor_glyph} {opt_text}",
                 box_x + 1, row_y,
                 style=Style(fg=row_fg, bg=row_bg, attrs=ATTR_BOLD),
+            )
+
+    # ─── Tools multi-select overlay ───
+
+    def _paint_tools_edit_overlay(
+        self,
+        grid: Grid,
+        theme: ThemeVariant,
+        *,
+        middle_x: int,
+        middle_w: int,
+        body_top: int,
+        body_bottom: int,
+    ) -> None:
+        """Paint the tools multi-select list over the settings pane.
+
+        Mirrors `_paint_edit_overlay` (cycle overlay) in placement so
+        the user's spatial model stays consistent. Each tool gets a
+        checkbox reflecting its current enabled state in the live
+        profile — toggling updates the profile as the user works.
+        """
+        edit = self._tools_edit
+        if edit is None:
+            return
+        field = _SETTINGS_TREE[edit.field_idx]
+        tool_names = tuple(AVAILABLE_TOOLS.keys())
+        if not tool_names:
+            return
+
+        # Compute the overlay box dimensions. Each row shows the
+        # checkbox + label + short description, so we want a wider box
+        # than the cycle overlay.
+        longest_desc = max(
+            len(AVAILABLE_TOOLS[n].description) for n in tool_names
+        )
+        longest_label = max(len(AVAILABLE_TOOLS[n].label) for n in tool_names)
+        desired_w = longest_label + longest_desc + 12
+        box_w = min(middle_w - 4, max(32, desired_w))
+        box_h = min(body_bottom - body_top - 2, len(tool_names) + 4)
+
+        # Anchor to the row being edited — same walk as the cycle overlay
+        list_top = body_top + 4
+        cur_y = list_top
+        last_section: str | None = None
+        editing_row_y = list_top
+        for idx, fld in enumerate(_SETTINGS_TREE):
+            if fld.section and fld.section != last_section:
+                cur_y += 2
+                last_section = fld.section
+            if idx == edit.field_idx:
+                editing_row_y = cur_y
+                break
+            cur_y += 1
+
+        box_x = middle_x + 4
+        if box_x + box_w > middle_x + middle_w - 1:
+            box_x = middle_x + middle_w - box_w - 1
+        box_y = editing_row_y + 1
+        if box_y + box_h > body_bottom - 1:
+            box_y = editing_row_y - box_h
+            if box_y < body_top + 1:
+                box_y = body_top + max(1, (body_bottom - body_top - box_h) // 2)
+
+        border_style = Style(fg=theme.accent_warm, bg=theme.bg_input, attrs=ATTR_BOLD)
+        fill_style = Style(fg=theme.fg, bg=theme.bg_input)
+        paint_box(
+            grid, box_x, box_y, box_w, box_h,
+            style=border_style, fill_style=fill_style, chars=BOX_ROUND,
+        )
+
+        # Header pill
+        header = f" {field.label} — space toggles "
+        paint_text(
+            grid, header, box_x + 2, box_y,
+            style=Style(fg=theme.bg, bg=theme.accent_warm, attrs=ATTR_BOLD),
+        )
+
+        # Current enabled set (read live from the profile so toggles
+        # reflect immediately)
+        enabled = set(
+            self._profile_value_for_field_raw(self._current_profile(), field) or ()
+        )
+
+        # Rows
+        for i, name in enumerate(tool_names):
+            row_y = box_y + 1 + i
+            if row_y >= box_y + box_h - 1:
+                break
+            descriptor = AVAILABLE_TOOLS[name]
+            is_cursor = i == edit.cursor
+            is_on = name in enabled
+            check = "[✓]" if is_on else "[ ]"
+            row_bg = theme.accent if is_cursor else theme.bg_input
+            row_fg = theme.bg if is_cursor else theme.fg
+            fill_region(
+                grid, box_x + 1, row_y, box_w - 2, 1,
+                style=Style(bg=row_bg),
+            )
+            cursor_glyph = "▸" if is_cursor else " "
+            row_text = f" {cursor_glyph} {check}  {descriptor.label}"
+            paint_text(
+                grid, row_text, box_x + 1, row_y,
+                style=Style(fg=row_fg, bg=row_bg, attrs=ATTR_BOLD),
+            )
+            # Dim description trailing the label
+            desc_x = box_x + 1 + len(row_text) + 2
+            max_desc_w = max(0, box_x + box_w - 2 - desc_x)
+            desc = descriptor.description
+            if len(desc) > max_desc_w:
+                desc = desc[: max(0, max_desc_w - 1)] + "…"
+            desc_fg = theme.bg if is_cursor else theme.fg_dim
+            paint_text(
+                grid, desc, desc_x, row_y,
+                style=Style(fg=desc_fg, bg=row_bg, attrs=ATTR_DIM | ATTR_ITALIC),
             )
 
     # ─── Delete confirmation overlay ───

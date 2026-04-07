@@ -2406,13 +2406,223 @@ self.messages and the row builder cooperate.
 
 ---
 
+## Phase 5.7 — tools architecture: registry + setup wizard + config menu + streaming dispatch (2026-04-07)
+
+The bash-masking subsystem landed in Phase 5.0 wired up only the
+`/bash <command>` slash command. The model could not emit bash of
+its own accord and have it execute — the stream committed as plain
+text, fenced blocks were rendered as markdown codeblocks, and
+nothing fired. Phase 5.7 closes the loop: when the model emits a
+```` ```bash ```` block during a streamed reply, the harness detects
+it client-side, runs it through the same `dispatch_bash()` pipeline
+the slash command uses, and stacks the resulting tool card BELOW
+the assistant message that produced it.
+
+The architecture is deliberately set up so adding new tools later
+is one registry entry. Every consumer (setup wizard, config menu,
+chat system prompt, streaming dispatch) iterates the registry.
+
+### 1. `src/successor/tools_registry.py` — source of truth
+
+One tiny module with a frozen `ToolDescriptor` dataclass and an
+`AVAILABLE_TOOLS` dict keyed by name. Currently one entry:
+
+```python
+AVAILABLE_TOOLS = {
+    "bash": ToolDescriptor(
+        name="bash",
+        label="bash",
+        description="Run shell commands. Dangerous commands refused automatically.",
+        default_enabled=True,
+        system_prompt_doc=BASH_DOC,
+    ),
+}
+```
+
+`BASH_DOC` is the markdown the system prompt injects so the model
+learns what the tool does, how to invoke it (fenced code blocks),
+and the safety rules. Helpers: `is_known_tool()`, `filter_known()`,
+`default_enabled_tools()`, `build_system_prompt_tools_section()`.
+
+Three consumers iterate the registry:
+1. Setup wizard — shows enable/disable toggles when creating a profile
+2. Config menu — shows toggles for editing an existing profile
+3. Chat — decides whether to instantiate `BashStreamDetector` AND
+   builds the "## Available Tools" section of the system prompt
+
+### 2. Chat wiring — streamed bash → tool card
+
+`chat._submit` now does two new things when the active profile has
+tools enabled:
+- Appends `build_system_prompt_tools_section()` to the system prompt
+  so the model sees a markdown explanation of every enabled tool
+- Instantiates `self._stream_bash_detector = BashStreamDetector()`
+  if "bash" is in `profile.tools`; None otherwise
+
+`chat._pump_stream` feeds every `ContentChunk` through the detector:
+```python
+elif isinstance(ev, ContentChunk):
+    self._stream_content.append(ev.text)
+    if self._stream_bash_detector is not None:
+        self._stream_bash_detector.feed(ev.text)
+```
+
+On `StreamEnded`, the detector is flushed and any completed blocks
+go through `_dispatch_streamed_bash_blocks()` — each block becomes
+its own `_Message(tool_card=...)` appended AFTER the assistant
+message. Dangerous commands still raise `DangerousCommandRefused`
+and surface the refused card + synthetic note.
+
+`_submit` also serializes existing tool cards to text when building
+the API request so prior turns' tool outputs are visible to the
+model on its next call:
+
+```python
+def _serialize_tool_card_for_api(card: ToolCard) -> str:
+    body_lines = [f"$ {card.raw_command}"]
+    if card.output:
+        body_lines.append(card.output.rstrip())
+    if card.stderr and card.stderr.strip():
+        body_lines.append(f"[stderr] {card.stderr.rstrip()}")
+    if card.exit_code is not None and card.exit_code != 0:
+        body_lines.append(f"[exit {card.exit_code}]")
+    return "\n".join(body_lines)
+```
+
+This is what closes the agent loop — the model emits bash, the
+harness runs it, and the model sees the output on its next turn as
+part of the assistant history.
+
+### 3. Setup wizard — new TOOLS step
+
+The wizard grows from 7 steps to 8 (welcome, name, theme, mode,
+density, intro, **tools**, review). The tools step is a multi-select
+checklist:
+
+```
+ step 7 of 8 — enable tools
+
+ what should this profile be allowed to do?
+ ↑↓ move · space toggles · → next (chat-only is fine — uncheck everything)
+
+ ▸ [✓]  bash
+        Run shell commands. Dangerous commands refused automatically.
+
+ 1 tool enabled
+```
+
+Space toggles the cursor'd tool on/off. Users who just want a
+chat-only harness (no bash, no subprocess execution) can uncheck
+everything; the summary footer changes to "chat-only mode — no
+tools enabled" and the saved profile has `tools: []`. The review
+step shows the actual selected tools instead of the stale phase-6
+placeholder.
+
+Default selection is `default_enabled_tools()`, which currently
+means bash is pre-checked. When a future tool ships with
+`default_enabled=False`, it'll show up in the step but unchecked.
+
+### 4. Config menu — new `TOOLS_TOGGLE` field kind
+
+The existing config menu has `CYCLE`, `TOGGLE`, `TEXT`, `NUMBER`,
+`SECRET`, `MULTILINE`, `READONLY` field kinds. Phase 5.7 adds
+`TOOLS_TOGGLE` — a multi-select overlay that replaces the old
+`READONLY` placeholder for the `tools` row.
+
+Enter on the tools row opens an overlay that mirrors the cycle
+overlay's placement (anchored below the row, flipping above if
+clipped). Each row shows a checkbox + tool label + description:
+
+```
+╭─ tools — space toggles ─────────────────────────────╮
+│ ▸ [✓]  bash   Run shell commands. Dangerous…       │
+╰─────────────────────────────────────────────────────╯
+```
+
+- ↑↓ moves the cursor between tools
+- Space toggles the highlighted tool's enabled state in the LIVE
+  profile — the dirty marker fires immediately and the preview
+  chat refreshes so the user sees the effect in real time
+- Enter commits (closes the overlay, keeps the edits)
+- Esc restores the pre-edit snapshot and closes
+
+Dirty tracking compares the working profile's `tools` tuple against
+the initial snapshot, so toggling on and then off clears the dirty
+flag automatically. Saves persist `profile.tools` to disk via the
+existing `_save()` path with no special-casing.
+
+The settings row's display value changes with the selection:
+- `bash` (or `bash, read_file` later) when tools are enabled
+- `(none — chat only)` when no tools are enabled
+
+### 5. Profile defaults
+
+`builtin/profiles/successor-dev.json` — the harness-development
+profile — now has `"tools": ["bash"]` so working on successor
+itself with bash enabled is the default. The other built-in
+profile still has no tools (safer for the "just open a chat"
+flow).
+
+### Live E2E result
+
+Verified with the real qwopus model during development. The model
+emits `` `bash ... ` `` in response to prompts like "list the
+files in this directory"; the harness:
+1. Detects the fence mid-stream via `BashStreamDetector.feed()`
+2. Commits the assistant message on `StreamEnded`
+3. Flushes the detector, dispatches each detected block through
+   `dispatch_bash()`
+4. Appends each resulting `ToolCard` as its own `_Message` below
+   the assistant message
+5. On the user's next turn, serializes those cards into the API
+   history so the model sees its own bash outputs
+
+### Tests
+
+- `tests/test_wizard.py` — 5 new tests: snapshot of the TOOLS
+  step checklist, chat-only mode rendering, `_handle_tools` toggle
+  flow, `_WizardState` chat-only roundtrip, full flow that drives
+  the wizard from WELCOME through the new TOOLS step into REVIEW
+  and asserts `payload["tools"] == ["bash"]` lands on disk
+- `tests/test_config_menu.py` — 7 new tests: overlay open,
+  space-toggles-live, esc restores snapshot, enter commits, dirty
+  marker fires, persistence to disk, snapshot of the overlay
+- `tests/test_chat_bash.py` — 4 new tests: `_FakeStream` harness
+  drives fenced bash blocks through `_pump_stream` and asserts
+  tool cards land after assistant message (single block, multiple
+  blocks, detector=None is no-op, dangerous command shows refusal)
+
+Total: 667 tests, all passing (up from 652).
+
+### Why this is the right approach for local models
+
+The same logic from Phase 5.0 applies, now at the streaming layer.
+Mid-grade local models (Qwen 3.5 distill) are fluent in bash
+because they've eaten millions of bash commands in pretraining;
+they are unreliable with structured tool-call schemas. So we let
+them emit bash in their strongest mode (fenced code blocks),
+detect it CLIENT-SIDE via the existing stream detector state
+machine, run it through the same dispatch pipeline the slash
+command uses, and surface the result as a structured card the
+user can verify at a glance.
+
+There's one piece of mechanism (the registry) and every consumer
+iterates it. When we add `read_file` or `web_search` later, we
+add one entry to `AVAILABLE_TOOLS` and the setup wizard, config
+menu, and system prompt auto-discover it.
+
+---
+
 ## What's next
 
+- **Additional tools** — `read_file`, `web_search`, `git_diff` as
+  independent registry entries once we've used bash in practice and
+  understand the shape better
+- **Concurrent tool execution** — tools currently dispatch
+  synchronously after the stream commits. A future phase wires
+  asyncio so bash runs while the model streams the next token
 - **Skill invocation strategy** — pick always-on vs on-demand after
   experimenting with Qwen 3.5 in practice
-- **Agent loop + tool dispatch** — wire `TOOL_REGISTRY` into the
-  chat's response cycle once we've studied the llamacpp tool-call
-  protocol surface deliberately
 - **Find/replace in the prompt editor** — Ctrl+F opens a search bar
   inside the editor overlay, n/N jump matches
 - **Undo/redo in the prompt editor** — operation log + Ctrl+Z/Ctrl+Y
@@ -2447,10 +2657,11 @@ self.messages and the row builder cooperate.
 | 5.4 (KV cache pre-warming after compaction) | 7 | 652 |
 | 5.5 (chat stays interactive during compaction wait) | 0 | 652 |
 | 5.6 (summary at the bottom + integrated boundary divider) | 0 | 652 |
+| 5.7 (tools architecture: registry + wizard + config + streaming) | 15 | 667 |
 
 (Counts above are approximate by phase boundary; actual test
 collection may include additional small additions in subsequent
 commits.)
 
-Final: **652 tests, all passing, hermetic via `SUCCESSOR_CONFIG_DIR`,
+Final: **667 tests, all passing, hermetic via `SUCCESSOR_CONFIG_DIR`,
 no fake mocks, no `.skip()` or `.todo()`.**

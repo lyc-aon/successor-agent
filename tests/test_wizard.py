@@ -325,6 +325,10 @@ def test_full_save_flow_writes_json_file(temp_config_dir: Path) -> None:
 
     # Pick intro
     wizard._handle_intro(KeyEvent(key=Key.ENTER))
+    assert wizard.current_step == Step.TOOLS
+
+    # Accept the default tool selection (bash enabled)
+    wizard._handle_tools(KeyEvent(key=Key.ENTER))
     assert wizard.current_step == Step.REVIEW
 
     # Save
@@ -341,6 +345,7 @@ def test_full_save_flow_writes_json_file(temp_config_dir: Path) -> None:
     assert payload["name"] == "smoketest"
     assert payload["theme"] == "steel"
     assert payload["display_mode"] == "dark"
+    assert payload["tools"] == ["bash"]
 
     # active_profile was persisted to chat.json
     chat_cfg = json.loads((temp_config_dir / "chat.json").read_text())
@@ -378,7 +383,7 @@ def test_snapshot_welcome_renders(temp_config_dir: Path) -> None:
     plain = render_grid_to_plain(g)
     assert "successor · setup" in plain
     assert "welcome" in plain
-    assert "step 1 of 7" in plain
+    assert "step 1 of 8" in plain
 
 
 def test_snapshot_name_step_shows_input_field(temp_config_dir: Path) -> None:
@@ -388,7 +393,7 @@ def test_snapshot_name_step_shows_input_field(temp_config_dir: Path) -> None:
     plain = render_grid_to_plain(g)
     assert "test-name" in plain
     assert "name for your new profile" in plain
-    assert "step 2 of 7" in plain
+    assert "step 2 of 8" in plain
 
 
 def test_snapshot_theme_step_shows_live_preview(temp_config_dir: Path) -> None:
@@ -402,6 +407,60 @@ def test_snapshot_theme_step_shows_live_preview(temp_config_dir: Path) -> None:
     # The greeting message from the preview script
     assert "Greetings, traveler" in plain
     assert "live preview" in plain
+
+
+def test_snapshot_tools_step_shows_checkboxes(temp_config_dir: Path) -> None:
+    """The tools step paints a checklist of registered tools, with
+    bash enabled by default."""
+    g = wizard_demo_snapshot(
+        rows=30, cols=100, step="tools", name="tools-prof",
+    )
+    plain = render_grid_to_plain(g)
+    assert "enable tools" in plain
+    assert "bash" in plain
+    assert "[✓]" in plain  # default: bash checked
+    assert "1 tool enabled" in plain
+
+
+def test_snapshot_tools_step_chat_only_mode(temp_config_dir: Path) -> None:
+    """A profile with no enabled tools renders in 'chat-only mode'."""
+    g = wizard_demo_snapshot(
+        rows=30, cols=100, step="tools", name="chatonly",
+        enabled_tools=(),
+    )
+    plain = render_grid_to_plain(g)
+    assert "bash" in plain
+    assert "[ ]" in plain
+    assert "chat-only mode" in plain
+
+
+def test_handle_tools_toggle_flow(temp_config_dir: Path) -> None:
+    """Space toggles the cursor'd tool; enter advances to review."""
+    wizard = SuccessorSetup()
+    wizard._enter_step(Step.TOOLS)
+    # Default state is bash enabled
+    assert "bash" in wizard.state.enabled_tools
+
+    # Toggle bash off
+    wizard._handle_tools(KeyEvent(char=" "))
+    assert "bash" not in wizard.state.enabled_tools
+
+    # Toggle bash back on
+    wizard._handle_tools(KeyEvent(char=" "))
+    assert "bash" in wizard.state.enabled_tools
+
+    # Enter advances to REVIEW
+    wizard._handle_tools(KeyEvent(key=Key.ENTER))
+    assert wizard.current_step == Step.REVIEW
+
+
+def test_wizard_state_chat_only_roundtrip(temp_config_dir: Path) -> None:
+    """A _WizardState with empty enabled_tools produces a tool-free profile."""
+    state = _WizardState(name="bare", enabled_tools=())
+    profile = state.to_profile()
+    assert profile.tools == ()
+    payload = state.to_json_dict()
+    assert payload["tools"] == []
 
 
 def test_snapshot_review_shows_summary(temp_config_dir: Path) -> None:

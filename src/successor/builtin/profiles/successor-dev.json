@@ -13,7 +13,7 @@
     "temperature": 0.5
   },
   "skills": [],
-  "tools": [],
+  "tools": ["bash"],
   "tool_config": {},
   "intro_animation": "successor"
 }

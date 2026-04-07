@@ -118,6 +118,10 @@ from ..render.theme import (
     normalize_display_mode,
     toggle_display_mode,
 )
+from ..tools_registry import (
+    AVAILABLE_TOOLS,
+    default_enabled_tools,
+)
 
 
 # ─── Constants ───
@@ -185,8 +189,9 @@ class Step(Enum):
     MODE = 3
     DENSITY = 4
     INTRO = 5
-    REVIEW = 6
-    SAVED = 7  # terminal screen — auto-advances into the chat
+    TOOLS = 6
+    REVIEW = 7
+    SAVED = 8  # terminal screen — auto-advances into the chat
 
 
 # Display labels for the sidebar
@@ -197,6 +202,7 @@ _STEP_LABELS: dict[Step, str] = {
     Step.MODE: "mode",
     Step.DENSITY: "density",
     Step.INTRO: "intro",
+    Step.TOOLS: "tools",
     Step.REVIEW: "review",
     Step.SAVED: "saved",
 }
@@ -209,6 +215,7 @@ _SIDEBAR_STEPS: tuple[Step, ...] = (
     Step.MODE,
     Step.DENSITY,
     Step.INTRO,
+    Step.TOOLS,
     Step.REVIEW,
 )
 
@@ -241,6 +248,7 @@ class _WizardState:
     display_mode: str = "dark"
     density: str = "normal"
     intro_animation: str | None = None
+    enabled_tools: tuple[str, ...] = field(default_factory=default_enabled_tools)
 
     def to_profile(self) -> Profile:
         """Build the final Profile dataclass from the user's choices."""
@@ -253,7 +261,7 @@ class _WizardState:
             system_prompt=_DEFAULT_SYSTEM_PROMPT,
             provider=dict(_DEFAULT_PROVIDER),
             skills=(),
-            tools=(),
+            tools=tuple(self.enabled_tools),
             tool_config={},
             intro_animation=self.intro_animation,
         )
@@ -269,7 +277,7 @@ class _WizardState:
             "system_prompt": _DEFAULT_SYSTEM_PROMPT,
             "provider": dict(_DEFAULT_PROVIDER),
             "skills": [],
-            "tools": [],
+            "tools": list(self.enabled_tools),
             "tool_config": {},
             "intro_animation": self.intro_animation,
         }
@@ -350,6 +358,7 @@ class SuccessorSetup(App):
             Step.MODE: 0,
             Step.DENSITY: 1,  # default to "normal"
             Step.INTRO: 0,
+            Step.TOOLS: 0,
         }
 
         # ─── Animation state ───
@@ -571,6 +580,7 @@ class SuccessorSetup(App):
             Step.MODE: self._handle_mode,
             Step.DENSITY: self._handle_density,
             Step.INTRO: self._handle_intro,
+            Step.TOOLS: self._handle_tools,
             Step.REVIEW: self._handle_review,
         }
         handler = handler_map.get(self.current_step)
@@ -719,6 +729,51 @@ class SuccessorSetup(App):
             cursor = 1 - cursor
             self._cursors[Step.INTRO] = cursor
             self.state.intro_animation = _INTRO_OPTIONS[cursor][0]
+
+    def _handle_tools(self, event: KeyEvent) -> None:
+        """Tools step: space toggles the cursor'd tool on/off.
+
+        Users who just want a chat-only harness can uncheck everything
+        and the profile will be saved with an empty tools list. ↑↓
+        move the cursor between tools; space (or Enter without a
+        modifier key) toggles the currently highlighted one. → advances
+        to REVIEW.
+        """
+        tool_names = tuple(AVAILABLE_TOOLS.keys())
+        if not tool_names:
+            # No tools registered at all — this step is a no-op. Allow
+            # nav but don't try to toggle anything.
+            if event.key == Key.ENTER or event.key == Key.RIGHT:
+                self._advance_step()
+            elif event.key == Key.LEFT:
+                self._retreat_step()
+            return
+
+        cursor = self._cursors[Step.TOOLS]
+        if event.key == Key.UP:
+            cursor = (cursor - 1) % len(tool_names)
+            self._cursors[Step.TOOLS] = cursor
+            return
+        if event.key == Key.DOWN:
+            cursor = (cursor + 1) % len(tool_names)
+            self._cursors[Step.TOOLS] = cursor
+            return
+        if event.is_char and event.char == " ":
+            # Toggle the currently highlighted tool
+            current = list(self.state.enabled_tools)
+            name = tool_names[cursor]
+            if name in current:
+                current.remove(name)
+            else:
+                current.append(name)
+            self.state.enabled_tools = tuple(current)
+            return
+        if event.key == Key.ENTER or event.key == Key.RIGHT:
+            self._advance_step()
+            return
+        if event.key == Key.LEFT:
+            self._retreat_step()
+            return
 
     def _handle_review(self, event: KeyEvent) -> None:
         if event.key == Key.ENTER:
@@ -968,6 +1023,8 @@ class SuccessorSetup(App):
             self._paint_density(grid, theme, body_left, body_top, body_right, body_bottom)
         elif self.current_step == Step.INTRO:
             self._paint_intro(grid, theme, body_left, body_top, body_right, body_bottom)
+        elif self.current_step == Step.TOOLS:
+            self._paint_tools(grid, theme, body_left, body_top, body_right, body_bottom)
         elif self.current_step == Step.REVIEW:
             self._paint_review(grid, theme, body_left, body_top, body_right, body_bottom)
         elif self.current_step == Step.SAVED:
@@ -981,6 +1038,7 @@ class SuccessorSetup(App):
             Step.MODE: "choose dark or light",
             Step.DENSITY: "choose layout density",
             Step.INTRO: "intro animation",
+            Step.TOOLS: "enable tools",
             Step.REVIEW: "review and save",
             Step.SAVED: "saved",
         }[self.current_step]
@@ -1359,6 +1417,85 @@ class SuccessorSetup(App):
             )
             paint_text(grid, line, left, row_y, style=line_style)
 
+    def _paint_tools(
+        self,
+        grid: Grid,
+        theme: ThemeVariant,
+        left: int,
+        top: int,
+        right: int,
+        bottom: int,
+    ) -> None:
+        """Tool picker — checkboxes for each known tool in the registry.
+
+        Users who want a chat-only harness can uncheck everything and
+        save a profile with no tools. Users who want a richer setup
+        can enable bash (and future tools as they're added). The step
+        is the only place in the wizard where the user decides what
+        the harness is *allowed* to do on their behalf.
+        """
+        prompt = "what should this profile be allowed to do?"
+        paint_text(grid, prompt, left, top, style=Style(fg=theme.fg, bg=theme.bg))
+        helper = "↑↓ move · space toggles · → next (chat-only is fine — uncheck everything)"
+        paint_text(
+            grid, helper, left, top + 1,
+            style=Style(fg=theme.fg_dim, bg=theme.bg, attrs=ATTR_DIM | ATTR_ITALIC),
+        )
+
+        tool_names = tuple(AVAILABLE_TOOLS.keys())
+        if not tool_names:
+            paint_text(
+                grid, "(no tools registered)", left, top + 3,
+                style=Style(fg=theme.fg_dim, bg=theme.bg, attrs=ATTR_ITALIC),
+            )
+            return
+
+        cursor = self._cursors[Step.TOOLS]
+        enabled = set(self.state.enabled_tools)
+
+        for i, name in enumerate(tool_names):
+            row_y = top + 3 + i * 2
+            if row_y >= bottom - 1:
+                break
+            descriptor = AVAILABLE_TOOLS[name]
+            is_cursor = i == cursor
+            is_on = name in enabled
+            glyph = "▸" if is_cursor else " "
+            check = "[✓]" if is_on else "[ ]"
+            row_fg = theme.accent if is_cursor else theme.fg
+            row_attrs = ATTR_BOLD if is_cursor else 0
+            label = f"{glyph} {check}  {descriptor.label}"
+            paint_text(
+                grid, label, left, row_y,
+                style=Style(fg=row_fg, bg=theme.bg, attrs=row_attrs),
+            )
+            # Description line underneath, dimmed
+            desc = descriptor.description
+            if row_y + 1 < bottom:
+                # Indent under the checkbox for visual alignment
+                paint_text(
+                    grid, desc, left + 7, row_y + 1,
+                    style=Style(fg=theme.fg_dim, bg=theme.bg, attrs=ATTR_DIM | ATTR_ITALIC),
+                )
+
+        # Summary footer — how many tools are enabled
+        count = len(enabled)
+        summary_y = bottom - 2
+        if summary_y > top + 3 + len(tool_names) * 2:
+            if count == 0:
+                summary = "chat-only mode — no tools enabled"
+                summary_color = theme.fg_dim
+            elif count == 1:
+                summary = "1 tool enabled"
+                summary_color = theme.accent
+            else:
+                summary = f"{count} tools enabled"
+                summary_color = theme.accent
+            paint_text(
+                grid, summary, left, summary_y,
+                style=Style(fg=summary_color, bg=theme.bg, attrs=ATTR_BOLD),
+            )
+
     def _paint_review(
         self,
         grid: Grid,
@@ -1376,6 +1513,10 @@ class SuccessorSetup(App):
         )
 
         # Field summary in two columns
+        if self.state.enabled_tools:
+            tools_label = ", ".join(self.state.enabled_tools)
+        else:
+            tools_label = "(none — chat-only)"
         rows_data = [
             ("name", self.state.name),
             ("theme", self.state.theme_name),
@@ -1385,7 +1526,7 @@ class SuccessorSetup(App):
             ("system prompt", "default — edit JSON file to customize"),
             ("provider", "llamacpp localhost:8080 — edit JSON to change"),
             ("skills", "(none — phase 5 not yet wired)"),
-            ("tools", "(none — phase 6 not yet wired)"),
+            ("tools", tools_label),
         ]
         label_w = max(len(label) for label, _ in rows_data)
         for i, (label, value) in enumerate(rows_data):
