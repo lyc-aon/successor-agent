@@ -282,6 +282,78 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         intro_frames = list(intro_dir.glob("*.txt"))
         print(f"  intro       {len(intro_frames)} successor emergence frames")
         print(f"  intro_dir   {intro_dir}")
+
+    # ─── Active profile + provider connectivity check ───
+    #
+    # Useful when the user runs `successor doctor` to debug "why
+    # isn't my chat working?" — the terminal capability dump alone
+    # doesn't help. This section probes the active profile's
+    # provider, reports whether the endpoint is reachable, and
+    # surfaces the resolved context window so the user can verify
+    # everything's wired before launching the chat.
+    print()
+    print("  active profile:")
+    try:
+        from .profiles import get_active_profile
+        from .providers import make_provider
+        profile = get_active_profile()
+        print(f"    name        {profile.name}")
+        provider_cfg = profile.provider or {}
+        provider_type = provider_cfg.get("type", "<unset>")
+        base_url = provider_cfg.get("base_url", "<unset>")
+        model = provider_cfg.get("model", "<unset>")
+        api_key = provider_cfg.get("api_key", "")
+        api_key_status = (
+            "set"
+            if isinstance(api_key, str) and api_key.strip()
+            else "(none — local server)"
+            if provider_type == "llamacpp"
+            else "MISSING"
+        )
+        print(f"    provider    {provider_type}")
+        print(f"    base_url    {base_url}")
+        print(f"    model       {model}")
+        print(f"    api_key     {api_key_status}")
+
+        # Construct the client and probe it. Both probes are short
+        # and tolerant of failure — if the server is down or the
+        # auth is wrong we want a friendly status line, not a stack
+        # trace.
+        try:
+            client = make_provider(provider_cfg)
+        except Exception as exc:  # noqa: BLE001
+            print(f"    status      provider construction failed: {exc}")
+            return 0
+
+        # Health check (HTTP reachability)
+        health_ok: bool | None = None
+        try:
+            health_ok = bool(getattr(client, "health", lambda: False)())
+        except Exception:  # noqa: BLE001
+            health_ok = False
+        if health_ok:
+            print(f"    status      reachable")
+        elif health_ok is False:
+            print(f"    status      UNREACHABLE — is the server running?")
+        else:
+            print(f"    status      unknown (no health check on this provider)")
+
+        # Context window detection
+        detect = getattr(client, "detect_context_window", None)
+        if callable(detect):
+            try:
+                ctx = detect()
+            except Exception:  # noqa: BLE001
+                ctx = None
+            override = provider_cfg.get("context_window")
+            if isinstance(override, int) and override > 0:
+                print(f"    ctx window  {override} tokens (profile override)")
+            elif isinstance(ctx, int) and ctx > 0:
+                print(f"    ctx window  {ctx} tokens (auto-detected)")
+            else:
+                print(f"    ctx window  unknown — falls back to 262144 default")
+    except Exception as exc:  # noqa: BLE001
+        print(f"    error: could not load active profile ({exc})")
     return 0
 
 
@@ -447,7 +519,15 @@ def cmd_bench(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="successor",
-        description="successor — Successor agent harness for locally-run mid-grade models",
+        description=(
+            "successor — terminal chat harness for local llama.cpp and "
+            "OpenAI-compatible endpoints (OpenAI, OpenRouter, etc.)"
+        ),
+        epilog=(
+            "First time? Run `successor setup` to create a profile with "
+            "the wizard, or `successor chat` to chat against the default "
+            "(local llama.cpp on http://localhost:8080)."
+        ),
     )
     p.add_argument(
         "-V",
@@ -458,12 +538,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = p.add_subparsers(dest="cmd", metavar="<command>")
 
-    p_chat = sub.add_parser("chat", help="chat interface (v0, scripted)")
+    p_chat = sub.add_parser(
+        "chat",
+        help="streaming chat with the active profile (default command for daily use)",
+    )
     p_chat.set_defaults(func=cmd_chat)
 
     p_setup = sub.add_parser(
         "setup",
-        help="profile creation wizard with live preview",
+        help="9-step profile creation wizard with live preview pane",
     )
     p_setup.set_defaults(func=cmd_setup)
 
@@ -473,7 +556,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_config.set_defaults(func=cmd_config)
 
-    p_doctor = sub.add_parser("doctor", help="terminal capability check")
+    p_doctor = sub.add_parser(
+        "doctor",
+        help="terminal + active profile health check",
+    )
     p_doctor.set_defaults(func=cmd_doctor)
 
     p_skills = sub.add_parser(
@@ -484,7 +570,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_tools = sub.add_parser(
         "tools",
-        help="list registered tools (phase 6 scaffold — not yet wired)",
+        help="list registered tools (bash is wired by default)",
     )
     p_tools.set_defaults(func=cmd_tools)
 

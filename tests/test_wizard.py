@@ -50,7 +50,12 @@ def test_wizard_state_defaults() -> None:
     assert state.theme_name == "steel"
     assert state.display_mode == "dark"
     assert state.density == "normal"
-    assert state.intro_animation is None
+    # Both intro animation and the empty-state hero art default to
+    # "successor" so wizard-created profiles open with the bundled
+    # emergence animation + title portrait. Users can clear either
+    # field via the wizard's INTRO step or by editing the saved JSON.
+    assert state.intro_animation == "successor"
+    assert state.chat_intro_art == "successor"
 
 
 def test_wizard_state_to_profile_uses_name() -> None:
@@ -284,11 +289,14 @@ def test_handle_density_cycles(temp_config_dir: Path) -> None:
 def test_handle_intro_toggles(temp_config_dir: Path) -> None:
     wizard = SuccessorSetup()
     wizard._enter_step(Step.INTRO)
-    assert wizard.state.intro_animation is None
-    wizard._handle_intro(KeyEvent(key=Key.DOWN))
+    # Default is now "successor" (cursor at index 1) so the wizard
+    # opens with the bundled intro pre-selected. Toggling Up moves
+    # the cursor to "(none)" and clears the field.
     assert wizard.state.intro_animation == "successor"
     wizard._handle_intro(KeyEvent(key=Key.UP))
     assert wizard.state.intro_animation is None
+    wizard._handle_intro(KeyEvent(key=Key.DOWN))
+    assert wizard.state.intro_animation == "successor"
 
 
 # ─── Save flow integration ───

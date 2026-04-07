@@ -15,5 +15,6 @@
   "skills": [],
   "tools": ["bash"],
   "tool_config": {},
-  "intro_animation": "successor"
+  "intro_animation": "successor",
+  "chat_intro_art": "successor"
 }

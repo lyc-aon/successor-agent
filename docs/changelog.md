@@ -2967,3 +2967,123 @@ Three small but high-leverage additions before going public:
    codebase.
 
 Tests: 858 → 864.
+
+---
+
+## Phase 6.3 — usage clarity pass + empty-state hero panel (2026-04-07)
+
+Audited every touch point a new user hits between landing on the
+GitHub repo and sending their first chat message. Found seven
+clarity gaps and fixed them all. The biggest one is a new chat
+empty state inspired by Hermes Agent's caduceus banner: a SUCCESSOR
+title portrait on the left, an info panel on the right, painted
+entirely through the existing `BrailleArt` + `paint_text` primitives
+with no new infrastructure.
+
+### Empty-state hero panel (the big one)
+
+When the chat opens with no real messages yet AND the active profile
+has `chat_intro_art` set, the chat area splits into two columns:
+
+- Left half: BrailleArt portrait laid out via the existing Pretext-
+  shaped resampler. Theme-aware (`theme.accent` + bold). On
+  terminals < 80 cols the art is hidden and only the panel renders.
+- Right half: info panel with section headers (PROFILE / PROVIDER /
+  TOOLS / APPEARANCE) and the actionable bottom hint
+  `type / for commands · press ? for help`.
+
+Per-profile customization via the new `chat_intro_art: str | None`
+field on `Profile`. Resolution order in `render/intro_art.py`:
+
+  1. Absolute path → load directly
+  2. Built-in name → `builtin/intros/<name>/10-title.txt`
+  3. User dir → `~/.config/successor/art/<name>.txt`
+  4. Built-in single-file → `builtin/intros/<name>.txt`
+
+Returns None gracefully on any failure (chat falls back to the
+synthetic greeting OR paints just the info panel, depending on
+whether `chat_intro_art` is unset vs the file is missing).
+
+`_is_empty_chat()` predicate handles the moment-of-truth correctly:
+counts tool cards, compaction boundaries, and summary messages as
+"real content" (they're synthetic for API serialization but the
+user expects to see them). Once the user submits anything, the
+predicate returns False and the chat surface goes back to normal
+message painting.
+
+`_build_intro_panel_lines()` reads from LIVE chat state, not
+profile-stored values, so theme/density changes via Ctrl+T / Alt+D /
+Ctrl+] mid-session reflect immediately in the panel.
+
+Default profile, dev profile, and wizard-created profiles all ship
+with `chat_intro_art="successor"` and `intro_animation="successor"`.
+
+### Discoverability
+
+- **Help overlay (`?`) gained an "available commands" section**
+  built from the live `SLASH_COMMANDS` registry at paint time, so
+  any future command shows up automatically. Renamed the existing
+  "slash commands" section to "command palette" since it actually
+  documented palette navigation, not the commands themselves.
+- **Removed duplicate `Ctrl+P` keybind** (was listed in scroll +
+  look-and-feel sections — the scroll one was the stale alias).
+- **Tightened the help modal** (removed inter-section blank rows)
+  so all 11 slash commands fit on a default 24-30 row terminal.
+
+### `successor doctor` connectivity check
+
+New "active profile" section after the existing terminal capability
+dump. Shows:
+
+  active profile:
+    name        successor-dev
+    provider    llamacpp
+    base_url    http://localhost:8080
+    model       local
+    api_key     (none — local server)
+    status      reachable
+    ctx window  262144 tokens (auto-detected)
+
+The probe is short, tolerant of failure, and labels the source of
+the context window number (profile override / auto-detected /
+fallback). First command to run when something isn't working.
+
+### `successor` no-args refresh
+
+- Tagline now mentions OpenAI-compatible endpoints alongside local
+  llama.cpp
+- Dropped stale "v0, scripted" and "phase 6 scaffold — not yet wired"
+  subcommand descriptions
+- Added "First time? Run `successor setup`" footer to the help text
+
+### Friendly stream errors
+
+The connection-refused / DNS / unreachable / timeout branch in
+`_format_stream_error` now lists three numbered remediation paths:
+start a local llama-server, run `successor setup` to switch providers,
+or open `/config` to edit the profile inline. Previously the user
+got only the local-server hint and bounced if they didn't have
+llama.cpp installed.
+
+### Wizard PROVIDER hints
+
+Old hints were functional ("uses http://localhost:8080" /
+"api.openai.com — api key required" / "openrouter.ai — api key
+required"). New hints are motivating: "free + private, needs
+llama-server running" / "pay-per-use against your OpenAI credits" /
+"free models available, no card needed". Helps a user who isn't
+sure which provider to pick make a decision faster.
+
+### README reorder
+
+Lead with the 30-second user journey, push the architectural
+premise lower as a "why this exists" section. The screenshot still
+opens the page, but the next thing the reader sees is the
+quick-start `successor setup` block, the provider matrix, and the
+in-chat key reference card — not the diff.py-only-stdout-writer
+hook. Engineering-minded readers still find it; first-touch users
+get oriented faster.
+
+Tests: 864 → 881 (17 new for the empty-state painter + the
+intro art loader's 4-tier resolution + `_is_empty_chat` predicate
+edge cases).

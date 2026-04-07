@@ -21,7 +21,9 @@ def test_friendly_error_for_connection_refused(temp_config_dir: Path) -> None:
     )
     assert "no server at" in msg
     assert "http://localhost:8080" in msg
+    # Three remediation paths must all be visible to the user.
     assert "llama-server" in msg
+    assert "successor setup" in msg
     assert "/config" in msg
 
 

@@ -15,5 +15,6 @@
   "skills": [],
   "tools": [],
   "tool_config": {},
-  "intro_animation": null
+  "intro_animation": "successor",
+  "chat_intro_art": "successor"
 }

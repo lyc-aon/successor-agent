@@ -3,6 +3,80 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
+## v0.1.2 — 2026-04-07
+
+Usage clarity pass. Every touch point a new user hits now points
+them at the next useful step.
+
+### Empty-state hero panel
+
+The chat opens to a SUCCESSOR title portrait on the left and an
+info panel on the right showing the active profile, provider,
+model, resolved context window, server reachability, enabled
+tools, theme/mode/density, and an actionable bottom hint
+(`type / for commands · press ? for help`). Theme/dark/light
+aware, gracefully degrades on narrow terminals to info-panel-only.
+Once the user submits their first message the empty state hides
+and normal chat painting takes over.
+
+Per-profile customizable via the new `chat_intro_art` field:
+
+- `"successor"` (default) loads the bundled title portrait
+- Drop a braille frame at `~/.config/successor/art/<name>.txt`
+  and reference it as `<name>`
+- Or pass an absolute path to any braille text file
+
+The default profile, the dev profile, and wizard-created profiles
+all ship with `chat_intro_art="successor"` and `intro_animation="successor"`.
+Users who want a quieter open can clear either field via `/config`.
+
+### Discoverability fixes
+
+- **Help overlay (`?`) lists every slash command.** The new
+  "available commands" section is built from the live
+  `SLASH_COMMANDS` registry at paint time, so any future command
+  shows up automatically. Also fixed a duplicate `Ctrl+P` keybind
+  (was listed in both vim-scroll and look & feel sections).
+- **`successor doctor` runs a connectivity check.** New "active
+  profile" section after the terminal capability dump shows the
+  configured provider, base_url, model, api_key status,
+  reachability (probes `/health` or `/v1/models`), and the
+  resolved context window. The first command to run when something
+  isn't working.
+- **`successor` no-args text refreshed.** Dropped stale labels
+  ("v0, scripted", "phase 6 scaffold — not yet wired"), updated
+  the tagline to mention OpenAI-compatible endpoints, added a
+  "First time? Run `successor setup`" footer.
+
+### Friendlier errors
+
+- The connection-refused / DNS / unreachable / timeout error now
+  lists three numbered remediation paths: start a local
+  llama-server, run `successor setup` to switch providers, or
+  open `/config` to edit the profile inline. Previously it only
+  mentioned the local-server path, which left users without
+  llama.cpp installed dead in the water.
+
+### Wizard polish
+
+- **PROVIDER step hints are motivating, not just functional.**
+  "free + private, needs llama-server running" / "pay-per-use
+  against your OpenAI credits" / "free models available, no
+  card needed" instead of the old description-only text.
+
+### README rewrite
+
+- Leads with the user journey (what you can do in 30 seconds)
+  instead of the architectural premise. The premise is still
+  there, but lower down where engineering-minded readers find
+  it after they've decided to install.
+
+### Tests
+
+864 → 881 (17 new for the empty-state painter, the loader's
+4-tier resolution, the `_is_empty_chat` predicate, narrow-terminal
+fallback, and the chat_intro_art unset path).
+
 ## v0.1.1 — 2026-04-07
 
 Post-release polish around hosted providers and the first-run experience.

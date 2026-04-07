@@ -86,7 +86,7 @@ src/successor/recorder.py    record/replay session traces
 src/successor/cli.py         argparse subcommand dispatch (`successor` binary)
 src/successor/__main__.py    `python -m successor` entry point
 
-tests/                       pytest suite — 864+ tests, hermetic via SUCCESSOR_CONFIG_DIR
+tests/                       pytest suite — 881+ tests, hermetic via SUCCESSOR_CONFIG_DIR
 
 scripts/                     manual-run scripts (no auto-execution)
   e2e_chat_driver.py     scripted scenarios that drive a real chat against

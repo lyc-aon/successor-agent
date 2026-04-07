@@ -94,16 +94,29 @@ def test_density_axis_renders(temp_config_dir: Path, density: str) -> None:
 # ─── Scenario-specific content checks ───
 
 
-def test_blank_scenario_shows_greeting(temp_config_dir: Path) -> None:
-    """The blank scenario renders the synthetic greeting message."""
+def test_blank_scenario_shows_empty_state(temp_config_dir: Path) -> None:
+    """The blank scenario renders the empty-state hero + info panel.
+
+    Default profiles ship with chat_intro_art="successor", so a fresh
+    chat with no real messages paints the title portrait on the left
+    and an info panel on the right. The panel includes the section
+    headers and the bottom hint, regardless of which profile or
+    theme is active.
+    """
     THEME_REGISTRY.reload()
     grid = chat_demo_snapshot(
-        rows=30, cols=100, scenario="blank",
+        rows=30, cols=120, scenario="blank",
         theme_name="steel", display_mode="dark",
     )
     plain = render_grid_to_plain(grid)
-    # The greeting starts with "I am successor." regardless of server state
-    assert "I am successor" in plain
+    # Info panel section headers — these appear no matter what
+    assert "profile" in plain
+    assert "provider" in plain
+    assert "tools" in plain
+    assert "appearance" in plain
+    # The actionable hint at the bottom of the panel
+    assert "type / for commands" in plain
+    assert "press ? for help" in plain
 
 
 def test_showcase_renders_markdown_sampler(temp_config_dir: Path) -> None:
@@ -273,10 +286,12 @@ def test_steel_and_user_theme_differ(temp_config_dir: Path) -> None:
     steel_plain = render_grid_to_plain(steel_grid)
     sakura_plain = render_grid_to_plain(sakura_grid)
 
-    # Both render the greeting (proving both themes paint the chat body
-    # successfully — neither one fell back to a blank or crash state).
-    assert "I am successor" in steel_plain
-    assert "I am successor" in sakura_plain
+    # Both render the empty-state hero panel (proving both themes paint
+    # the chat body successfully — neither one fell back to a blank or
+    # crash state). The "profile" section header is theme-independent
+    # text that appears in the info panel for any active profile.
+    assert "profile" in steel_plain
+    assert "profile" in sakura_plain
 
     # The title-bar theme pill names the active theme — visible chrome
     # that legitimately differs between two themes.

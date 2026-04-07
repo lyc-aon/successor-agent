@@ -254,7 +254,7 @@ _HELP_SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("PgUp PgDn",   "scroll one page"),
         ("Home End",    "jump to top / bottom"),
         ("Ctrl+B Ctrl+F", "vim-style page up / down"),
-        ("Ctrl+P Ctrl+N", "vim-style line up / down"),
+        ("Ctrl+N",      "vim-style line down"),
         ("Ctrl+E Ctrl+Y", "vim-style end / top"),
     )),
     ("look & feel", (
@@ -265,18 +265,36 @@ _HELP_SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("Ctrl+]",      "cycle density (compact / normal / spacious)"),
         ("Alt+= Alt+-", "step density up / down"),
     )),
-    ("slash commands", (
-        ("/",           "open the command palette"),
+    ("command palette", (
+        ("/",           "open the slash command palette"),
         ("↑ ↓",          "navigate suggestions"),
         ("Tab",         "accept highlighted suggestion"),
         ("Enter",       "accept and submit"),
-        ("Esc",         "dismiss the dropdown"),
+        ("Esc",         "dismiss the palette"),
     )),
     ("misc", (
         ("?",           "show this help overlay"),
+        ("Ctrl+F",      "search chat history"),
         ("Esc / any",   "dismiss the help overlay"),
     )),
 )
+
+
+def _build_slash_command_help_section() -> tuple[str, tuple[tuple[str, str], ...]]:
+    """Build a help-section tuple from the live SLASH_COMMANDS registry.
+
+    Computed at paint time (not at import) so the help overlay stays
+    in sync with whatever commands the chat has registered. If a new
+    command lands in SLASH_COMMANDS, it appears in the help overlay
+    automatically — no parallel list to keep updated.
+    """
+    entries: list[tuple[str, str]] = []
+    for cmd in SLASH_COMMANDS:
+        key = f"/{cmd.name}"
+        if cmd.args_hint:
+            key = f"{key} {cmd.args_hint}"
+        entries.append((key, cmd.description))
+    return ("available commands", tuple(entries))
 
 
 # Sentinel value for "no content-width cap" used by the compact density.
@@ -1503,22 +1521,44 @@ class SuccessorChat(App):
             # Defer until __enter__ runs (see below)
             self.term.mouse_reporting = True
 
-        # Probe the server immediately so we can show a useful greeting.
-        server_up = self.client.health()
-        if server_up:
-            greeting = (
-                f"I am successor. The forge is hot — {self.client.model} stands ready. "
-                f"Speak freely. Ctrl+C, /quit, or `?` for help."
-            )
-        else:
-            greeting = (
-                f"I am successor. The forge is cold — no model answers at "
-                f"{self.client.base_url}. Start llama.cpp and try again, "
-                f"or read in silence."
-            )
-        self.messages: list[_Message] = [
-            _Message("successor", greeting, synthetic=True),
-        ]
+        # Probe the server immediately so the empty-state info panel
+        # can show a "reachable / UNREACHABLE" status without paying
+        # the round-trip every frame.
+        self._server_health_ok: bool | None = None
+        try:
+            self._server_health_ok = self.client.health()
+        except Exception:  # noqa: BLE001
+            self._server_health_ok = False
+
+        # When chat_intro_art is set on the active profile, the empty
+        # state is rendered as a hero portrait + info panel via the
+        # _paint_empty_state painter — no synthetic greeting needed
+        # since the panel itself communicates "I'm here, ready, here's
+        # the model + tools + how to start." When chat_intro_art is
+        # None, fall back to a single synthetic greeting message so
+        # the chat doesn't open completely blank.
+        self.messages: list[_Message] = []
+        if not (self.profile and self.profile.chat_intro_art):
+            if self._server_health_ok:
+                greeting = (
+                    f"I am successor. The forge is hot — {self.client.model} stands ready. "
+                    f"Speak freely. Ctrl+C, /quit, or `?` for help."
+                )
+            else:
+                greeting = (
+                    f"I am successor. The forge is cold — no model answers at "
+                    f"{self.client.base_url}. Start llama.cpp and try again, "
+                    f"or read in silence."
+                )
+            self.messages.append(_Message("successor", greeting, synthetic=True))
+
+        # Cached intro art for the empty-state hero panel. Loaded
+        # lazily on first paint via _resolve_intro_art() so we don't
+        # touch disk in __init__ for chats that never end up empty
+        # (e.g. /replay sessions). None means "no hero, paint info
+        # panel only" or "no profile field set, paint nothing".
+        self._intro_art: object | None = None  # BrailleArt | None
+        self._intro_art_resolved: bool = False
 
         self.input_buffer: str = ""
 
@@ -3740,14 +3780,16 @@ class SuccessorChat(App):
                 f"[no server at {base_url}]\n"
                 f"\n"
                 f"successor expects an OpenAI-compatible HTTP endpoint at\n"
-                f"the URL above. For local llama.cpp, the standard\n"
-                f"quickstart is:\n"
+                f"the URL above. Three ways to fix this:\n"
                 f"\n"
-                f"  llama-server -m <your-model.gguf> --host 0.0.0.0 --port 8080\n"
+                f"  1. Start a local llama.cpp server:\n"
+                f"     llama-server -m <your-model.gguf> --host 0.0.0.0 --port 8080\n"
                 f"\n"
-                f"For a hosted endpoint (OpenRouter, OpenAI, Groq, etc.),\n"
-                f"open /config and check the active profile's\n"
-                f"provider.base_url and provider.api_key fields."
+                f"  2. Quit (Ctrl+C) and run `successor setup` to create\n"
+                f"     a profile against OpenAI or OpenRouter instead.\n"
+                f"\n"
+                f"  3. Open /config and edit the active profile's\n"
+                f"     provider.base_url and provider.api_key fields."
             )
         if "http 401" in lower or "unauthorized" in lower:
             return (
@@ -4243,6 +4285,18 @@ class SuccessorChat(App):
         if bottom <= top or width <= 2:
             return
 
+        # Empty-state hero: when the user hasn't sent any real messages
+        # yet AND the active profile defines chat_intro_art, paint the
+        # ANSI art portrait + info panel instead of the normal message
+        # rendering. The painter handles all sizing, theming, and
+        # graceful fallback (info-only on narrow terminals, no panel
+        # if the art file is missing). Once the user submits anything,
+        # _is_empty_chat() returns False and we fall through to the
+        # normal painter.
+        if self._is_empty_chat() and self._has_intro_art():
+            self._paint_empty_state(grid, top, bottom, width, theme)
+            return
+
         # Density-driven layout. Use _current_density() so content
         # width smoothly slides during transitions instead of snapping.
         # Compact uses no cap (the sentinel _DENSITY_NO_CAP degenerates
@@ -4319,6 +4373,274 @@ class SuccessorChat(App):
         # user can scroll, search, and read freely while the model
         # generates the summary in the background. The "compaction
         # in progress" signal lives in the static footer instead.
+
+    # ─── Empty-state hero panel ───
+
+    def _is_empty_chat(self) -> bool:
+        """True iff the chat has no visible content yet.
+
+        Used by _paint_chat_area to decide whether to paint the empty-
+        state hero + info panel or fall through to the normal message
+        rendering. Counts ANY of the following as "real content" that
+        should hide the hero:
+
+          - Non-synthetic messages (user input, committed assistant
+            replies)
+          - Tool cards (technically synthetic for API serialization
+            purposes, but visually they ARE real artifacts of a real
+            tool run that the user expects to see)
+          - Compaction boundaries and summaries (synthetic but
+            structurally important — without them the user would
+            see the hero come back AFTER a compaction, which would
+            be wrong)
+          - An in-flight stream (the chat is mid-response — show
+            whatever's streaming, not the hero)
+        """
+        if self._stream is not None:
+            return False
+        for m in self.messages:
+            if m.tool_card is not None:
+                return False
+            if getattr(m, "is_boundary", False):
+                return False
+            if getattr(m, "is_summary", False):
+                return False
+            if not m.synthetic:
+                return False
+        return True
+
+    def _has_intro_art(self) -> bool:
+        """True iff the active profile has loadable chat_intro_art.
+
+        Calls _resolve_intro_art() lazily so disk I/O happens once,
+        on the first frame the empty state is painted, and the result
+        is cached on the chat instance. Switching profiles invalidates
+        the cache via _resolve_intro_art's check against the resolved
+        profile name.
+        """
+        return self._resolve_intro_art() is not None
+
+    def _resolve_intro_art(self):
+        """Lazy-load and cache the active profile's chat_intro_art.
+
+        Returns the BrailleArt instance, or None if the profile has
+        no art configured or the file failed to load. Cached on the
+        instance until the active profile changes — set
+        self._intro_art_resolved = False after a profile swap to
+        force a reload.
+        """
+        if self._intro_art_resolved:
+            return self._intro_art
+        from .render.intro_art import load_intro_art
+        if self.profile is None:
+            self._intro_art = None
+        else:
+            self._intro_art = load_intro_art(self.profile.chat_intro_art)
+        self._intro_art_resolved = True
+        return self._intro_art
+
+    def _paint_empty_state(
+        self,
+        grid: Grid,
+        top: int,
+        bottom: int,
+        width: int,
+        theme: ThemeVariant,
+    ) -> None:
+        """Hero portrait on the left, info panel on the right.
+
+        Layout:
+          - On terminals >= 80 cols, split horizontally: art takes
+            roughly the left half, info panel the right half, with
+            modest padding around both.
+          - On narrower terminals, hide the art and center the info
+            panel — the art has no value if it'd squish to 30 cols.
+          - On very short chat areas (< 12 rows), only paint the
+            info panel (the art needs vertical room to read).
+
+        Theme-aware: art paints in theme.accent (subtle hero color),
+        section headers in theme.fg_dim (quiet labels), values in
+        theme.fg (primary), the bottom hint in theme.accent_warm so
+        the user notices the "type / for commands · ? for help" line.
+        """
+        from .render.cells import Cell
+        from .render.paint import fill_region
+
+        chat_h = bottom - top
+        if chat_h < 6:
+            return
+
+        # Vertical centering: figure out how tall the info panel is,
+        # then offset both art and panel to sit in the middle of the
+        # chat area. Looks intentional rather than top-anchored.
+        panel_lines = self._build_intro_panel_lines()
+        panel_h = len(panel_lines)
+
+        art = self._resolve_intro_art()
+        # Decide whether to show the art at all. Need >= 80 cols for
+        # the split layout, AND >= 12 rows for the art to be readable.
+        show_art = (
+            art is not None
+            and width >= 80
+            and chat_h >= 12
+        )
+
+        if show_art:
+            # Two-column layout. Reserve ~half for art, half for panel,
+            # with 4-cell gutters on the outside and a 6-cell gap between.
+            outer_pad = 4
+            inner_gap = 6
+            half = (width - 2 * outer_pad - inner_gap) // 2
+            art_cells_w = max(20, half)
+            panel_x = outer_pad + art_cells_w + inner_gap
+            panel_w = max(20, width - panel_x - outer_pad)
+
+            # Art takes most of the chat height; pad top and bottom
+            # so the portrait sits balanced.
+            art_pad_y = max(1, (chat_h - 24) // 4)
+            art_cells_h = max(8, chat_h - 2 * art_pad_y)
+            art_y = top + art_pad_y
+            art_x = outer_pad
+
+            try:
+                lines = art.layout(art_cells_w, art_cells_h)
+            except Exception:  # noqa: BLE001
+                lines = []
+            art_style = Style(
+                fg=theme.accent,
+                bg=theme.bg,
+                attrs=ATTR_BOLD,
+            )
+            for i, line in enumerate(lines):
+                ly = art_y + i
+                if ly >= bottom:
+                    break
+                paint_text(grid, line, art_x, ly, style=art_style)
+        else:
+            # Info panel only — center it horizontally with mild padding.
+            panel_w = min(60, max(30, width - 8))
+            panel_x = max(2, (width - panel_w) // 2)
+
+        # Vertically center the info panel within the chat area.
+        panel_y_start = top + max(0, (chat_h - panel_h) // 2)
+
+        # Paint the info panel rows. Each row is (label_text, value_text,
+        # is_header, is_hint) so we can pick the right style per role.
+        for i, (label, value, is_header, is_hint) in enumerate(panel_lines):
+            ly = panel_y_start + i
+            if ly >= bottom or ly < top:
+                continue
+            if is_hint:
+                # Right-side hint: theme.accent_warm + bold so the user
+                # notices it. Centered in the panel column.
+                hint_x = panel_x + max(0, (panel_w - len(label)) // 2)
+                paint_text(
+                    grid,
+                    label,
+                    hint_x,
+                    ly,
+                    style=Style(fg=theme.accent_warm, bg=theme.bg, attrs=ATTR_BOLD),
+                )
+                continue
+            if is_header:
+                # Section header: dimmed uppercase label.
+                paint_text(
+                    grid,
+                    label,
+                    panel_x,
+                    ly,
+                    style=Style(fg=theme.fg_dim, bg=theme.bg, attrs=ATTR_DIM | ATTR_BOLD),
+                )
+                continue
+            # Value row: indented two cells under the header.
+            paint_text(
+                grid,
+                "  " + value,
+                panel_x,
+                ly,
+                style=Style(fg=theme.fg, bg=theme.bg),
+            )
+
+    def _build_intro_panel_lines(self) -> list[tuple[str, str, bool, bool]]:
+        """Build the rows for the empty-state info panel.
+
+        Returns a list of (label, value, is_header, is_hint) tuples.
+        Headers paint as dim uppercase labels, value rows paint
+        indented two cells. The last row is the hint, painted in
+        accent_warm and centered.
+
+        Built from the active profile + client state, NOT from any
+        cached info — runs on every empty-state paint, so changes
+        propagate immediately if the user swaps theme or density
+        before sending their first message.
+        """
+        rows: list[tuple[str, str, bool, bool]] = []
+
+        # PROFILE section
+        rows.append(("profile", "", True, False))
+        rows.append(("", self.profile.name if self.profile else "(none)", False, False))
+        rows.append(("", "", False, False))
+
+        # PROVIDER section
+        provider_cfg = (self.profile.provider or {}) if self.profile else {}
+        provider_type = provider_cfg.get("type") or "llamacpp"
+        model = provider_cfg.get("model") or self.client.model
+        # Strip leading "openai/" from openrouter slugs since the panel
+        # already names openrouter as the provider type — keeps the
+        # value column tight.
+        if provider_type == "openai_compat":
+            base_url = provider_cfg.get("base_url", "")
+            if "openrouter" in base_url:
+                provider_label = "openrouter"
+            elif "openai.com" in base_url:
+                provider_label = "openai"
+            else:
+                provider_label = "openai-compat"
+        else:
+            provider_label = provider_type
+        rows.append(("provider", "", True, False))
+        rows.append(("", provider_label, False, False))
+        rows.append(("", model, False, False))
+        # Resolved context window — use the chat's existing resolver
+        # so the same number that drives compaction shows up here.
+        try:
+            window = self._resolve_context_window()
+            rows.append(("", f"{window:,} tokens", False, False))
+        except Exception:  # noqa: BLE001
+            pass
+        # Health: a one-word green/red signal so the user knows the
+        # next message will work.
+        if self._server_health_ok is True:
+            rows.append(("", "● reachable", False, False))
+        elif self._server_health_ok is False:
+            rows.append(("", "○ unreachable", False, False))
+        rows.append(("", "", False, False))
+
+        # TOOLS section
+        tools = list(self.profile.tools) if self.profile and self.profile.tools else []
+        rows.append(("tools", "", True, False))
+        if tools:
+            for t in tools:
+                rows.append(("", t, False, False))
+        else:
+            rows.append(("", "(none enabled)", False, False))
+        rows.append(("", "", False, False))
+
+        # APPEARANCE section — read LIVE state, not the profile's
+        # stored values, so the panel reflects mid-session changes
+        # like Ctrl+T (cycle theme) or Alt+D (toggle dark/light) that
+        # haven't been written back to the profile yet.
+        theme_name = self.theme.name if self.theme else "steel"
+        mode = self.display_mode if self.display_mode else "dark"
+        density = self.density.name if self.density else "normal"
+        rows.append(("appearance", "", True, False))
+        rows.append(("", f"{theme_name} · {mode} · {density}", False, False))
+        rows.append(("", "", False, False))
+
+        # Hint at the bottom — the most actionable thing on the screen.
+        rows.append(("type / for commands · press ? for help", "", False, True))
+
+        return rows
 
     # ─── Paint a single _RenderedRow ───
 
@@ -5746,15 +6068,21 @@ class SuccessorChat(App):
         if rows < 8 or cols < 50:
             return
 
+        # Compose the section list at paint time so the available-commands
+        # entry stays in sync with the live SLASH_COMMANDS registry. The
+        # static _HELP_SECTIONS supplies keybindings; the dynamic helper
+        # supplies the slash command list.
+        sections = _HELP_SECTIONS + (_build_slash_command_help_section(),)
+
         # ─── Compute box dimensions ───
         # Two columns: key, description. Pad each column for alignment.
         key_col_w = max(
             max(len(key) for key, _ in entries)
-            for _, entries in _HELP_SECTIONS
+            for _, entries in sections
         )
         desc_col_w = max(
             max(len(desc) for _, desc in entries)
-            for _, entries in _HELP_SECTIONS
+            for _, entries in sections
         )
         title_text = "successor · keybindings"
         # Inner content width = key + 3 + desc, plus inner padding (4)
@@ -5765,10 +6093,8 @@ class SuccessorChat(App):
         # (1 header row + N entry rows + 1 blank row each), then a
         # final 1 hint row.
         sections_h = 0
-        for _, entries in _HELP_SECTIONS:
-            sections_h += 1 + len(entries) + 1  # header + entries + spacer
-        # Drop the last spacer
-        sections_h -= 1
+        for _, entries in sections:
+            sections_h += 1 + len(entries)  # header + entries (no spacer)
         inner_h = 1 + 1 + sections_h + 1 + 1  # title, blank, sections, blank, hint
         box_h = min(inner_h + 2, rows - 2)
 
@@ -5809,7 +6135,7 @@ class SuccessorChat(App):
         key_color = fade(theme.accent_warm)
         desc_color = fade(theme.fg)
 
-        for section_idx, (section_name, entries) in enumerate(_HELP_SECTIONS):
+        for section_idx, (section_name, entries) in enumerate(sections):
             if cur_y >= box_y + box_h - 2:
                 break
             # Section header
@@ -5842,8 +6168,9 @@ class SuccessorChat(App):
                 )
                 cur_y += 1
 
-            if section_idx < len(_HELP_SECTIONS) - 1:
-                cur_y += 1  # blank row between sections
+            # No spacer between sections — saves vertical room so the
+            # whole modal fits on default 24-30 row terminals after the
+            # available-commands section was added.
 
         # ─── Hint row (always at the last interior row) ───
         hint_y = box_y + box_h - 2

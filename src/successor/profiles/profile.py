@@ -65,6 +65,13 @@ class Profile:
       intro_animation   name of an intro animation to play before chat,
                         or None to skip. "successor" plays the bundled
                         braille emergence sequence for ~4 seconds.
+      chat_intro_art    name of a braille frame to use as the chat's
+                        empty-state hero panel, or None to skip the
+                        hero entirely. "successor" loads the bundled
+                        title portrait. Custom art: drop a braille
+                        text file at ~/.config/successor/art/<name>.txt
+                        and reference it as `<name>`, or pass an
+                        absolute path.
     """
 
     name: str
@@ -78,6 +85,7 @@ class Profile:
     tools: tuple[str, ...] = ()
     tool_config: dict[str, Any] = field(default_factory=dict)
     intro_animation: str | None = None
+    chat_intro_art: str | None = None
 
 
 def parse_profile_file(path: Path) -> Profile | None:
@@ -144,6 +152,10 @@ def parse_profile_file(path: Path) -> Profile | None:
     intro_val = data.get("intro_animation")
     if intro_val is None or isinstance(intro_val, str):
         kwargs["intro_animation"] = intro_val
+
+    art_val = data.get("chat_intro_art")
+    if art_val is None or isinstance(art_val, str):
+        kwargs["chat_intro_art"] = art_val
 
     return Profile(**kwargs)
 

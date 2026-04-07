@@ -259,7 +259,15 @@ class _WizardState:
     theme_name: str = "steel"
     display_mode: str = "dark"
     density: str = "normal"
-    intro_animation: str | None = None
+    # Default to the bundled "successor" intro for both: the emergence
+    # animation plays when the chat opens, and the title portrait
+    # serves as the empty-state hero panel until the user sends their
+    # first message. Both are fully skippable from inside the chat
+    # (any keypress aborts the intro; submitting a message replaces
+    # the empty state). The wizard's INTRO step lets the user opt
+    # out before saving if they want a quieter profile.
+    intro_animation: str | None = "successor"
+    chat_intro_art: str | None = "successor"
     enabled_tools: tuple[str, ...] = field(default_factory=default_enabled_tools)
     # Provider configuration (collected by Step.PROVIDER):
     #   provider_kind  — "llamacpp" (local), "openai" (api.openai.com),
@@ -317,6 +325,7 @@ class _WizardState:
             tools=tuple(self.enabled_tools),
             tool_config={},
             intro_animation=self.intro_animation,
+            chat_intro_art=self.chat_intro_art,
         )
 
     def to_json_dict(self) -> dict:
@@ -333,6 +342,7 @@ class _WizardState:
             "tools": list(self.enabled_tools),
             "tool_config": {},
             "intro_animation": self.intro_animation,
+            "chat_intro_art": self.chat_intro_art,
         }
 
 
@@ -410,7 +420,7 @@ class SuccessorSetup(App):
             Step.THEME: 0,
             Step.MODE: 0,
             Step.DENSITY: 1,  # default to "normal"
-            Step.INTRO: 0,
+            Step.INTRO: 1,    # default to "successor" — matches state default
             Step.PROVIDER: 0,  # 0 = type toggle, 1 = api_key, 2 = model
             Step.TOOLS: 0,
         }
@@ -1625,9 +1635,9 @@ class SuccessorSetup(App):
         toggle_y = top + 3
         sel_glyph = "▸" if focus == 0 else " "
         provider_options = (
-            ("llamacpp", "local llama.cpp", "uses http://localhost:8080"),
-            ("openai", "openai", "api.openai.com — api key required"),
-            ("openrouter", "openrouter", "openrouter.ai — api key required"),
+            ("llamacpp", "local llama.cpp", "free + private, needs llama-server running"),
+            ("openai", "openai", "pay-per-use against your OpenAI credits"),
+            ("openrouter", "openrouter", "free models available, no card needed"),
         )
         for i, (kind, label, hint) in enumerate(provider_options):
             row_y = toggle_y + i
