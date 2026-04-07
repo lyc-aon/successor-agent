@@ -214,7 +214,7 @@ _SETTINGS_TREE: tuple[_SettingField, ...] = (
     _SettingField(
         name="intro_animation", label="intro", section="behavior",
         kind=FieldKind.TOGGLE,
-        options_getter=lambda: [None, "nusamurai"],
+        options_getter=lambda: [None, "successor"],
     ),
     _SettingField(
         name="system_prompt", label="prompt", section="",

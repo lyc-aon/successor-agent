@@ -1,4 +1,4 @@
-# Rendering Superpowers — Read Me First
+# Rendering Superpowers, Read Me First
 
 > If you're about to add `import rich`, `import prompt_toolkit`, `import textual`,
 > or any other "let me just import a TUI library" to Successor: **read this entire
@@ -25,21 +25,23 @@ Successor so far has fit through this hole, and that is not a coincidence.
 
 ## Why this exists
 
-The previous attempt at this harness (`~/dev/ai/hk13/`) ended up with
-**nine non-negotiable rules** in its rendering reference doc, just to keep
-Rich + prompt_toolkit + patch_stdout from corrupting each other's screen
-state. Every rule was a treaty clause between two libraries that each
-assumed they owned stdout. The visible output looked OK; the architecture
-was a war.
+The previous harness we tried ended up with **nine non-negotiable rules**
+in its rendering reference doc, just to keep Rich + prompt_toolkit +
+patch_stdout from corrupting each other's screen state. Every rule was a
+treaty clause between two libraries that each assumed they owned stdout.
+The visible output hid the complexity; the architecture was a war.
 
-Successor's design eliminates that war by having one screen owner. Not "fewer
-fights," not "better isolation" — *zero* fights, by construction. The diff
-layer is the only stdout writer, so there is nothing for it to fight with.
+Successor's design eliminates that war by having one screen owner. Not
+"fewer fights," not "better isolation"; zero fights, by construction. The
+diff layer is the only stdout writer, so there is nothing for it to fight
+with.
 
-This single decision is why Successor's chat already renders better than every
-other agent harness — and it's also why the codebase is small, why resize
-doesn't flicker, why the renderer is testable without a terminal, and why
-every feature is a one-line addition somewhere.
+This single decision is what lets Successor render state transitions
+(mid-turn edits, animated tool cards, live compaction) that harnesses
+built on Rich or prompt_toolkit can't reach at all. It is also why the
+codebase is small, why resize doesn't flicker, why the renderer is
+testable without a terminal, and why each feature tends to be a small
+additive change to a pure function.
 
 ---
 
@@ -76,7 +78,7 @@ Plus three support modules:
   app.py       Frame loop with double-buffered diffing + input
 ```
 
-**Layers 1–4 are pure.** They don't touch the terminal, never block,
+**Layers 1 through 4 are pure.** They don't touch the terminal, never block,
 never depend on signal state, never allocate file descriptors. Only
 Layer 5 emits bytes. This is what makes the renderer testable, replayable,
 crash-safe, and immune to library coexistence bugs.
@@ -95,8 +97,9 @@ pays off in Successor today:
 | `PreparedText.lines(width)` | 0.15 µs | 77.83 µs | **519×** |
 
 A 100-message conversation re-flowing on resize at the new width: every
-visible message hits the cache after the first paint at that width. The
-chat scrollback re-laying out is essentially free.
+visible message hits the cache after the first paint at that width. At
+0.15 µs per `lines()` call the scrollback re-layout is negligible at
+30 fps.
 
 ---
 
@@ -114,13 +117,13 @@ either can't or have to fight their stack to attempt. They split into
    retracted section? Add a "(verified)" annotation next to a tool result?
    Re-color a message after a tool error? Paint the new state, diff
    updates only the changed cells, the user sees the update with no
-   flicker. Other harnesses can't do this *at all* — once they `print()`
+   flicker. Other harnesses can't do this *at all*, once they `print()`
    a line, it belongs to the terminal and they can't reach it.
 
 2. **Multi-region UI without framework fights.** Sidebar + chat + input +
    popup + status bar all in the same frame. They're all just regions in
    the grid. There is no z-ordering library, no widget tree, no event
-   bubbling — just paint operations into rectangles. The diff layer
+   bubbling, just paint operations into rectangles. The diff layer
    handles all of it identically.
 
 3. **Search across the entire conversation history with live highlights.**
@@ -173,7 +176,7 @@ either can't or have to fight their stack to attempt. They split into
 
 11. **No double-buffering drama.** Two grids, swap each tick, diff
     against last frame, emit minimal cells. Steady-state animation
-    produces ~50–300 bytes/frame on a 200-col terminal — small enough
+    produces ~50 to 300 bytes/frame on a 200-col terminal, small enough
     to ship over a slow remote link if we wanted.
 
 For the full list of specific applied ideas (inline collapsible tools,
@@ -194,7 +197,8 @@ to get a `list[Segment]` and translating those segments into our cell grid.
 **No Rich byte ever reaches stdout.**
 
 What we never do: instantiate a `Console` and call `.print()`. That's
-giving Rich screen ownership and re-creating the hk13 problem.
+giving Rich screen ownership and re-creating the old harness's
+coexistence bugs.
 
 ### `import prompt_toolkit` (as an Application)
 
@@ -240,7 +244,7 @@ structures inside `on_tick`, see if you can hoist them into `__init__`.
 ### Library-stacking to solve a UX problem
 
 If you want richer chat formatting, more UI elements, animated widgets,
-or any other "real TUI features" — write a small new pure-function
+or any other "real TUI features", write a small new pure-function
 primitive in `src/successor/render/`. Don't reach for a library to do it.
 
 The renderer is designed to grow in pure-function modules, not by
@@ -278,7 +282,7 @@ a syntax-highlighted code block, an inline image), the recipe is:
    function, and walk the cells in a unit test. No PTY required.
 
 If your new feature doesn't fit through this recipe, **the recipe is
-not wrong** — your feature design has a hidden side effect. Find it
+not wrong**, your feature design has a hidden side effect. Find it
 and remove it.
 
 ---
@@ -320,8 +324,8 @@ This is the architecture working. Don't break it.
 - Read this whole doc again if you're tempted to break any of the above.
 
 See also:
-- [`concepts.md`](concepts.md) — features enabled by this architecture
+- [`concepts.md`](concepts.md), features enabled by this architecture
   that we haven't built yet
-- [`rendering-plan.md`](rendering-plan.md) — the original architectural
+- [`rendering-plan.md`](rendering-plan.md), the original architectural
   decisions and why they were made
-- The repo-level `CLAUDE.md` — auto-loaded reminder of these rules
+- The repo-level `CLAUDE.md`, auto-loaded reminder of these rules

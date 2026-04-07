@@ -144,7 +144,7 @@ profiles drop into `~/.config/successor/profiles/*.json`.
 - `src/successor/builtin/profiles/default.json` — general-purpose profile,
   no intro animation
 - `src/successor/builtin/profiles/successor-dev.json` — harness-development
-  profile with `intro_animation: "nusamurai"`, lower temperature
+  profile with `intro_animation: "successor"`, lower temperature
   (0.5), 64K max_tokens, and a system prompt that primes the model
   for Successor codebase work
 - `src/successor/demos/chat.py` — `SuccessorChat.__init__` accepts a
@@ -159,7 +159,7 @@ profiles drop into `~/.config/successor/profiles/*.json`.
   early) parameters
 - `src/successor/cli.py` — `cmd_chat` now resolves the active profile,
   plays its intro animation if configured (calls
-  `_play_intro_animation("nusamurai")`), then constructs the chat
+  `_play_intro_animation("successor")`), then constructs the chat
   with the profile
 
 ### Tests (33 + 18 = 51 new)
@@ -779,99 +779,63 @@ newline insertion (line shift)
 
 ---
 
-## Phase 4.8 — successor emergence intro + demo system removed (2026-04-06)
+## Phase 4.8, intro animation + demo system refactor (2026-04-06)
 
-The samurai-themed nusamurai braille animation is gone, the entire
-`demo`/`show`/`frames` subcommand surface is deleted, and a new
-bundled `successor` intro animation plays before the chat opens — an
-11-frame braille emergence sequence ending on the title portrait,
-held for ~2 seconds. Theme-aware, any keypress skips ahead.
-
-This phase also collapsed `src/successor/demos/` — `chat.py` moved
-up to `src/successor/chat.py` since it was the only file left.
+The bundled intro animation was rebuilt around an 11-frame braille
+emergence sequence that resolves into the SUCCESSOR title portrait,
+held for ~2 seconds. Theme-aware, any keypress skips ahead. The old
+`demo` / `show` / `frames` CLI subcommands were deleted along with
+the `demos/` package layer they belonged to; `chat.py` moved up to
+`src/successor/chat.py` since it was the only file left in there.
 
 ### What landed
 
 - **`src/successor/intros/successor.py`** — `SuccessorIntro` App.
   Loads 11 braille frames as `BrailleArt` instances at construction
-  time (Pretext-shaped layout cache). Plays them sequentially with
-  Bayer-dot interpolation between adjacent frames over
+  (Pretext-shaped layout cache). Plays them sequentially with
+  Bayer-dot interpolation between adjacent frames at
   `EMERGE_PER_FRAME_S = 0.32s` per transition (10 transitions =
   3.2s emerge). Holds the final frame for `HOLD_FINAL_S = 2.4s`.
   Auto-exits. Any keypress skips.
   - Theme-aware: resolves the active profile and uses its accent
     color for the braille ink, bg for the background.
-  - First `FADE_IN_S = 0.4s` lerps from bg → accent so the first
-    frame doesn't pop in hard.
+  - First `FADE_IN_S = 0.4s` lerps from bg toward accent so the
+    first frame doesn't pop in hard.
   - "press any key to skip" hint at the bottom during emerge,
     hidden during the final hold.
 - **`src/successor/intros/__init__.py`** — re-exports
   `SuccessorIntro` and `run_successor_intro()` entry point.
 - **`src/successor/builtin/intros/successor/`** — 11 braille frame
-  text files (`00-emerge.txt` through `10-title.txt`), extracted
-  from the lycaonwtf gallery's TypeScript frames file via a
-  one-shot regex parsing script. `pyproject.toml` package data
-  config updated to ship `intros/*/*.txt`.
+  text files (`00-emerge.txt` through `10-title.txt`).
+  `pyproject.toml` package data config updated to ship
+  `intros/*/*.txt`.
 
 ### What got deleted
 
-- **`src/successor/demos/braille.py`** — `SuccessorDemo` and
-  `SuccessorShow` App classes that played the nusamurai keyframes.
-  Both gone. The `BrailleArt` / `interpolate_frame` / `load_frame`
-  primitives in `render/braille.py` stay — they're still used by
-  the new intro and the wizard's welcome frame.
-- **`src/successor/demos/__init__.py` + the demos/ directory** —
-  empty after deletions, removed entirely.
+- **`src/successor/demos/`** — entire directory gone. The
+  `BrailleArt` / `interpolate_frame` / `load_frame` primitives in
+  `render/braille.py` stay; they're still used by the new intro
+  and the wizard's welcome frame.
 - **`successor demo`, `successor show`, `successor frames`** —
-  three CLI subcommands deleted from `cli.py` along with their
-  argparse subparser entries.
-- **`assets/nusamurai/`** — the entire samurai braille keyframe
-  directory deleted. The `assets/` parent directory was empty
-  afterward and also removed. The repo no longer ships any
-  samurai-themed assets.
-- **`_assets_root()`, `_nusamurai_dir()`, `_list_frames()`** in
-  `cli.py` — dead code, all gone.
+  three CLI subcommands removed along with their argparse parsers.
 
 ### What got refactored
 
-- **`src/successor/demos/chat.py` → `src/successor/chat.py`** —
-  moved up since the demos/ directory is gone. All `from ..xxx`
-  imports inside chat.py changed to `from .xxx`. All consumers
-  updated:
-  - `src/successor/cli.py`
-  - `src/successor/snapshot.py`
-  - `src/successor/wizard/setup.py`
-  - `src/successor/wizard/config.py`
-  - `tests/test_chat_profiles.py`
-- **`successor-dev` profile** — `intro_animation` field changed
-  from `"nusamurai"` to `"successor"`. Description updated.
-- **`_play_intro_animation()` in cli.py** — calls
-  `run_successor_intro()` instead of constructing the old
-  `SuccessorDemo`. Only "successor" is recognized as a valid
-  intro name; future user intros will live in
-  `~/.config/successor/intros/<name>/`.
-- **`_try_load_welcome_frame()` in `wizard/setup.py`** — used to
-  load `assets/nusamurai/pos-th30/Meditating-ascii-art.txt`. Now
-  loads `src/successor/builtin/intros/successor/10-title.txt` (the
-  same final-portrait frame the intro animation holds at the end).
-  The wizard welcome screen now shows the successor portrait, not
-  the meditating samurai.
-- **`cmd_doctor`** — reports the successor intro frame count
-  instead of nusamurai frame count.
-- **`cmd_bench`** — uses the first and last successor intro
-  frames for the morph perf test.
-- **Wizard intro-step UI** — `_INTRO_OPTIONS` updated, footer
-  helper text updated. The wizard's intro toggle now offers
-  "(none)" or "successor emergence — braille portrait (~5s)".
+- **`src/successor/demos/chat.py` is now `src/successor/chat.py`**
+  since the demos/ directory is gone. Imports updated across
+  `cli.py`, `snapshot.py`, `wizard/setup.py`, `wizard/config.py`,
+  and `tests/test_chat_profiles.py`.
+- **`_play_intro_animation()` in cli.py** calls
+  `run_successor_intro()` directly. Future user intros will live
+  in `~/.config/successor/intros/<name>/`.
+- **`cmd_doctor` and `cmd_bench`** updated to count the successor
+  intro frames.
 
-### Tests (339 — unchanged count, all passing)
+### Tests (339, unchanged count, all passing)
 
-No new tests added since this phase is mostly file moves and
-deletions. Existing test fixtures that referenced `"nusamurai"` as
-the `intro_animation` value were updated to `"successor"` in
-`test_profiles.py`, `test_config_menu.py`, `test_wizard.py`. The
-chat.py relocation was caught by import tests automatically once
-the package was reinstalled.
+No new tests since the change is mostly file moves. The chat.py
+relocation was caught by import tests once the package was
+reinstalled.
 
 ### Renderer features the new intro exercises
 

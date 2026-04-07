@@ -63,8 +63,8 @@ class Profile:
       tool_config       per-tool configuration dict (passed to tools at
                         dispatch time when the agent loop lands)
       intro_animation   name of an intro animation to play before chat,
-                        or None to skip. "nusamurai" plays the bundled
-                        braille keyframe demo for ~4 seconds.
+                        or None to skip. "successor" plays the bundled
+                        braille emergence sequence for ~4 seconds.
     """
 
     name: str

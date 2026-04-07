@@ -1,7 +1,8 @@
 # Successor Rendering Plan
 
-Date: 2026-04-06
-Status: Phase 0 prototype landed.
+Date: 2026-04-06 (original architecture)
+Status: Foundational design. The harness has shipped many phases on top
+of this plan; see `docs/changelog.md` for the running history.
 
 ## Purpose
 
@@ -67,7 +68,7 @@ These are deferred to Phase 1+ once the foundation is proven.
 └─────────────────────────────────────────────────────────┘
 ```
 
-The crucial property: **layers 1–4 are pure**. They don't touch the
+The crucial property: **layers 1 through 4 are pure**. They don't touch the
 terminal, never block, never allocate file descriptors, never depend on
 signal state. Only Layer 5 ever writes a byte to stdout.
 
@@ -81,7 +82,7 @@ This is what makes the renderer:
 
 | File | Role |
 |---|---|
-| `cells.py` | `Cell`, `Style`, `Grid` — the data layers operate on |
+| `cells.py` | `Cell`, `Style`, `Grid`, the data layers operate on |
 | `terminal.py` | TTY setup/teardown, alt-screen, cursor, raw mode, SIGWINCH, restore |
 | `app.py` | Frame loop with double-buffered diffing and input handling |
 | `braille.py` | Braille codec + Bayer dot interpolation (Phase 0 demo asset) |
@@ -140,7 +141,7 @@ allocation in steady state.
 ## Resize handling
 
 1. `signal.signal(SIGWINCH, handler)` flips a single boolean. That's the
-   entire signal handler — no allocation, no I/O.
+   entire signal handler, no allocation, no I/O.
 2. Each tick the loop calls `term.consume_resize()` which returns the
    flag and resets it.
 3. On True: reallocate both grids at the new size, set `first_frame =
@@ -148,7 +149,7 @@ allocation in steady state.
    `render_full`, which clears the screen and writes everything fresh.
 
 This handles drag-resize naturally because we coalesce SIGWINCH at frame
-boundaries — no matter how many SIGWINCHes arrive between two ticks,
+boundaries, no matter how many SIGWINCHes arrive between two ticks,
 we only react once.
 
 The signal handler is also re-entered safely in the input drain loop:
@@ -160,14 +161,15 @@ of the input drain so the main loop sees the resize on its next pass.
 `Terminal.__enter__` puts stdin in cbreak mode so single keypresses are
 delivered without waiting for newline and without local echo. The frame
 loop polls stdin via `select.select` with a timeout that fits the frame
-budget — wake on input or wake on deadline, whichever comes first.
+budget, wake on input or wake on deadline, whichever comes first.
 
 Default `quit_keys = b'qQ\x03'` covers q, Q, and Ctrl+C. Subclasses can
 override `on_key(byte)` to react to other input.
 
 Escape sequences (arrow keys, function keys) arrive as multi-byte
-sequences and are passed to `on_key` byte-by-byte. Phase 0 doesn't try
-to be clever about this; Phase 1 will add a key parser.
+sequences and are passed to `on_key` byte-by-byte. The initial plan
+kept this simple and deferred a proper key parser to a later phase
+(which has since shipped).
 
 ## Why no Rich, no prompt_toolkit
 
@@ -175,21 +177,23 @@ Three reasons, each independently sufficient:
 
 1. **Two screen owners cannot coexist.** Rich assumes it owns stdout.
    prompt_toolkit assumes it owns the screen. `patch_stdout()` is a
-   peace treaty between them. Every rendering bug in hk13 traces back
-   to a treaty violation. We're not adopting that pattern.
+   peace treaty between them. Every rendering bug in the previous
+   harness traced back to a treaty violation. We're not adopting that
+   pattern.
 
 2. **The thing they each do best is small.** Rich's strength is
    styling individual blocks (markdown, syntax, tables). We can absorb
    that later by calling Rich's `Console.render()` to produce a
-   `list[Segment]` and translating segments into our cell grid — no
+   `list[Segment]` and translating segments into our cell grid, no
    Rich byte ever reaches stdout. prompt_toolkit's strength is its
    input parser; we can use the parser without instantiating the
    Application. Both libraries become *libraries*, not frameworks.
 
-3. **The cost of writing it ourselves is small.** The Phase 0 renderer
-   is ~1000 lines of pure Python with zero dependencies. We pay that
-   cost once. We pay the "fight prompt_toolkit + Rich" cost every time
-   we touch the renderer for the rest of the project.
+3. **The cost of writing it ourselves is small.** The renderer remains
+   ~1000 lines of pure Python with zero dependencies even after several
+   phases of additions. We pay that cost once. We pay the "fight
+   prompt_toolkit + Rich" cost every time we touch the renderer for
+   the rest of the project.
 
 ## Pretext correspondence
 
@@ -205,7 +209,7 @@ userland, commit once.** That same move maps onto a terminal:
 | Commits to DOM via dedicated render pass | `diff.diff_frames` commits via cursor moves + SGR |
 
 The terminal version is in some ways *easier* than the browser one
-because the target is a discrete cell grid, not subpixels — but the
+because the target is a discrete cell grid, not subpixels, but the
 discipline is the same: never let your slow path be in the hot loop,
 never let side effects leak across layer boundaries.
 
@@ -217,7 +221,7 @@ never let side effects leak across layer boundaries.
   use `__slots__`.
 - **Diff cost**: O(rows × cols) cell comparison per frame; the inner
   loop is plain Python list indexing. For an 80×40 grid that's 3200
-  comparisons — well under 1ms in CPython.
+  comparisons, well under 1ms in CPython.
 - **Wire cost**: a static animation produces ~zero bytes per frame
   after initial paint. A full braille frame change produces ~6KB
   worst case.

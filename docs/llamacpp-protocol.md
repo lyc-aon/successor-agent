@@ -3,7 +3,7 @@
 What we send to llama.cpp's HTTP server, what we get back, and the
 quirks Lycaon's local Qwen3.5-27B-Opus-Distilled-v2 setup specifically.
 This doc exists so future Claude doesn't have to re-probe the API to
-figure out the response shape — read this first when touching anything
+figure out the response shape, read this first when touching anything
 in `src/successor/providers/llama.py`.
 
 Probed against `b1-ecd99d6` (llama.cpp build identifier from the
@@ -13,11 +13,12 @@ Probed against `b1-ecd99d6` (llama.cpp build identifier from the
 
 ## The server
 
-Lycaon's local llama.cpp setup runs:
+A representative llama.cpp setup for running this doc's reference
+payloads:
 
 ```
 llama-server \
-  -m /home/lycaon/models/Qwen3.5-27B-Opus-Distilled-v2-Q4_K_M.gguf \
+  -m Qwen3.5-27B-Opus-Distilled-v2-Q4_K_M.gguf \
   --host 0.0.0.0 \
   --port 8080 \
   -ngl 99 \
@@ -28,16 +29,15 @@ llama-server \
   --temp 0.7
 ```
 
-- **Model**: Qwen3.5 27B distilled from Opus, Q4_K_M quant (16.5 GB)
-- **Context**: 262144 tokens (256K) — see
-  [`feedback_local_inference_generous_defaults.md`](../../../.claude/projects/-home-lycaon/memory/feedback_local_inference_generous_defaults.md)
-  for the user's directive to use generous token budgets
-- **GPU layers**: 99 (full offload to RTX 5090)
+- **Model**: Qwen3.5 27B distilled from Opus, Q4_K_M quant (~16.5 GB)
+- **Context**: 262144 tokens (256K). Generous budgets are assumed
+  throughout the codebase because local inference is free.
+- **GPU layers**: 99 (full offload)
 - **KV cache**: Q8_0 quantized (saves VRAM)
 - **Flash attention**: on
 - **Host**: `0.0.0.0:8080`, accessible as `http://localhost:8080`
 
-Throughput on this hardware: **~49 tokens/sec** generation, ~307
+Throughput on a consumer 5090: ~49 tokens/sec generation, ~307
 tokens/sec prompt eval (measured 2026-04-06).
 
 ---
@@ -55,7 +55,7 @@ and `/v1/embeddings` etc. but we don't use them in Successor.
 
 ---
 
-## Request format — `POST /v1/chat/completions`
+## Request format, `POST /v1/chat/completions`
 
 ```http
 POST /v1/chat/completions HTTP/1.1
@@ -82,7 +82,7 @@ Accept: text/event-stream
 
 | Field | Required | Notes |
 |---|---|---|
-| `model` | yes | **Ignored by llama.cpp** — any string works. We send `"qwopus"` for clarity in logs. |
+| `model` | yes | **Ignored by llama.cpp**, any string works. We send `"qwopus"` for clarity in logs. |
 | `messages` | yes | Standard OpenAI shape. Roles: `system`, `user`, `assistant`. Note we map our internal `"successor"` role to `"assistant"` before sending. |
 | `stream` | optional | `true` for SSE, `false` for one-shot JSON. Successor always streams. |
 | `max_tokens` | optional | **Use generous values** (16K-32K). The 256K context easily handles it. |
@@ -104,7 +104,7 @@ not explicitly told not to. The Successor chat system prompt includes
 explicit instructions to suppress these patterns:
 
 ```
-You are successor — a thoughtful, intentional assistant. Speak with
+You are successor, a thoughtful, intentional assistant. Speak with
 brevity, as if every word costs effort...
 Do not use markdown headers. Do not use bullet lists or numbered lists.
 Do not write "Solution:", "Answer:", "Verification:", "Note:", or any
@@ -116,7 +116,7 @@ This is a model-specific quirk; other models may not need it.
 
 ---
 
-## Response format — non-streaming (`stream: false`)
+## Response format, non-streaming (`stream: false`)
 
 ```json
 {
@@ -157,14 +157,14 @@ This is a model-specific quirk; other models may not need it.
 
 ### Key fields
 
-- `choices[0].message.content` — the user-visible answer
-- `choices[0].message.reasoning_content` — **the model's internal
+- `choices[0].message.content`, the user-visible answer
+- `choices[0].message.reasoning_content`, **the model's internal
   thinking, separate from content**. This is a Qwen3.5 thinking-model
   feature; not present on non-thinking models.
-- `choices[0].finish_reason` — `"stop"` (natural end), `"length"`
+- `choices[0].finish_reason`, `"stop"` (natural end), `"length"`
   (hit max_tokens), `"content_filter"` (rare)
-- `usage` — standard token counts
-- `timings` — llama.cpp-specific perf info; useful for tokens/sec gauges
+- `usage`, standard token counts
+- `timings`, llama.cpp-specific perf info; useful for tokens/sec gauges
 
 **Trap**: if `max_tokens` is too small (say 64) and the model is in a
 thinking mood, the entire token budget gets consumed by reasoning and
@@ -173,7 +173,7 @@ Use generous `max_tokens` (16K+).
 
 ---
 
-## Response format — streaming (`stream: true`)
+## Response format, streaming (`stream: true`)
 
 The server sends Server-Sent Events. Each event is a `data:` line
 followed by an empty line:
@@ -207,7 +207,7 @@ underlying connection).
 }
 ```
 
-**Reasoning delta** (Qwen3.5 thinking mode — the model emits these
+**Reasoning delta** (Qwen3.5 thinking mode, the model emits these
 first, often hundreds of them, before any user-visible content):
 ```json
 {"choices":[{
@@ -217,7 +217,7 @@ first, often hundreds of them, before any user-visible content):
 }], ...}
 ```
 
-**Content delta** (the user-visible answer — arrives after reasoning):
+**Content delta** (the user-visible answer, arrives after reasoning):
 ```json
 {"choices":[{
   "finish_reason": null,
@@ -244,7 +244,7 @@ This is the most important thing about thinking models:
 > **`reasoning_content` and `content` are two separate channels in the
 > same stream.** Both arrive via `delta.<channel>` in the same SSE
 > chunks. A given chunk has either `reasoning_content` OR `content`,
-> never both. There is no explicit "transition" event — you just
+> never both. There is no explicit "transition" event, you just
 > notice that chunks switch from `reasoning_content` to `content`.
 
 Implication for the chat UX:
@@ -383,20 +383,20 @@ SuccessorChat.on_tick (every frame, 30 FPS)
 These are llama.cpp features Successor doesn't use yet, so we haven't
 probed them:
 
-- **Tool calls** — llama.cpp's chat-completions endpoint supports
+- **Tool calls**, llama.cpp's chat-completions endpoint supports
   OpenAI-style `tools` and `tool_choice`. Qwen3.5-Coder has been
   trained for tool use; Qwen3.5-27B-Opus-Distilled is less reliable
   at it. We'll cross this bridge when we add the agent loop.
-- **Multimodal / image input** — the server has the mmproj-Qwen3.5-27B
+- **Multimodal / image input**, the server has the mmproj-Qwen3.5-27B
   multimodal projector loaded. Needs `/v1/chat/completions` with
   `image_url` content blocks.
-- **`/completion` endpoint** — raw prompt + token-level streaming
+- **`/completion` endpoint**, raw prompt + token-level streaming
   with logprobs. More powerful but llama.cpp-specific. We'd use this
   if we needed token-level control.
-- **`/v1/embeddings`** — for RAG / vector search. Different model needed.
-- **`/slots` and `/slots/<id>` endpoints** — manage parallel slots.
+- **`/v1/embeddings`**, for RAG / vector search. Different model needed.
+- **`/slots` and `/slots/<id>` endpoints**, manage parallel slots.
   Useful when running multiple sessions against the same server.
-- **Request cancellation via `/slots/<id>/erase`** — actually cancel
+- **Request cancellation via `/slots/<id>/erase`**, actually cancel
   generation server-side instead of just dropping our connection.
 
 When any of these become relevant, probe with `curl` first, document
