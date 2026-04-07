@@ -279,11 +279,31 @@ discards. From inside the chat, `Ctrl+,` and `/config` open the menu,
 and the cli main loop handles the chat → config → chat re-entry
 seamlessly.
 
-**The system prompt editor** is a real text editor: row/col cursor,
-←→↑↓/Home/End/PgUp/PgDn navigation, Backspace/Delete/Enter editing,
-auto-scroll to keep cursor in view, line number gutter, character
-count display, Ctrl+S to save and Esc to cancel. No agent CLI has
-ever let you edit your system prompt directly inside the TUI before.
+**The system prompt editor** (`src/ronin/wizard/prompt_editor.py`) is
+a real text editor with the full feature set you'd expect:
+
+- **Pretext-shaped soft word wrap** — per-source-line cache invalidates
+  only the edited line; resize re-wraps everything (rare). Greedy
+  word-boundary breaks via `_wrap_source_line`.
+- **Visible-row cursor navigation** — UP/DOWN navigate visible chunks
+  (not source rows), so a long source line that wraps to 3 visible
+  lines lets you arrow through them naturally.
+- **Selection** — `Shift+arrows` extend, `Ctrl+A` selects all, `Esc`
+  clears (or cancels editor on second press).
+- **Selection-aware editing** — typing/Backspace/Delete with active
+  selection replaces the range. Multi-line selection deletes spliced
+  correctly.
+- **OSC 52 clipboard** — `Ctrl+C` copies selection via the existing
+  `Terminal.copy_to_clipboard` (passed in as a callback at editor
+  construction time). `Ctrl+X` cuts (copy + delete).
+- **Full-row selection highlight** — multi-line selection highlights
+  extend across the entire text area width for fully-selected interior
+  rows, matching VS Code / Notepad / every modern text editor.
+- **Standard keybinds** — `Ctrl+S` save, `Esc` cancel, line number
+  gutter, char count + selection size in the title bar.
+
+No agent CLI has ever let you edit your system prompt directly inside
+the TUI before, with proper word wrap and selection.
 
 **What's NOT yet built**: skill invocation strategy, agent loop,
 tool dispatch, framework docs.

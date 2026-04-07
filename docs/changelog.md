@@ -605,6 +605,180 @@ full save flow persists to disk via the menu's `s` action
 
 ---
 
+## Phase 4.7 — prompt editor v2: soft wrap, selection, clipboard, Pretext caching (2026-04-06)
+
+The prompt editor was the weakest piece of the renderer surface in
+4.6 — it manually clipped long lines, didn't use any caching, and
+had no selection. This phase rebuilds it as a real text editor that
+follows the Pretext-shape principles the rest of the codebase uses.
+Pulled out of `wizard/config.py` into its own module for cleaner
+architectural separation.
+
+### What landed
+
+- **New file: `src/ronin/wizard/prompt_editor.py`** — `PromptEditor`
+  class (now public, no underscore) plus the `_wrap_source_line`
+  pure-function primitive and `_VisibleChunk` dataclass. Standalone
+  and reusable; doesn't depend on anything in the config menu.
+
+- **Soft word wrap** — `_wrap_source_line(line, width)` greedily
+  breaks at the last space before the width, falls back to a hard
+  break if there's no space. Returns `tuple[_VisibleChunk, ...]`
+  where each chunk has `source_col_start` and `text`. Joined chunks
+  reconstruct the original line exactly — no chars dropped. Pure
+  function, easily testable in isolation.
+
+- **Per-source-line wrap cache** — Pretext-shaped. Each source row
+  has a cached `(width, chunks)` entry that hits as long as the width
+  is unchanged. Editing a single line invalidates only that line's
+  cache; the other 99 lines of a big prompt keep their cached wraps.
+  Resize invalidates everything. Newline insertion / line merging
+  invalidate all (line indices shift). Operations that ALWAYS hit
+  cache during typing: every paint of unchanged lines, every paint
+  during scrolling.
+
+- **Visible-row cursor navigation** — UP/DOWN no longer just
+  `cursor_row += 1`. They walk the cached wrap to find the cursor's
+  global visible-chunk index, move ±1 in chunk-list space, then map
+  back to source coordinates by snapping the visual col to the new
+  chunk's source range. PgUp/PgDn are repeated visible-row moves.
+  This is how every real text editor handles soft wrap.
+
+  The cursor stays in **source** coordinates (row, col into
+  self.lines) so insert/delete remain trivially simple. Only
+  navigation cares about visible space.
+
+- **Selection state** — `selection_anchor: tuple[int, int] | None`.
+  When None, no selection. When set, the selected range spans from
+  the anchor to the cursor in either direction (normalized to start
+  ≤ end via `_normalize_selection`).
+
+- **Selection input handling**:
+  - `Shift+←→↑↓/Home/End/PgUp/PgDn` — extends selection (sets anchor
+    if no selection yet, then moves cursor while keeping anchor)
+  - Any **non-shift** navigation key clears the selection
+  - **Esc** — clears selection if active (first press), otherwise
+    cancels the editor (second press)
+  - **Backspace/Delete/typing** with active selection replaces the
+    selected range
+  - **Ctrl+A** — select all
+  - **Ctrl+C** — copy selection via the OSC 52 callback (no clear)
+  - **Ctrl+X** — cut: copy + delete
+
+- **OSC 52 clipboard integration** — `PromptEditor.__init__` accepts
+  a `copy_callback: Callable[[str], None] | None`. The config menu
+  passes `self.term.copy_to_clipboard` (which the existing
+  `Terminal` class implements via OSC 52 — works in
+  Ghostty/iTerm2/kitty/alacritty/modern xterm/tmux with
+  `set-clipboard on`). Callback failures are silently swallowed so a
+  terminal that rejects OSC 52 doesn't crash the editor.
+
+- **Selection paint with full-row extension** — multi-line selection
+  highlights extend across the FULL width of the text area for
+  fully-selected interior source rows, not just up to the source
+  text. This matches Notepad / VS Code / every modern text editor's
+  multi-line selection look. Implementation: walk each cell of the
+  visible chunk, paint with selection bg if the source col is in
+  the range; for "interior" source rows (rows strictly between
+  selection start and end rows), fill the trailing empty cells with
+  selection bg too.
+
+- **Line number gutter on continuation chunks** — when a source line
+  wraps to multiple visible chunks, only the FIRST chunk shows the
+  line number. Continuation chunks show empty space in the gutter,
+  matching VS Code / Sublime / every other editor's wrapped-line
+  rendering.
+
+### Footer keybinds dispatch by editor state
+
+| state | keybinds |
+|---|---|
+| no selection | `↑↓←→ navigate · shift+arrows select · ⌃A all · ⌃S save · esc cancel` |
+| with selection | `↑↓←→ extend (shift) · ⌃C copy · ⌃X cut · ⌃A select all · ⌃S save · esc clear` |
+
+### Title bar info
+
+When selection is active: `line N/M · X chars · Y sel`. Otherwise:
+`line N/M · X chars`. Real-time as you select.
+
+### Tests (48 added — 339 total in suite)
+
+`tests/test_prompt_editor.py` — moved out of test_config_menu.py,
+expanded for the new features:
+
+**`_wrap_source_line` (8 tests):** empty line, short line one chunk,
+breaks at space, no-space hard break, zero width fallback, preserves
+every char (joined chunks reconstruct), source col starts align
+between chunks
+
+**`_normalize_selection` / `_is_in_selection` (5 tests):** already
+ordered, reversed, same row by col, single line half-open boundary,
+multi-line interior row check
+
+**Basic state (3 tests):** initial state, empty initial, char count
+
+**Editing (8 tests):** insert char, newline splits, backspace within
+line / at line start (merges), delete within line / at line end
+(merges next), tab inserts 2 spaces, dirty tracking returns to clean
+
+**Source navigation (4 tests):** left at line start wraps up, right
+at line end wraps down, home/end within line, ctrl+s commits
+
+**Visual navigation (2 tests):** without wrap behaves like source
+navigation, **with wrap** UP/DOWN moves to adjacent visible chunks
+within the same source row when the line wraps
+
+**Selection (8 tests):** shift+arrow starts selection, shift+arrow
+extends, non-shift clears, esc clears first press / cancels editor
+second press, ctrl+a select all, get_selection_text single/multi-line
+
+**Selection-aware editing (4 tests):** typing replaces, backspace
+deletes range, delete deletes range, multi-line backspace deletes
+across line boundaries
+
+**Clipboard (4 tests):** ctrl+c calls callback with selection (no
+clear), ctrl+c without selection no-op, ctrl+x cuts (copy + delete),
+callback failure silently swallowed
+
+**Wrap cache (3 tests):** invalidates on edit (only that line),
+invalidates all on resize (width change), invalidates all on
+newline insertion (line shift)
+
+### Notes
+
+- The editor is now **public-named** (`PromptEditor` not
+  `_PromptEditor`) since it lives in its own module and is imported
+  cleanly. The config menu's wrapper that holds it is still
+  `_prompt_editor` (private instance attribute).
+- The editor is **not** an App — that would require new modal-app
+  machinery the App base class doesn't have. It's a helper class
+  with `handle_key` / `paint` / `is_done` / `result` that the parent
+  App owns and renders. Same shape as Phase 4.6 but cleaner.
+- **Cache hit rate during typing**: only the line being edited
+  invalidates, so typing into a 100-line prompt has 99/100 cache hit
+  rate per paint frame. Resize is the only operation that wholesale
+  invalidates, and resize is rare during text editing.
+- **The selection paint walks per-cell** because the highlight needs
+  to apply to specific source positions, not whole chunks. For a
+  60-cell text area at 30fps that's ~1800 cells/sec — well within
+  the renderer's budget.
+- The "interior row trailing highlight" only fires when a source row
+  is **strictly between** sel_start[0] and sel_end[0] — i.e. fully
+  selected from the start of its first char through the end of its
+  last char + the rest of the line up to the text area edge. The
+  selection's first and last source rows (which are partially
+  selected) get per-char highlight without the trailing extension.
+- Word wrap is **not perfect** for very long unbreakable tokens (URLs,
+  identifiers without spaces) — those get hard-broken at the width.
+  For prompts that's fine; for code editing we'd want a "wrap at
+  any non-alphanumeric" option. Defer.
+- **Selection while wrapped** works correctly because the cursor and
+  anchor are in source coordinates, not visible coordinates. The
+  paint walks visible chunks and asks "is this source col in the
+  selection?" per cell — that's the right level of indirection.
+
+---
+
 ## What's next
 
 - **Skill invocation strategy** — pick always-on vs on-demand after
@@ -612,13 +786,11 @@ full save flow persists to disk via the menu's `s` action
 - **Agent loop + tool dispatch** — wire `TOOL_REGISTRY` into the
   chat's response cycle once we've studied the llamacpp tool-call
   protocol surface deliberately
-- **Soft word wrap in the prompt editor** — display long lines wrapped
-  at the visible width while keeping the underlying line model intact
-- **Selection / copy-paste in the prompt editor** — Shift+arrows to
-  select, Ctrl+C/V via OSC 52
+- **Find/replace in the prompt editor** — Ctrl+F opens a search bar
+  inside the editor overlay, n/N jump matches
+- **Undo/redo in the prompt editor** — operation log + Ctrl+Z/Ctrl+Y
 - **Editing existing profiles via the wizard** — wizard re-entry mode
-  that pre-populates state from a registered profile (still useful
-  even with the config menu, since the wizard is more guided)
+  that pre-populates state from a registered profile
 - **Framework docs** — once the surface is stable
 
 ---
@@ -635,10 +807,11 @@ full save flow persists to disk via the menu's `s` action
 | 4 (setup wizard) | 35 | 207 |
 | 4.5 (config menu) | 33 | 240 |
 | 4.6 (editable text + multiline editor) | 36 | 276 |
+| 4.7 (prompt editor v2: soft wrap + selection + clipboard) | 48 | 324 |
 
 (Counts above are approximate by phase boundary; actual test
 collection may include additional small additions in subsequent
 commits.)
 
-Final: **291 tests, all passing, hermetic via `RONIN_CONFIG_DIR`,
+Final: **339 tests, all passing, hermetic via `RONIN_CONFIG_DIR`,
 no fake mocks, no `.skip()` or `.todo()`.**

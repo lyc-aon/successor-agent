@@ -26,11 +26,11 @@ from ronin.wizard.config import (
     FieldKind,
     Focus,
     RoninConfig,
-    _PromptEditor,
     _SETTINGS_TREE,
     _profile_to_json_dict,
     run_config_menu,
 )
+from ronin.wizard.prompt_editor import PromptEditor
 
 
 def _field_idx(name: str) -> int:
@@ -731,11 +731,11 @@ def test_provider_type_field_opens_cycle_overlay(temp_config_dir: Path) -> None:
     assert menu._editing_field == _field_idx("provider_type")
 
 
-# ─── _PromptEditor — multiline editor unit tests ───
+# ─── PromptEditor — multiline editor unit tests ───
 
 
 def test_prompt_editor_initial_state() -> None:
-    ed = _PromptEditor("hello\nworld")
+    ed = PromptEditor("hello\nworld")
     assert ed.lines == ["hello", "world"]
     assert ed.cursor_row == 0
     assert ed.cursor_col == 0
@@ -744,12 +744,12 @@ def test_prompt_editor_initial_state() -> None:
 
 
 def test_prompt_editor_empty_initial_has_one_line() -> None:
-    ed = _PromptEditor("")
+    ed = PromptEditor("")
     assert ed.lines == [""]
 
 
 def test_prompt_editor_insert_char() -> None:
-    ed = _PromptEditor("ab")
+    ed = PromptEditor("ab")
     ed.cursor_col = 1
     ed.handle_key(KeyEvent(char="X"))
     assert ed.lines[0] == "aXb"
@@ -758,7 +758,7 @@ def test_prompt_editor_insert_char() -> None:
 
 
 def test_prompt_editor_newline_splits_line() -> None:
-    ed = _PromptEditor("hello world")
+    ed = PromptEditor("hello world")
     ed.cursor_col = 5
     ed.handle_key(KeyEvent(key=Key.ENTER))
     assert ed.lines == ["hello", " world"]
@@ -767,7 +767,7 @@ def test_prompt_editor_newline_splits_line() -> None:
 
 
 def test_prompt_editor_backspace_within_line() -> None:
-    ed = _PromptEditor("hello")
+    ed = PromptEditor("hello")
     ed.cursor_col = 3
     ed.handle_key(KeyEvent(key=Key.BACKSPACE))
     assert ed.lines[0] == "helo"
@@ -775,7 +775,7 @@ def test_prompt_editor_backspace_within_line() -> None:
 
 
 def test_prompt_editor_backspace_at_line_start_merges() -> None:
-    ed = _PromptEditor("hello\nworld")
+    ed = PromptEditor("hello\nworld")
     ed.cursor_row = 1
     ed.cursor_col = 0
     ed.handle_key(KeyEvent(key=Key.BACKSPACE))
@@ -785,7 +785,7 @@ def test_prompt_editor_backspace_at_line_start_merges() -> None:
 
 
 def test_prompt_editor_delete_within_line() -> None:
-    ed = _PromptEditor("hello")
+    ed = PromptEditor("hello")
     ed.cursor_col = 2
     ed.handle_key(KeyEvent(key=Key.DELETE))
     assert ed.lines[0] == "helo"
@@ -793,7 +793,7 @@ def test_prompt_editor_delete_within_line() -> None:
 
 
 def test_prompt_editor_delete_at_line_end_merges_next() -> None:
-    ed = _PromptEditor("hello\nworld")
+    ed = PromptEditor("hello\nworld")
     ed.cursor_row = 0
     ed.cursor_col = 5
     ed.handle_key(KeyEvent(key=Key.DELETE))
@@ -801,7 +801,7 @@ def test_prompt_editor_delete_at_line_end_merges_next() -> None:
 
 
 def test_prompt_editor_arrow_left_at_line_start_wraps_up() -> None:
-    ed = _PromptEditor("hello\nworld")
+    ed = PromptEditor("hello\nworld")
     ed.cursor_row = 1
     ed.cursor_col = 0
     ed.handle_key(KeyEvent(key=Key.LEFT))
@@ -810,7 +810,7 @@ def test_prompt_editor_arrow_left_at_line_start_wraps_up() -> None:
 
 
 def test_prompt_editor_arrow_right_at_line_end_wraps_down() -> None:
-    ed = _PromptEditor("hello\nworld")
+    ed = PromptEditor("hello\nworld")
     ed.cursor_row = 0
     ed.cursor_col = 5
     ed.handle_key(KeyEvent(key=Key.RIGHT))
@@ -820,7 +820,7 @@ def test_prompt_editor_arrow_right_at_line_end_wraps_down() -> None:
 
 def test_prompt_editor_up_clamps_col() -> None:
     """Up arrow clamps cursor col to the new line's length."""
-    ed = _PromptEditor("hi\nlonger line")
+    ed = PromptEditor("hi\nlonger line")
     ed.cursor_row = 1
     ed.cursor_col = 10
     ed.handle_key(KeyEvent(key=Key.UP))
@@ -829,7 +829,7 @@ def test_prompt_editor_up_clamps_col() -> None:
 
 
 def test_prompt_editor_ctrl_s_commits() -> None:
-    ed = _PromptEditor("original")
+    ed = PromptEditor("original")
     ed.cursor_col = 8
     for ch in " EDITED":
         ed.handle_key(KeyEvent(char=ch))
@@ -839,7 +839,7 @@ def test_prompt_editor_ctrl_s_commits() -> None:
 
 
 def test_prompt_editor_esc_cancels() -> None:
-    ed = _PromptEditor("original")
+    ed = PromptEditor("original")
     for ch in "WILL_DISCARD":
         ed.handle_key(KeyEvent(char=ch))
     ed.handle_key(KeyEvent(key=Key.ESC))
@@ -848,12 +848,12 @@ def test_prompt_editor_esc_cancels() -> None:
 
 
 def test_prompt_editor_char_count() -> None:
-    ed = _PromptEditor("hello\nworld")
+    ed = PromptEditor("hello\nworld")
     assert ed.char_count() == 11
 
 
 def test_prompt_editor_home_end() -> None:
-    ed = _PromptEditor("hello world")
+    ed = PromptEditor("hello world")
     ed.cursor_col = 5
     ed.handle_key(KeyEvent(key=Key.HOME))
     assert ed.cursor_col == 0
@@ -862,7 +862,7 @@ def test_prompt_editor_home_end() -> None:
 
 
 def test_prompt_editor_dirty_tracking() -> None:
-    ed = _PromptEditor("hello")
+    ed = PromptEditor("hello")
     assert not ed.is_dirty
     ed.handle_key(KeyEvent(char="X"))
     assert ed.is_dirty

@@ -113,6 +113,7 @@ from ..render.theme import (
     normalize_display_mode,
     toggle_display_mode,
 )
+from .prompt_editor import PromptEditor
 
 
 # ─── Constants ───
@@ -301,331 +302,6 @@ class _InlineTextEdit:
     kind: FieldKind  # mirror the field kind so the handler doesn't have to look it up
 
 
-# ─── Multiline prompt editor (MULTILINE fields) ───
-
-
-class _PromptEditor:
-    """Standalone multi-line text editor used as a modal overlay.
-
-    Not a full App — just a state container + input handler + paint
-    method that the config menu owns and renders. The cursor is a
-    (row, col) pair into a list of lines; navigation is the standard
-    arrow-keys/Home/End/Backspace/Delete/Enter set you'd expect from
-    any code editor.
-
-    The editor doesn't know about word wrap. Long lines clip
-    horizontally with a `›` marker on the right edge — the user can
-    break them with Enter manually. Adding soft wrap is the next
-    polish pass.
-
-    Lifecycle:
-        editor = _PromptEditor(initial="...")
-        # ...input dispatched to editor.handle_key(event)...
-        # ...config menu calls editor.paint(grid, x, y, w, h, theme)...
-        if editor.is_done:
-            if editor.result is not None:
-                # User saved — commit editor.result back to the profile
-            else:
-                # User cancelled — discard
-    """
-
-    def __init__(self, initial: str) -> None:
-        self._initial = initial
-        self.lines: list[str] = initial.split("\n") if initial else [""]
-        if not self.lines:
-            self.lines = [""]
-        self.cursor_row: int = 0
-        self.cursor_col: int = 0
-        # Vertical scroll offset — first visible row index
-        self.scroll_offset: int = 0
-        # Horizontal scroll offset for the cursor's row
-        self.horizontal_scroll: int = 0
-        # Lifecycle flags
-        self._done: bool = False
-        self._result: str | None = None  # None means cancelled
-
-    @property
-    def is_done(self) -> bool:
-        return self._done
-
-    @property
-    def result(self) -> str | None:
-        return self._result
-
-    @property
-    def is_dirty(self) -> bool:
-        return "\n".join(self.lines) != self._initial
-
-    def char_count(self) -> int:
-        return sum(len(l) for l in self.lines) + max(0, len(self.lines) - 1)
-
-    # ─── Input dispatch ───
-
-    def handle_key(self, event: KeyEvent) -> None:
-        if self._done:
-            return
-
-        # Ctrl+S commits
-        if event.is_ctrl and event.char == "s":
-            self._result = "\n".join(self.lines)
-            self._done = True
-            return
-
-        # Esc cancels (always — no two-stage warn for the inner editor;
-        # the config menu's outer Esc handler covers profile-level
-        # dirty state separately)
-        if event.key == Key.ESC:
-            self._result = None
-            self._done = True
-            return
-
-        # Navigation
-        if event.key == Key.LEFT:
-            self._cursor_left()
-            return
-        if event.key == Key.RIGHT:
-            self._cursor_right()
-            return
-        if event.key == Key.UP:
-            self._cursor_up()
-            return
-        if event.key == Key.DOWN:
-            self._cursor_down()
-            return
-        if event.key == Key.HOME:
-            self.cursor_col = 0
-            return
-        if event.key == Key.END:
-            self.cursor_col = len(self.lines[self.cursor_row])
-            return
-        if event.key == Key.PG_UP:
-            self.cursor_row = max(0, self.cursor_row - 10)
-            self._clamp_col()
-            return
-        if event.key == Key.PG_DOWN:
-            self.cursor_row = min(len(self.lines) - 1, self.cursor_row + 10)
-            self._clamp_col()
-            return
-
-        # Editing
-        if event.key == Key.BACKSPACE:
-            self._backspace()
-            return
-        if event.key == Key.DELETE:
-            self._delete()
-            return
-        if event.key == Key.ENTER:
-            self._insert_newline()
-            return
-
-        # Printable input
-        if event.is_char and event.char and not event.is_ctrl and not event.is_alt:
-            for ch in event.char:
-                if ch == "\n":
-                    self._insert_newline()
-                elif ord(ch) >= 0x20:
-                    self._insert_char(ch)
-
-    # ─── Cursor model operations ───
-
-    def _cursor_left(self) -> None:
-        if self.cursor_col > 0:
-            self.cursor_col -= 1
-        elif self.cursor_row > 0:
-            self.cursor_row -= 1
-            self.cursor_col = len(self.lines[self.cursor_row])
-
-    def _cursor_right(self) -> None:
-        if self.cursor_col < len(self.lines[self.cursor_row]):
-            self.cursor_col += 1
-        elif self.cursor_row < len(self.lines) - 1:
-            self.cursor_row += 1
-            self.cursor_col = 0
-
-    def _cursor_up(self) -> None:
-        if self.cursor_row > 0:
-            self.cursor_row -= 1
-            self._clamp_col()
-
-    def _cursor_down(self) -> None:
-        if self.cursor_row < len(self.lines) - 1:
-            self.cursor_row += 1
-            self._clamp_col()
-
-    def _clamp_col(self) -> None:
-        self.cursor_col = min(self.cursor_col, len(self.lines[self.cursor_row]))
-
-    def _insert_char(self, ch: str) -> None:
-        line = self.lines[self.cursor_row]
-        self.lines[self.cursor_row] = line[: self.cursor_col] + ch + line[self.cursor_col :]
-        self.cursor_col += 1
-
-    def _insert_newline(self) -> None:
-        line = self.lines[self.cursor_row]
-        before = line[: self.cursor_col]
-        after = line[self.cursor_col :]
-        self.lines[self.cursor_row] = before
-        self.lines.insert(self.cursor_row + 1, after)
-        self.cursor_row += 1
-        self.cursor_col = 0
-
-    def _backspace(self) -> None:
-        if self.cursor_col > 0:
-            line = self.lines[self.cursor_row]
-            self.lines[self.cursor_row] = line[: self.cursor_col - 1] + line[self.cursor_col :]
-            self.cursor_col -= 1
-        elif self.cursor_row > 0:
-            # Merge with previous line
-            prev_line = self.lines[self.cursor_row - 1]
-            cur_line = self.lines[self.cursor_row]
-            new_col = len(prev_line)
-            self.lines[self.cursor_row - 1] = prev_line + cur_line
-            del self.lines[self.cursor_row]
-            self.cursor_row -= 1
-            self.cursor_col = new_col
-
-    def _delete(self) -> None:
-        line = self.lines[self.cursor_row]
-        if self.cursor_col < len(line):
-            self.lines[self.cursor_row] = line[: self.cursor_col] + line[self.cursor_col + 1 :]
-        elif self.cursor_row < len(self.lines) - 1:
-            # Merge next line into current
-            next_line = self.lines[self.cursor_row + 1]
-            self.lines[self.cursor_row] = line + next_line
-            del self.lines[self.cursor_row + 1]
-
-    # ─── Paint ───
-
-    def paint(
-        self,
-        grid: Grid,
-        *,
-        x: int,
-        y: int,
-        w: int,
-        h: int,
-        theme: ThemeVariant,
-    ) -> None:
-        """Render the editor as a modal box at (x, y, w, h)."""
-        if w < 30 or h < 8:
-            return
-
-        # Box background + border
-        border_style = Style(fg=theme.accent, bg=theme.bg_input, attrs=ATTR_BOLD)
-        fill_style = Style(fg=theme.fg, bg=theme.bg_input)
-        paint_box(
-            grid, x, y, w, h,
-            style=border_style, fill_style=fill_style, chars=BOX_ROUND,
-        )
-
-        # Title bar
-        dirty_marker = " *" if self.is_dirty else ""
-        title = f" edit system prompt{dirty_marker} "
-        paint_text(
-            grid, title, x + 2, y,
-            style=Style(fg=theme.bg, bg=theme.accent, attrs=ATTR_BOLD),
-        )
-
-        # Right-anchored: line N/M · char count
-        info = f" line {self.cursor_row + 1}/{len(self.lines)} · {self.char_count()} chars "
-        info_x = x + w - len(info) - 2
-        if info_x > x + len(title) + 2:
-            paint_text(
-                grid, info, info_x, y,
-                style=Style(fg=theme.bg, bg=theme.accent, attrs=ATTR_BOLD),
-            )
-
-        # Footer keybinds
-        footer = " ↑↓←→ navigate · ⏎ newline · ⌫ delete · Ctrl+S save · Esc cancel "
-        if len(footer) <= w - 4:
-            fx = x + (w - len(footer)) // 2
-            paint_text(
-                grid, footer, fx, y + h - 1,
-                style=Style(fg=theme.bg, bg=theme.accent_warm, attrs=ATTR_BOLD),
-            )
-
-        # Text area
-        # Layout: 4-cell line number gutter, then a separator, then text
-        gutter_w = 5  # " 999 "
-        sep_w = 1
-        text_x = x + 2 + gutter_w + sep_w
-        text_y = y + 1
-        text_w = max(1, x + w - 2 - text_x)
-        text_h = max(1, h - 2)
-
-        # Auto-scroll vertically: keep cursor in view
-        if self.cursor_row < self.scroll_offset:
-            self.scroll_offset = self.cursor_row
-        elif self.cursor_row >= self.scroll_offset + text_h:
-            self.scroll_offset = self.cursor_row - text_h + 1
-        if self.scroll_offset < 0:
-            self.scroll_offset = 0
-
-        # Auto-scroll horizontally: keep cursor in view (per current row)
-        if self.cursor_col < self.horizontal_scroll:
-            self.horizontal_scroll = self.cursor_col
-        elif self.cursor_col >= self.horizontal_scroll + text_w:
-            self.horizontal_scroll = self.cursor_col - text_w + 1
-        if self.horizontal_scroll < 0:
-            self.horizontal_scroll = 0
-
-        # Paint visible lines
-        for i in range(text_h):
-            row_idx = self.scroll_offset + i
-            if row_idx >= len(self.lines):
-                break
-            line = self.lines[row_idx]
-            visible_line = line[self.horizontal_scroll : self.horizontal_scroll + text_w]
-            screen_y = text_y + i
-
-            # Line number
-            num_text = f"{row_idx + 1:>4} "
-            num_style = Style(
-                fg=theme.fg_subtle if row_idx != self.cursor_row else theme.accent_warm,
-                bg=theme.bg_input,
-                attrs=ATTR_DIM if row_idx != self.cursor_row else ATTR_BOLD,
-            )
-            paint_text(grid, num_text, x + 2, screen_y, style=num_style)
-
-            # Separator
-            paint_text(
-                grid, "│", x + 2 + gutter_w, screen_y,
-                style=Style(fg=theme.fg_subtle, bg=theme.bg_input),
-            )
-
-            # Line content
-            paint_text(
-                grid, visible_line, text_x, screen_y,
-                style=Style(fg=theme.fg, bg=theme.bg_input),
-            )
-
-            # Off-screen indicators (line longer than visible width)
-            if self.horizontal_scroll > 0:
-                paint_text(
-                    grid, "‹", text_x - 1, screen_y,
-                    style=Style(fg=theme.accent_warm, bg=theme.bg_input, attrs=ATTR_BOLD),
-                )
-            if len(line) > self.horizontal_scroll + text_w:
-                paint_text(
-                    grid, "›", text_x + text_w, screen_y,
-                    style=Style(fg=theme.accent_warm, bg=theme.bg_input, attrs=ATTR_BOLD),
-                )
-
-        # Cursor — paint over the appropriate cell
-        cursor_screen_row = self.cursor_row - self.scroll_offset
-        cursor_screen_col = self.cursor_col - self.horizontal_scroll
-        if 0 <= cursor_screen_row < text_h and 0 <= cursor_screen_col < text_w:
-            cy = text_y + cursor_screen_row
-            cx = text_x + cursor_screen_col
-            # Read the char under the cursor (or space if past EOL)
-            line = self.lines[self.cursor_row]
-            ch = line[self.cursor_col] if self.cursor_col < len(line) else " "
-            cursor_style = Style(
-                fg=theme.bg_input, bg=theme.fg, attrs=ATTR_BOLD,
-            )
-            grid.set(cy, cx, Cell(ch, cursor_style))
-
-
 # ─── The config App ───
 
 
@@ -699,7 +375,7 @@ class RoninConfig(App):
         self._inline_text_edit: _InlineTextEdit | None = None
 
         # ─── Multi-line prompt editor (MULTILINE fields) ───
-        self._prompt_editor: _PromptEditor | None = None
+        self._prompt_editor: PromptEditor | None = None
 
         # ─── Dirty tracking ───
         # Set of (profile_name, field_name) tuples that differ from
@@ -1183,9 +859,15 @@ class RoninConfig(App):
             return
 
         if field.kind == FieldKind.MULTILINE:
-            # Open the full-screen text editor overlay
+            # Open the full-screen text editor overlay. Pass the
+            # terminal's clipboard helper so Ctrl+C copies the
+            # selection to the system clipboard via OSC 52 (works in
+            # Ghostty/iTerm2/kitty/alacritty/modern xterm).
             current = self._profile_value_for_field_raw(self._current_profile(), field) or ""
-            self._prompt_editor = _PromptEditor(initial=str(current))
+            self._prompt_editor = PromptEditor(
+                initial=str(current),
+                copy_callback=self.term.copy_to_clipboard,
+            )
             return
 
     def _handle_inline_text_key(self, event: KeyEvent) -> None:
