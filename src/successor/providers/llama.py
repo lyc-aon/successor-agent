@@ -135,6 +135,15 @@ class ChatStream:
         self._content_buf: list[str] = []
         self._reasoning_lock = threading.Lock()
         self._content_lock = threading.Lock()
+        # Live tool-call accumulator snapshot. Updated by the worker
+        # every time a delta.tool_calls chunk arrives, read by the
+        # chat's tick loop to render a streaming preview card ("the
+        # arguments are pouring in RIGHT NOW"). Each entry:
+        #   {"index": int, "id": str, "name": str, "raw_arguments": str}
+        # where raw_arguments is the concatenated text so far (not yet
+        # JSON-parsed — we show it as a schizo-scroll tail).
+        self._tool_calls_lock = threading.Lock()
+        self._tool_calls_snapshot: list[dict] = []
         self._thread.start()
 
     @property
@@ -150,6 +159,20 @@ class ChatStream:
     def content_so_far(self) -> str:
         with self._content_lock:
             return "".join(self._content_buf)
+
+    @property
+    def tool_calls_so_far(self) -> list[dict]:
+        """Thread-safe snapshot of the in-flight tool-call accumulators.
+
+        Returns a list of dicts shaped
+          `{"index", "id", "name", "raw_arguments"}`
+        sorted by index. Empty until the model starts emitting
+        `delta.tool_calls` chunks. The chat reads this every frame
+        to paint a streaming preview card showing the arguments
+        arriving live.
+        """
+        with self._tool_calls_lock:
+            return [dict(tc) for tc in self._tool_calls_snapshot]
 
     def drain(self) -> list[StreamEvent]:
         """Pull all currently-available events. Non-blocking."""
@@ -302,6 +325,10 @@ class ChatStream:
                         slot["name"] = fn["name"]
                     if "arguments" in fn:
                         slot["args_buf"].append(fn["arguments"])
+                # Publish a snapshot so the main thread's render can
+                # show the arguments streaming in live — mirrors the
+                # reasoning_so_far pattern the thinking spinner uses.
+                self._publish_tool_calls_snapshot(pending_tool_calls)
 
             fr = choice.get("finish_reason")
             if fr:
@@ -319,6 +346,24 @@ class ChatStream:
             timings=timings,
             tool_calls=self._finalize_tool_calls(pending_tool_calls),
         )
+
+    def _publish_tool_calls_snapshot(self, pending: dict[int, dict]) -> None:
+        """Copy the per-index accumulator into the thread-safe snapshot
+        so the chat's main thread can read it via `tool_calls_so_far`
+        without touching the worker-owned `pending_tool_calls` dict.
+        Called every time a `delta.tool_calls` chunk arrives.
+        """
+        snapshot: list[dict] = []
+        for idx in sorted(pending.keys()):
+            slot = pending[idx]
+            snapshot.append({
+                "index": idx,
+                "id": slot["id"],
+                "name": slot["name"],
+                "raw_arguments": "".join(slot["args_buf"]),
+            })
+        with self._tool_calls_lock:
+            self._tool_calls_snapshot = snapshot
 
     @staticmethod
     def _finalize_tool_calls(pending: dict[int, dict]) -> tuple:

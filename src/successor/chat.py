@@ -421,6 +421,65 @@ _BASH_TOOL_SCHEMA: dict = {
 }
 
 
+def _extract_command_tail(raw_args: str) -> str:
+    """Extract the progressively-streaming `command` field from a
+    partial tool_call arguments JSON blob, returning the unescaped
+    command body so the user sees readable heredoc content instead
+    of `\\n` escapes.
+
+    Input: a partial JSON string like:
+        '{"command":"cat > foo.html <<\\'EOF\\'\\n<!DOCTYPE html>\\n<h'
+    Output:
+        'cat > foo.html <<\'EOF\'\n<!DOCTYPE html>\n<h'
+
+    Best-effort — falls back to the raw text when the JSON is too
+    malformed to find the opening `"command":"` marker, so the
+    preview always shows SOMETHING rather than blanking on parse
+    failure. Doesn't need to produce a syntactically valid result
+    because this is a display-only preview.
+    """
+    if not raw_args:
+        return ""
+    # Look for the start of the command field's string value. Accept
+    # variants with or without whitespace around the colon.
+    for key_marker in ('"command":"', '"command": "'):
+        idx = raw_args.find(key_marker)
+        if idx != -1:
+            body = raw_args[idx + len(key_marker):]
+            # Progressive JSON unescape. We bail on unknown escapes
+            # rather than raising — the stream is still arriving
+            # and a partial escape is normal.
+            out: list[str] = []
+            i = 0
+            while i < len(body):
+                ch = body[i]
+                if ch == '"':
+                    # End of the string value — stop here
+                    break
+                if ch == "\\" and i + 1 < len(body):
+                    nxt = body[i + 1]
+                    if nxt == "n":
+                        out.append("\n"); i += 2; continue
+                    if nxt == "t":
+                        out.append("\t"); i += 2; continue
+                    if nxt == "r":
+                        out.append("\r"); i += 2; continue
+                    if nxt == '"':
+                        out.append('"'); i += 2; continue
+                    if nxt == "\\":
+                        out.append("\\"); i += 2; continue
+                    if nxt == "/":
+                        out.append("/"); i += 2; continue
+                    # Unknown escape — just emit the backslash and move on
+                    out.append("\\"); i += 1; continue
+                out.append(ch)
+                i += 1
+            return "".join(out)
+    # Couldn't find the marker — show the raw JSON so the user at
+    # least sees progress. Better than a blank preview.
+    return raw_args
+
+
 def _assistant_with_tool_calls(content: str, cards: list[ToolCard]) -> dict:
     """Build the assistant-message dict for an assistant turn that
     issued one or more tool calls.
@@ -4943,18 +5002,25 @@ class SuccessorChat(App):
     ) -> list[_RenderedRow]:
         """Render the in-flight streaming reply as paint-ready rows.
 
-        While the model is in the thinking phase (no content yet) we
-        show a spinner with the reasoning char count. Once content
-        starts arriving, we parse it as markdown live — every frame
-        re-parses, but the source is short and the parser is cheap.
+        Four phases can appear in a single turn:
 
-        When a bash detector is active, the visible text comes from
-        `detector.cleaned_text()` — the stream minus any fenced bash
-        block. This prevents the jarring "block appears mid-stream
-        then gets elided at StreamEnded" jump the user sees otherwise.
-        If a block is in flight (fence opened, body streaming), a
-        dim italic "running bash…" marker sits under the body so the
-        user knows a command is being queued.
+          1. THINKING — no content yet. Spinner + reasoning preview
+             tail (last ~80 chars of reasoning_content) as a dim
+             scrolling lane beneath the spinner.
+          2. CONTENT — model emits user-visible text. Rendered as
+             markdown with a typewriter cursor. Fenced bash blocks
+             get elided via BashStreamDetector.cleaned_text() so
+             they don't pop in and then disappear.
+          3. TOOL CALL ARGUMENTS — model emits `delta.tool_calls`
+             chunks that accumulate in stream.tool_calls_so_far.
+             We paint a "tool call arriving" preview card showing
+             the raw_arguments JSON streaming in live, just like
+             the thinking reasoning tail. Without this the user
+             sees a dead pause while 44 lines of heredoc content
+             stream in silently.
+          4. QUEUED BASH (legacy detector) — a dim marker showing
+             "queuing bash command…" when the fenced-block detector
+             is inside a block but hasn't seen the closing fence.
         """
         if self._stream is None:
             return []
@@ -4972,6 +5038,15 @@ class SuccessorChat(App):
             block_in_flight = self._stream_bash_detector.is_inside_block()
         else:
             content_so_far = "".join(self._stream_content)
+
+        # Live tool_call accumulator snapshot. Each entry has
+        # `{"index", "id", "name", "raw_arguments"}` where
+        # raw_arguments is the running JSON text. Empty until the
+        # model starts emitting `delta.tool_calls`. Use getattr so
+        # test fakes that don't implement this interface still work.
+        tool_calls_in_flight = getattr(
+            self._stream, "tool_calls_so_far", None,
+        ) or []
 
         out: list[_RenderedRow] = [_RenderedRow(base_color=theme.accent)]
 
@@ -5026,6 +5101,21 @@ class SuccessorChat(App):
                             base_color=theme.fg_subtle,
                         )
                     )
+            # Fall through to the tool-call preview block below —
+            # the model may skip text entirely and go straight from
+            # reasoning → tool_calls, in which case the preview is
+            # the only visual cue that anything is happening.
+            for tc in tool_calls_in_flight:
+                raw_args = tc.get("raw_arguments", "")
+                if not raw_args:
+                    continue
+                out.extend(self._streaming_tool_call_preview_rows(
+                    name=tc.get("name") or "bash",
+                    raw_arguments=raw_args,
+                    body_width=body_width,
+                    theme=theme,
+                    spinner=spinner,
+                ))
             return out
 
         # Content streaming — render the live text as markdown.
@@ -5068,7 +5158,110 @@ class SuccessorChat(App):
                     base_color=theme.fg_subtle,
                 )
             )
+
+        # ─── Streaming tool-call preview ──────────────────────────
+        # The model's tool_calls arrive as `delta.tool_calls` chunks
+        # over the same stream. Without any visual, the user stares
+        # at a dead screen while the heredoc body (which can be
+        # dozens of lines) streams in silently. Show it as a scrolling
+        # tail just like the reasoning preview — the last ~3 wrapped
+        # lines of the accumulated raw_arguments, with a cursor.
+        for tc in tool_calls_in_flight:
+            raw_args = tc.get("raw_arguments", "")
+            if not raw_args:
+                continue
+            out.extend(self._streaming_tool_call_preview_rows(
+                name=tc.get("name") or "bash",
+                raw_arguments=raw_args,
+                body_width=body_width,
+                theme=theme,
+                spinner=spinner,
+            ))
         return out
+
+    def _streaming_tool_call_preview_rows(
+        self,
+        *,
+        name: str,
+        raw_arguments: str,
+        body_width: int,
+        theme: ThemeVariant,
+        spinner: str,
+    ) -> list[_RenderedRow]:
+        """Build the rows for a "tool call arriving" live preview.
+
+        Design:
+          Row 1:  ⟡ bash — receiving arguments…  (header, dim accent)
+          Row 2+: scrolling tail of raw_arguments, last N wrapped
+                  lines, dim italic with a typewriter cursor on the
+                  final line. Mirrors the reasoning-preview aesthetic
+                  so the user immediately recognizes "this is content
+                  pouring in, not a hang".
+        """
+        # Try to extract the "command" field from the partial JSON
+        # so the preview shows a readable command body instead of
+        # escaped JSON. Failing that, fall back to the raw text.
+        display_text = _extract_command_tail(raw_arguments)
+
+        # How many lines of tail we show. Bounded so the preview
+        # doesn't take over the chat.
+        MAX_PREVIEW_LINES = 5
+        avail_w = max(10, body_width - _PREFIX_W - 6)
+
+        # Split on newlines first, then wrap long lines hard to fit
+        # the available width. Take the LAST MAX_PREVIEW_LINES so
+        # the freshest content is always visible.
+        raw_lines = display_text.replace("\\n", "\n").split("\n")
+        wrapped: list[str] = []
+        for rl in raw_lines:
+            if not rl:
+                wrapped.append("")
+                continue
+            offset = 0
+            while offset < len(rl):
+                wrapped.append(rl[offset:offset + avail_w])
+                offset += avail_w
+        tail_lines = wrapped[-MAX_PREVIEW_LINES:]
+        if not tail_lines:
+            tail_lines = [""]
+        # Append a cursor to the very last line so the user sees it
+        # advancing as chars arrive.
+        tail_lines[-1] = tail_lines[-1] + "▌"
+
+        rows: list[_RenderedRow] = []
+        # Header row
+        header_text = f"{spinner} ⟡ {name} — receiving arguments…"
+        rows.append(
+            _RenderedRow(
+                leading_text=" " * _PREFIX_W + "  ↳ ",
+                leading_color_kind="fg_dim",
+                leading_attrs=ATTR_DIM,
+                body_spans=(
+                    LaidOutSpan(
+                        text=header_text,
+                        attrs=ATTR_DIM | ATTR_BOLD,
+                    ),
+                ),
+                base_color=theme.accent_warm,
+            )
+        )
+        # Tail rows
+        for line in tail_lines:
+            rows.append(
+                _RenderedRow(
+                    leading_text=" " * _PREFIX_W + "    ",
+                    leading_color_kind="fg_dim",
+                    leading_attrs=ATTR_DIM,
+                    body_spans=(
+                        LaidOutSpan(
+                            text=line,
+                            attrs=ATTR_DIM | ATTR_ITALIC,
+                        ),
+                    ),
+                    base_color=theme.fg_subtle,
+                )
+            )
+        return rows
 
     # ─── Slash command autocomplete dropdown ───
 
