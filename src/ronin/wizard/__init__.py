@@ -1,19 +1,27 @@
-"""rn setup — the profile creation wizard.
+"""Wizard package — multi-region Apps that share the chat renderer.
 
-Multi-region App with a live preview pane that shows the user's
-in-progress profile choices in real time. The preview is a real
-RoninChat instance that the wizard mutates as the user picks options;
-the wizard renders it into a sub-grid via on_tick and copies the
-cells into its own main content area. When the user arrows between
-themes, the preview's existing _set_theme machinery runs the smooth
-transition for free — same code path as the live chat.
+Two Apps live here:
 
-The wizard is the showcase — every screen exercises a renderer
-capability that conventional TUI stacks either can't or have to fight
-their stack to attempt. See `setup.py` docstring for the per-screen
-breakdown.
+  RoninSetup    — `rn setup` profile creation wizard. Linear, eight
+                  steps, ends in a save action that drops you into the
+                  chat with the new profile active. See `setup.py`.
+
+  RoninConfig   — `rn config` profile config menu. Three panes
+                  (profiles list / settings tree / live preview),
+                  non-linear, dirty-tracking save/revert. Stays open
+                  until you hit Esc. See `config.py`.
+
+Both reuse the chat's renderer + theme transition machinery and don't
+introduce any new primitives. The wizard is for first-time setup;
+the config menu is for ongoing tweaks.
 """
 
+from .config import RoninConfig, run_config_menu
 from .setup import RoninSetup, run_setup_wizard
 
-__all__ = ["RoninSetup", "run_setup_wizard"]
+__all__ = [
+    "RoninConfig",
+    "RoninSetup",
+    "run_config_menu",
+    "run_setup_wizard",
+]

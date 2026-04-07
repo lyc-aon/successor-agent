@@ -241,16 +241,29 @@ parameters (`max_duration_s`, `intro_mode`) so a profile's
 `intro_animation: "nusamurai"` plays the bundled braille keyframes for
 4 seconds before the chat opens. Any keypress skips ahead.
 
-**`rn setup` wizard** (`src/ronin/wizard/`): multi-region App with a
-LIVE preview pane that's a real RoninChat instance the wizard mutates
-as the user picks options. Eight steps (welcome, name, theme, mode,
-density, intro, review, saved) with sidebar progress, footer
+**`rn setup` wizard** (`src/ronin/wizard/setup.py`): multi-region App
+with a LIVE preview pane that's a real RoninChat instance the wizard
+mutates as the user picks options. Eight steps (welcome, name, theme,
+mode, density, intro, review, saved) with sidebar progress, footer
 keybinds + colored progress bar, validation glow on bad input, toast
 notification on save. The preview pane uses the chat's existing
 `_set_theme`/`_set_display_mode`/`_set_density` machinery so the
 smooth blend transitions run for free — no animation code in the
 wizard at all. **The wizard is the proof that the harness can build
 itself**: writing it required ZERO new primitives.
+
+**`rn config` menu** (`src/ronin/wizard/config.py`): three-pane App
+for ongoing tweaks. Profiles list (left) | settings tree (middle) |
+live preview (right). Tab cycles focus, ↑↓ navigates within the
+focused pane, Enter edits the selected setting. CYCLE fields (theme,
+density) open an inline anchored cycle-edit overlay; TOGGLE fields
+(mode, intro_animation) flip immediately. Dirty fields get a `*`
+marker, dirty profiles get a `*` next to their name in the left pane,
+the title bar shows a "N unsaved" pill. **S** saves all dirty profiles
+to disk + reloads the registry, **R** reverts. Esc with unsaved
+changes shows a warning toast first; second Esc discards. From inside
+the chat, `Ctrl+,` and `/config` open the menu, and the cli main
+loop handles the chat → config → chat re-entry seamlessly.
 
 **What's NOT yet built**: skill invocation strategy, agent loop,
 tool dispatch, framework docs.

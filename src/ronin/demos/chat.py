@@ -216,6 +216,7 @@ _HELP_SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("Ctrl+E Ctrl+Y", "vim-style end / top"),
     )),
     ("look & feel", (
+        ("Ctrl+,",      "open profile config menu"),
         ("Ctrl+P",      "cycle active profile"),
         ("Ctrl+T",      "cycle color theme"),
         ("Alt+D",       "toggle display mode (dark / light)"),
@@ -400,6 +401,10 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
         name="quit",
         aliases=("q", "exit"),
         description="leave the chat",
+    ),
+    SlashCommand(
+        name="config",
+        description="open the profile config menu",
     ),
     SlashCommand(
         name="profile",
@@ -802,6 +807,14 @@ class RoninChat(App):
         # literal newlines) instead of triggering submit on Enter.
         self._in_paste: bool = False
 
+        # ─── Pending action ───
+        # When the user opens a sub-App from inside the chat (config
+        # menu, future setup-edit, etc.), the slash/keybind handler
+        # sets this flag and calls self.stop(). The cli.py main loop
+        # checks the flag after run() returns to decide what to do
+        # next. None means a normal exit.
+        self._pending_action: str | None = None
+
     # ─── Input handling ───
 
     def on_key(self, byte: int) -> None:
@@ -960,6 +973,15 @@ class RoninChat(App):
         # Alt+= / Alt+- step controls.
         if event.is_alt and event.char == "d":
             self._toggle_display_mode()
+            return
+
+        # ─── Open the config menu — Ctrl+, is the convention everywhere ───
+        # (VS Code, Sublime, Cursor, JetBrains all use Ctrl+, for
+        # "open settings"). Sets the pending action flag so the cli
+        # main loop knows to open the config menu after the chat exits.
+        if event.is_ctrl and event.char == ",":
+            self._pending_action = "config"
+            self.stop()
             return
 
         # ─── Density (font-size feel) — Alt+=/Alt+-/Ctrl+] always available ───
@@ -1597,6 +1619,14 @@ class RoninChat(App):
         self.input_buffer = ""
 
         if text in ("/quit", "/exit", "/q"):
+            self.stop()
+            return
+
+        # /config — open the three-pane profile config menu
+        # The chat stops with _pending_action = "config" so the cli
+        # main loop opens the config menu, then resumes the chat.
+        if text == "/config":
+            self._pending_action = "config"
             self.stop()
             return
 

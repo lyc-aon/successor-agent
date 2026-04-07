@@ -53,19 +53,70 @@ def _list_frames() -> list[tuple[str, Path]]:
 
 
 def cmd_chat(args: argparse.Namespace) -> int:
-    """Open the chat. Plays the active profile's intro animation first."""
+    """Open the chat with re-entry support for the config menu.
+
+    Plays the active profile's intro animation on first launch.
+    Subsequent re-entries (after exiting the config menu) skip the
+    intro to avoid being annoying. The chat's `_pending_action` flag
+    is checked after each chat.run() to decide whether to open the
+    config menu and then resume the chat.
+    """
     from .demos.chat import RoninChat
     from .profiles import get_active_profile
+    from .wizard import run_config_menu
 
     profile = get_active_profile()
+    first_launch = True
 
-    # Play the intro animation if the active profile asks for one.
-    # The intro is a separate App that runs to completion, then control
-    # transfers to the chat App. Both share the same terminal context
-    # by re-entering it cleanly between Apps. Brief flash between them
-    # is acceptable for v0.
-    if profile.intro_animation:
-        _play_intro_animation(profile.intro_animation)
+    while True:
+        # Intro only on the very first launch in this session — re-entry
+        # after the config menu skips it.
+        if first_launch and profile.intro_animation:
+            _play_intro_animation(profile.intro_animation)
+        first_launch = False
+
+        chat = RoninChat(profile=profile)
+        chat.run()
+
+        if getattr(chat, "_pending_action", None) == "config":
+            # User opened the config menu from inside the chat. Run it,
+            # then resume the chat with whichever profile they want
+            # active when they exit.
+            requested_name = run_config_menu()
+            if requested_name:
+                from .profiles import get_profile
+                next_profile = get_profile(requested_name)
+                if next_profile is not None:
+                    profile = next_profile
+                else:
+                    profile = get_active_profile()
+            else:
+                # Cancelled — resume with whatever active_profile says
+                profile = get_active_profile()
+            continue
+
+        # Normal exit — leave the loop
+        break
+
+    return 0
+
+
+def cmd_config(args: argparse.Namespace) -> int:
+    """Run the config menu standalone (not from inside the chat).
+
+    On exit, drops into the chat with the user's selected active
+    profile. If they cancel, drops into the chat with the previously-
+    active profile.
+    """
+    from .demos.chat import RoninChat
+    from .profiles import get_active_profile, get_profile
+    from .wizard import run_config_menu
+
+    requested_name = run_config_menu()
+    if requested_name:
+        profile = get_profile(requested_name) or get_active_profile()
+    else:
+        profile = get_active_profile()
 
     RoninChat(profile=profile).run()
     return 0
@@ -469,6 +520,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="profile creation wizard with live preview",
     )
     p_setup.set_defaults(func=cmd_setup)
+
+    p_config = sub.add_parser(
+        "config",
+        help="three-pane profile config menu (browse + edit + live preview)",
+    )
+    p_config.set_defaults(func=cmd_config)
 
     p_demo = sub.add_parser("demo", help="braille animation demo")
     p_demo.add_argument("--fps", type=float, default=30.0, help="target FPS (default 30)")

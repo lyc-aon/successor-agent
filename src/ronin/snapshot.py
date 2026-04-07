@@ -182,6 +182,58 @@ def chat_demo_snapshot(
     return g
 
 
+def config_demo_snapshot(
+    *,
+    rows: int = 30,
+    cols: int = 120,
+    focus: str = "settings",
+    profile_cursor: int = 0,
+    settings_cursor: int = 0,
+    editing: bool = False,
+    dirty: tuple[tuple[str, str], ...] = (),
+    elapsed: float = 0.5,
+) -> Grid:
+    """Build a Grid showing the config menu in a chosen state.
+
+    focus: which pane has keyboard focus — "profiles" or "settings".
+
+    profile_cursor: index of the profile under the left-pane cursor.
+
+    settings_cursor: row index in the settings tree (skipping read-only
+        rows isn't enforced here — caller passes the actual index from
+        _SETTINGS_TREE).
+
+    editing: when True, the inline edit overlay is shown for the
+        current settings_cursor field.
+
+    dirty: tuple of (profile_name, field_name) pairs to mark as
+        unsaved-changes for visual testing.
+
+    elapsed: simulated runtime, used for animation states.
+    """
+    from .wizard.config import RoninConfig, Focus
+
+    menu = RoninConfig()
+    menu._focus = Focus.PROFILES if focus == "profiles" else Focus.SETTINGS
+    if menu._working_profiles:
+        menu._profile_cursor = max(0, min(profile_cursor, len(menu._working_profiles) - 1))
+    menu._settings_cursor = settings_cursor
+    if editing:
+        menu._editing_field = settings_cursor
+        menu._editing_cursor = 0
+
+    for entry in dirty:
+        menu._dirty.add(entry)
+
+    menu._sync_preview()
+    menu._t0 = time.monotonic() - elapsed
+    menu._section_reveal_at = max(0.0, elapsed - 0.5)
+
+    g = Grid(rows, cols)
+    menu.on_tick(g)
+    return g
+
+
 def wizard_demo_snapshot(
     *,
     rows: int = 30,

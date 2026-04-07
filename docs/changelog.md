@@ -386,6 +386,112 @@ wizard doesn't reimplement any of it. When the user arrows from
 
 ---
 
+## Phase 4.5 — rn config three-pane menu (2026-04-06)
+
+The companion to the wizard. Where the wizard is "create from scratch,
+linear, one-shot," the config menu is "browse all your profiles, edit
+anything, dirty-track, save/revert, see-it-live." Three panes side
+by side with Tab focus cycling, anchored inline cycle-edit overlays,
+per-field dirty markers, and a save flow that syncs the active
+profile's appearance fields to chat.json automatically.
+
+### What landed
+
+- `src/ronin/wizard/config.py` — `RoninConfig` App. Three-pane layout
+  (profiles list / settings tree / live preview). Focus state machine
+  with Tab cycling. Settings tree groups fields into sections
+  (appearance, behavior, provider, extensions). Dirty tracking via
+  a set of `(profile_name, field_name)` tuples — comparing against
+  an initial-snapshot deep copy of every profile.
+  - **CYCLE fields** (theme, density): Enter opens an inline anchored
+    overlay listing all options, ↑↓ live-previews each option, Enter
+    confirms, Esc cancels and restores the snapshot.
+  - **TOGGLE fields** (display_mode, intro_animation): Enter flips
+    immediately, no overlay.
+  - **READONLY fields** (system_prompt, provider_*, skills, tools):
+    shown in dim italic with an "edit JSON file" hint.
+- `src/ronin/wizard/__init__.py` — re-exports `RoninConfig` and
+  `run_config_menu` alongside the wizard exports.
+- `src/ronin/cli.py` — `cmd_config` for the standalone `rn config`
+  subcommand. `cmd_chat` rewritten as a re-entry loop that checks
+  `chat._pending_action` after each `chat.run()` and reopens the
+  config menu (then resumes the chat with the user's selected
+  active profile) when set.
+- `src/ronin/demos/chat.py` — `_pending_action` instance state.
+  `/config` slash command and `Ctrl+,` keybind both set
+  `_pending_action = "config"` and call `self.stop()`. Help overlay
+  documents the new keybind.
+- `src/ronin/snapshot.py` — `config_demo_snapshot()` helper for
+  headless config menu rendering with controllable focus, cursors,
+  editing state, and dirty markers.
+
+### Renderer features exercised
+
+| concepts.md cat | feature | where |
+|---|---|---|
+| Cat 1 (mutable cells) | settings rows re-style as the user edits them; dirty `*` marker appears the moment a value changes; per-profile color swatches in the left pane | `_paint_settings_pane`, `_paint_profiles_pane` |
+| Cat 2 (smooth animation) | focused-pane border breathing pulse (BORDER_PULSE_HZ); save flash pulses every saved field green for 600ms; toast slide-in/fade-out | `_pulse_color`, `_save_flash`, `_paint_toast` |
+| Cat 3 (multi-region UI) | three panes side by side with Tab to cycle focus; the focused pane gets a brighter top border | `on_tick` |
+| Cat 5 (deterministic) | every focus state, dirty state, and editing state is a snapshot fixture | `config_demo_snapshot` |
+| Cat 7 (programmatic UI) | navigating between profiles in the left pane animates the preview chat through the new profile's theme/mode/density via the existing blend machinery | `_handle_profiles_key` → `_sync_preview` |
+
+### Save flow specifics
+
+1. For each dirty profile, write `~/.config/ronin/profiles/<name>.json`
+   using `_profile_to_json_dict` (the inverse of `parse_profile_file`)
+2. If any of the *currently-active* profile's appearance fields
+   (theme/display_mode/density) were edited, also write those into
+   chat.json so they take effect on the next chat open without the
+   user needing to clear their saved overrides manually
+3. Reload PROFILE_REGISTRY so subsequent get_profile() calls see the
+   new state
+4. Update the initial-snapshot list to match the new committed state
+5. Clear the dirty set
+6. Trigger the per-field save flash + a toast notification
+
+### Tests (33)
+
+- State machine: focus cycling, settings cursor skips read-only rows,
+  profile cursor walks through the list and syncs the preview
+- Editing: TOGGLE flips immediately and marks dirty, CYCLE opens
+  overlay with live preview, overlay Enter confirms, overlay Esc
+  cancels and restores
+- Dirty tracking: edit marks dirty, edit-back-to-original clears
+  dirty, revert clears all dirty
+- Save flow: writes JSON to disk, syncs chat.json for active profile,
+  no-op when nothing dirty
+- Esc handling: warns first, exits second on dirty; exits immediately
+  when clean
+- Snapshot rendering: three panes visible, all sections, focus glyphs,
+  edit overlay, dirty markers in title bar and profile rows, too-small
+  fallback
+- Round-trip: `_profile_to_json_dict` → write → `parse_profile_file`
+  preserves every field
+
+### Notes
+
+- Tab is the canonical focus-cycling key in every desktop app, so
+  reusing it inside a TUI is intuitive even though TUIs don't usually
+  have focus state. The pulse on the focused pane's top border makes
+  it visible without stealing attention.
+- The dirty-warning Esc behavior (first Esc warns, second Esc
+  discards) is the same pattern most editors use for "close unsaved
+  buffer." The warning toast lasts 2.5s, and the test checks that
+  the warning specifically uses the word "unsaved" so the second Esc
+  recognizes it.
+- Chat.json sync on save is the subtle bit. The active profile's
+  appearance fields (theme/display_mode/density) override profile
+  defaults — that's existing chat behavior. So when the user edits
+  the active profile's theme via the config menu, we ALSO clear/set
+  the corresponding chat.json field so the change takes effect
+  immediately. Other profiles only update their own JSON files.
+- The chat ↔ config re-entry loop in cmd_chat is the connecting
+  glue. Each profile switch via the menu writes to chat.json, the
+  cli loop re-reads and reopens the chat. Brief flash between Apps
+  is acceptable for v0; future polish: share a Terminal instance.
+
+---
+
 ## What's next
 
 - **Skill invocation strategy** — pick always-on vs on-demand after
@@ -393,11 +499,13 @@ wizard doesn't reimplement any of it. When the user arrows from
 - **Agent loop + tool dispatch** — wire `TOOL_REGISTRY` into the
   chat's response cycle once we've studied the llamacpp tool-call
   protocol surface deliberately
+- **Multi-line text editing** — would unlock editing system_prompt
+  and provider config fields directly in the config menu instead of
+  forcing the user to edit the JSON file
+- **Editing existing profiles via the wizard** — wizard re-entry mode
+  that pre-populates state from a registered profile (still useful
+  even with the config menu, since the wizard is more guided)
 - **Framework docs** — once the surface is stable
-- **Editing existing profiles via the wizard** — currently the wizard
-  only creates new profiles. An "edit existing" entry point that
-  pre-populates the wizard's state from a registered profile would
-  be a small follow-up.
 
 ---
 
@@ -411,10 +519,11 @@ wizard doesn't reimplement any of it. When the user arrows from
 | 5 (skill loader) | 17 | 157 |
 | 6 (tool registry) | 15 | 172 |
 | 4 (setup wizard) | 35 | 207 |
+| 4.5 (config menu) | 33 | 240 |
 
 (Counts above are approximate by phase boundary; actual test
 collection may include additional small additions in subsequent
 commits.)
 
-Final: **222 tests, all passing, hermetic via `RONIN_CONFIG_DIR`,
+Final: **255 tests, all passing, hermetic via `RONIN_CONFIG_DIR`,
 no fake mocks, no `.skip()` or `.todo()`.**
