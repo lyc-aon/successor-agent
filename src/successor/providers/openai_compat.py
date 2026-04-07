@@ -33,6 +33,72 @@ from typing import Iterable
 from .llama import ChatStream
 
 
+# Static fallback table for OpenAI-family models whose /v1/models endpoint
+# does NOT expose context_length. OpenAI's official api.openai.com is the
+# main consumer — it returns 120+ models with id/owner/created but no
+# context window. Without this table the chat would fall back to the
+# 262K default and set compaction thresholds against the wrong number,
+# silently misbehaving until the user hit a real "context length exceeded"
+# error from the server.
+#
+# Update notes:
+#   - Numbers below match OpenAI's published model docs as of 2026-04-07.
+#     They will go stale; treat them as a "good enough" hint until the
+#     model lookup misses, at which point either add a new entry here or
+#     rely on the chat falling back to the default.
+#   - The lookup is prefix-based so dated suffixes (gpt-4o-2024-11-20)
+#     resolve to the base entry (gpt-4o → 128k) without exploding the table.
+#   - Reasoning models (o1, o3, o4) have an "effective" context that
+#     includes reasoning tokens; treat the published number as the ceiling.
+_OPENAI_FALLBACK_WINDOWS: tuple[tuple[str, int], ...] = (
+    # GPT-5 family (200K)
+    ("gpt-5", 200_000),
+    # GPT-4.1 family (1M for the long-context variants, 128K for the rest)
+    ("gpt-4.1-mini", 1_000_000),
+    ("gpt-4.1-nano", 1_000_000),
+    ("gpt-4.1", 1_000_000),
+    # GPT-4o family (128K)
+    ("gpt-4o-mini", 128_000),
+    ("gpt-4o", 128_000),
+    ("chatgpt-4o", 128_000),
+    # GPT-4 turbo (128K)
+    ("gpt-4-turbo", 128_000),
+    ("gpt-4-1106", 128_000),
+    ("gpt-4-0125", 128_000),
+    # GPT-4 base (8K) — note: prefix matches before "gpt-4-turbo" because
+    # the table is searched in declaration order, so the more specific
+    # entries above MUST come first.
+    ("gpt-4", 8_192),
+    # GPT-3.5 turbo (16K for newer, 4K for legacy 0301)
+    ("gpt-3.5-turbo-16k", 16_385),
+    ("gpt-3.5-turbo", 16_385),
+    # Reasoning models — published max context windows
+    ("o4-mini", 200_000),
+    ("o4", 200_000),
+    ("o3-mini", 200_000),
+    ("o3", 200_000),
+    ("o1-mini", 128_000),
+    ("o1", 200_000),
+)
+
+
+def _lookup_openai_fallback(model_id: str) -> int | None:
+    """Return a hardcoded context window for an OpenAI model id, or None.
+
+    Prefix-matched in declaration order so the most specific entries
+    win (gpt-4-turbo is checked before gpt-4). Returns None for any
+    model that isn't in the table — the caller should fall through
+    to the chat-level default rather than guess.
+    """
+    if not model_id:
+        return None
+    lowered = model_id.lower()
+    for prefix, window in _OPENAI_FALLBACK_WINDOWS:
+        if lowered.startswith(prefix):
+            return window
+    return None
+
+
 class OpenAICompatClient:
     """Configured OpenAI-compatible endpoint factory.
 
@@ -163,19 +229,25 @@ class OpenAICompatClient:
     def detect_context_window(self) -> int | None:
         """Probe /v1/models and return the configured model's context length.
 
-        OpenRouter (and any OpenAI-compat endpoint that follows the
-        OpenRouter convention) exposes per-model `context_length` in
-        the `/v1/models` listing — either at the top level or under
-        `top_provider.context_length`. This method finds the row whose
-        `id` matches `self.model` and returns whichever context_length
-        field is present.
+        Detection precedence:
 
-        Result is cached on the instance after the first probe so the
+          1. /v1/models entry's `context_length` field (OpenRouter
+             convention; also `top_provider.context_length` as a
+             nested fallback). Works for OpenRouter, Together, and
+             several other hosted endpoints.
+
+          2. `_lookup_openai_fallback(model)` — a hardcoded prefix
+             table for OpenAI-family models, used when the live probe
+             returns no context_length field. OpenAI's official
+             api.openai.com endpoint exposes /v1/models but does NOT
+             include context_length, so without this table the chat
+             would silently fall back to 262K (wrong for almost every
+             OpenAI model) and set compaction thresholds too late.
+
+        Result is cached on the instance after the first call so the
         chat doesn't pay the round-trip more than once. Returns None
-        if the server is unreachable, the model isn't in the listing,
-        or the listing has no `context_length` field (e.g. OpenAI's
-        official endpoint, which doesn't expose it). Callers fall back
-        to the profile override or the hardcoded default.
+        if both sources miss — the chat then falls back to the profile
+        override or CONTEXT_MAX.
         """
         if hasattr(self, "_cached_context_window"):
             return self._cached_context_window
@@ -211,6 +283,14 @@ class OpenAICompatClient:
                             break
         except Exception:
             pass
+        # Hardcoded fallback for OpenAI-family models when the live
+        # probe didn't surface a context_length field. Only fires when
+        # the live probe returned None, so endpoints that DO expose
+        # the field always win.
+        if result is None:
+            fallback = _lookup_openai_fallback(self.model)
+            if fallback is not None:
+                result = fallback
         self._cached_context_window = result
         return result
 

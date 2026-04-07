@@ -253,12 +253,14 @@ class _WizardState:
     intro_animation: str | None = None
     enabled_tools: tuple[str, ...] = field(default_factory=default_enabled_tools)
     # Provider configuration (collected by Step.PROVIDER):
-    #   provider_kind  — "llamacpp" (local) or "openrouter" (hosted)
-    #   provider_api_key — only used when provider_kind == "openrouter"
-    #   provider_model — model id; for openrouter, the OpenRouter slug
-    #                    (e.g. "openai/gpt-oss-20b:free"); for llamacpp,
-    #                    a label string ("local" by default — llama.cpp
-    #                    ignores it)
+    #   provider_kind  — "llamacpp" (local), "openai" (api.openai.com),
+    #                    or "openrouter" (hosted aggregator)
+    #   provider_api_key — only used when provider_kind != "llamacpp"
+    #   provider_model — model id; for openai, the OpenAI model id
+    #                    (e.g. "gpt-4o-mini"); for openrouter, the
+    #                    OpenRouter slug (e.g. "openai/gpt-oss-20b:free");
+    #                    for llamacpp, a label string ("local" by default
+    #                    — llama.cpp ignores it)
     provider_kind: str = "llamacpp"
     provider_api_key: str = ""
     provider_model: str = "openai/gpt-oss-20b:free"
@@ -266,16 +268,26 @@ class _WizardState:
     def _build_provider_dict(self) -> dict:
         """Construct the provider config dict from the wizard state.
 
-        Local llamacpp uses the historical default. OpenRouter slots in
-        the OpenRouter base_url, the user's api_key, and the model slug
-        the user picked. context_window is intentionally NOT set —
-        the chat detects it from the provider on first use.
+        Local llamacpp uses the historical default. OpenAI and OpenRouter
+        both use the openai_compat client with provider-specific defaults
+        for base_url and model. context_window is intentionally NOT set —
+        the chat detects it from the provider on first use (OpenRouter's
+        /v1/models for OpenRouter, the hardcoded fallback table for OpenAI).
         """
         if self.provider_kind == "openrouter":
             return {
                 "type": "openai_compat",
                 "base_url": "https://openrouter.ai/api/v1",
                 "model": self.provider_model.strip() or "openai/gpt-oss-20b:free",
+                "api_key": self.provider_api_key.strip(),
+                "max_tokens": 4096,
+                "temperature": 0.7,
+            }
+        if self.provider_kind == "openai":
+            return {
+                "type": "openai_compat",
+                "base_url": "https://api.openai.com/v1",
+                "model": self.provider_model.strip() or "gpt-4o-mini",
                 "api_key": self.provider_api_key.strip(),
                 "max_tokens": 4096,
                 "temperature": 0.7,
@@ -765,12 +777,12 @@ class SuccessorSetup(App):
             self.state.intro_animation = _INTRO_OPTIONS[cursor][0]
 
     def _handle_provider(self, event: KeyEvent) -> None:
-        """Provider step: pick local llama.cpp or OpenRouter.
+        """Provider step: pick local llama.cpp, OpenAI, or OpenRouter.
 
         Three input rows:
-          row 0 — provider type toggle (llama.cpp / openrouter)
-          row 1 — api_key field          (only used by openrouter)
-          row 2 — model name field       (only used by openrouter)
+          row 0 — provider type toggle (llama.cpp / openai / openrouter)
+          row 1 — api_key field          (only used by openai/openrouter)
+          row 2 — model name field       (only used by openai/openrouter)
 
         ↑↓ moves focus between visible rows. When focus is on row 0,
         Space cycles the provider type. When focus is on rows 1/2,
@@ -778,8 +790,8 @@ class SuccessorSetup(App):
         Enter advance to TOOLS once any required fields are non-empty.
         """
         focus = self._cursors[Step.PROVIDER]
-        is_or = self.state.provider_kind == "openrouter"
-        max_focus = 2 if is_or else 0  # llamacpp has only the toggle row
+        needs_keys = self.state.provider_kind in ("openrouter", "openai")
+        max_focus = 2 if needs_keys else 0  # llamacpp has only the toggle row
 
         if event.key == Key.UP:
             self._cursors[Step.PROVIDER] = max(0, focus - 1)
@@ -797,35 +809,51 @@ class SuccessorSetup(App):
                 self._cursors[Step.PROVIDER] = 0
             return
         if event.key == Key.RIGHT or event.key == Key.ENTER:
-            # Validate before advancing. OpenRouter needs an api_key.
-            if is_or and not self.state.provider_api_key.strip():
+            # Validate before advancing. Hosted providers need api_key + model.
+            if needs_keys and not self.state.provider_api_key.strip():
                 self._cursors[Step.PROVIDER] = 1
                 self._glow = _ValidationGlow(
                     field="provider_api_key",
-                    message="api key required for openrouter",
+                    message=f"api key required for {self.state.provider_kind}",
                     started_at=self.elapsed,
                 )
                 return
-            if is_or and not self.state.provider_model.strip():
+            if needs_keys and not self.state.provider_model.strip():
                 self._cursors[Step.PROVIDER] = 2
                 self._glow = _ValidationGlow(
                     field="provider_model",
-                    message="model name required for openrouter",
+                    message=f"model name required for {self.state.provider_kind}",
                     started_at=self.elapsed,
                 )
                 return
             self._advance_step()
             return
 
-        # Toggle row: Space cycles type
+        # Toggle row: Space cycles type llamacpp → openai → openrouter → llamacpp
         if focus == 0 and event.is_char and event.char == " ":
-            self.state.provider_kind = (
-                "openrouter" if self.state.provider_kind == "llamacpp" else "llamacpp"
-            )
+            cycle = ("llamacpp", "openai", "openrouter")
+            try:
+                idx = cycle.index(self.state.provider_kind)
+            except ValueError:
+                idx = 0
+            new_kind = cycle[(idx + 1) % len(cycle)]
+            # Swap default model when toggling between hosted providers so
+            # the user isn't stuck typing every time. Only overwrites the
+            # model when the current value matches the OTHER provider's
+            # default — preserves user-typed values.
+            if new_kind == "openai" and self.state.provider_model in (
+                "openai/gpt-oss-20b:free", "",
+            ):
+                self.state.provider_model = "gpt-4o-mini"
+            elif new_kind == "openrouter" and self.state.provider_model in (
+                "gpt-4o-mini", "",
+            ):
+                self.state.provider_model = "openai/gpt-oss-20b:free"
+            self.state.provider_kind = new_kind
             return
 
-        # Input rows: only relevant when openrouter is selected.
-        if not is_or:
+        # Input rows: only relevant when a hosted provider is selected.
+        if not needs_keys:
             return
 
         if focus == 1:
@@ -1560,10 +1588,11 @@ class SuccessorSetup(App):
             ↑↓ move · space toggles type · → next
 
             ▸ [▣] local llama.cpp     uses http://localhost:8080
-              [ ] openrouter            api key + model name required
+              [ ] openai                api.openai.com — api key required
+              [ ] openrouter            openrouter.ai — api key required
 
-            api_key  ••••••••••••       (only when openrouter selected)
-            model    openai/gpt-oss-20b:free
+            api_key  ••••••••••••      (only for hosted providers)
+            model    gpt-4o-mini
 
         The active row is highlighted with a ▸ glyph and accent color.
         Inputs render in code-tinted boxes so they're visually distinct
@@ -1579,17 +1608,19 @@ class SuccessorSetup(App):
         )
 
         focus = self._cursors[Step.PROVIDER]
-        is_or = self.state.provider_kind == "openrouter"
+        needs_keys = self.state.provider_kind in ("openrouter", "openai")
 
-        # Toggle row (focus = 0)
+        # Toggle row group (focus = 0 — single focusable row, but we
+        # paint all three options stacked so the user can see what's
+        # available even before they hit Space).
         toggle_y = top + 3
         sel_glyph = "▸" if focus == 0 else " "
-        for i, (kind, label, hint) in enumerate(
-            (
-                ("llamacpp", "local llama.cpp", "uses http://localhost:8080"),
-                ("openrouter", "openrouter", "api key + model name required"),
-            )
-        ):
+        provider_options = (
+            ("llamacpp", "local llama.cpp", "uses http://localhost:8080"),
+            ("openai", "openai", "api.openai.com — api key required"),
+            ("openrouter", "openrouter", "openrouter.ai — api key required"),
+        )
+        for i, (kind, label, hint) in enumerate(provider_options):
             row_y = toggle_y + i
             if row_y >= bottom:
                 break
@@ -1608,10 +1639,10 @@ class SuccessorSetup(App):
                 style=Style(fg=theme.fg_dim, bg=theme.bg, attrs=ATTR_DIM | ATTR_ITALIC),
             )
 
-        # Input rows for openrouter (focus = 1, 2)
-        if not is_or:
+        # Input rows for hosted providers (focus = 1, 2)
+        if not needs_keys:
             # llamacpp picked — leave the rest blank but show one helpful line
-            note_y = toggle_y + 4
+            note_y = toggle_y + 5
             if note_y < bottom:
                 paint_text(
                     grid,
@@ -1622,7 +1653,7 @@ class SuccessorSetup(App):
             return
 
         # api_key field
-        api_y = toggle_y + 3
+        api_y = toggle_y + 4
         if api_y < bottom:
             label = "api_key"
             label_w = max(8, len(label))
@@ -1812,6 +1843,8 @@ class SuccessorSetup(App):
             tools_label = "(none — chat-only)"
         if self.state.provider_kind == "openrouter":
             provider_summary = f"openrouter · {self.state.provider_model}"
+        elif self.state.provider_kind == "openai":
+            provider_summary = f"openai · {self.state.provider_model}"
         else:
             provider_summary = "local llama.cpp at http://localhost:8080"
         rows_data = [

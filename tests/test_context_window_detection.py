@@ -183,9 +183,10 @@ def test_openai_compat_detect_returns_none_for_unknown_model() -> None:
         assert client.detect_context_window() is None
 
 
-def test_openai_compat_detect_returns_none_when_no_context_length_field() -> None:
+def test_openai_compat_falls_back_to_static_table_for_openai_models() -> None:
     """OpenAI's official endpoint doesn't expose context_length in /v1/models.
-    Detection should gracefully return None so callers fall back."""
+    The client should fall back to the hardcoded model→window table after
+    the live probe returns no context_length."""
     client = OpenAICompatClient(
         base_url="https://api.openai.com/v1",
         model="gpt-4o-mini",
@@ -195,7 +196,69 @@ def test_openai_compat_detect_returns_none_when_no_context_length_field() -> Non
         "successor.providers.openai_compat.urllib.request.urlopen",
         _fake_urlopen(payload),
     ):
+        assert client.detect_context_window() == 128_000
+
+
+def test_openai_compat_static_table_prefix_matches_dated_suffix() -> None:
+    """gpt-4o-2024-11-20 should resolve to the gpt-4o entry (128k) via
+    prefix match, not 262144 fallback."""
+    client = OpenAICompatClient(
+        base_url="https://api.openai.com/v1",
+        model="gpt-4o-2024-11-20",
+    )
+    payload = b'{"data": [{"id": "gpt-4o-2024-11-20", "object": "model"}]}'
+    with patch(
+        "successor.providers.openai_compat.urllib.request.urlopen",
+        _fake_urlopen(payload),
+    ):
+        assert client.detect_context_window() == 128_000
+
+
+def test_openai_compat_static_table_prioritizes_more_specific_prefix() -> None:
+    """gpt-4-turbo (128k) must NOT be shadowed by gpt-4 (8k). The table
+    is searched in declaration order, so the more specific entries
+    must come first — this test locks that ordering in."""
+    client = OpenAICompatClient(
+        base_url="https://api.openai.com/v1",
+        model="gpt-4-turbo",
+    )
+    payload = b'{"data": [{"id": "gpt-4-turbo", "object": "model"}]}'
+    with patch(
+        "successor.providers.openai_compat.urllib.request.urlopen",
+        _fake_urlopen(payload),
+    ):
+        assert client.detect_context_window() == 128_000
+
+
+def test_openai_compat_static_table_misses_unknown_model() -> None:
+    """A non-OpenAI model name that's not in the table should return None
+    so the chat falls through to the profile override or 262K default."""
+    client = OpenAICompatClient(
+        base_url="https://api.openai.com/v1",
+        model="some/random-model",
+    )
+    payload = b'{"data": [{"id": "some/random-model", "object": "model"}]}'
+    with patch(
+        "successor.providers.openai_compat.urllib.request.urlopen",
+        _fake_urlopen(payload),
+    ):
         assert client.detect_context_window() is None
+
+
+def test_openai_compat_live_context_length_wins_over_static_table() -> None:
+    """If a hosted endpoint DOES expose context_length (e.g. OpenRouter
+    proxying an OpenAI model), the live value wins over the table — the
+    fallback only fires when the live probe came up empty."""
+    client = OpenAICompatClient(
+        base_url="https://openrouter.ai/api/v1",
+        model="gpt-4o-mini",
+    )
+    payload = b'{"data": [{"id": "gpt-4o-mini", "context_length": 999999}]}'
+    with patch(
+        "successor.providers.openai_compat.urllib.request.urlopen",
+        _fake_urlopen(payload),
+    ):
+        assert client.detect_context_window() == 999999
 
 
 def test_openai_compat_detect_caches_result() -> None:

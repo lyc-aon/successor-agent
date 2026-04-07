@@ -484,6 +484,9 @@ def test_provider_step_space_toggles_kind_when_focused_on_row_0(temp_config_dir:
     wizard = SuccessorSetup()
     wizard._enter_step(Step.PROVIDER)
     assert wizard._cursors[Step.PROVIDER] == 0
+    # Cycle is llamacpp → openai → openrouter → llamacpp
+    wizard._handle_provider(KeyEvent(char=" "))
+    assert wizard.state.provider_kind == "openai"
     wizard._handle_provider(KeyEvent(char=" "))
     assert wizard.state.provider_kind == "openrouter"
     wizard._handle_provider(KeyEvent(char=" "))
@@ -493,7 +496,9 @@ def test_provider_step_space_toggles_kind_when_focused_on_row_0(temp_config_dir:
 def test_provider_step_openrouter_requires_api_key_to_advance(temp_config_dir: Path) -> None:
     wizard = SuccessorSetup()
     wizard._enter_step(Step.PROVIDER)
-    wizard._handle_provider(KeyEvent(char=" "))  # toggle to openrouter
+    # Toggle: llamacpp → openai → openrouter
+    wizard._handle_provider(KeyEvent(char=" "))
+    wizard._handle_provider(KeyEvent(char=" "))
     assert wizard.state.provider_kind == "openrouter"
     # Clear default model so we test ONLY the api_key requirement.
     wizard.state.provider_api_key = ""
@@ -503,10 +508,25 @@ def test_provider_step_openrouter_requires_api_key_to_advance(temp_config_dir: P
     assert "api key" in wizard._glow.message
 
 
+def test_provider_step_openai_requires_api_key_to_advance(temp_config_dir: Path) -> None:
+    wizard = SuccessorSetup()
+    wizard._enter_step(Step.PROVIDER)
+    wizard._handle_provider(KeyEvent(char=" "))  # toggle to openai
+    assert wizard.state.provider_kind == "openai"
+    wizard.state.provider_api_key = ""
+    wizard._handle_provider(KeyEvent(key=Key.RIGHT))
+    assert wizard.current_step == Step.PROVIDER  # blocked
+    assert wizard._glow is not None
+    assert "api key" in wizard._glow.message
+    assert "openai" in wizard._glow.message
+
+
 def test_provider_step_openrouter_full_flow(temp_config_dir: Path) -> None:
     wizard = SuccessorSetup()
     wizard._enter_step(Step.PROVIDER)
-    wizard._handle_provider(KeyEvent(char=" "))  # toggle to openrouter
+    # Toggle to openrouter (llamacpp → openai → openrouter)
+    wizard._handle_provider(KeyEvent(char=" "))
+    wizard._handle_provider(KeyEvent(char=" "))
     # Move focus to api_key, type some chars
     wizard._handle_provider(KeyEvent(key=Key.DOWN))
     assert wizard._cursors[Step.PROVIDER] == 1
@@ -538,12 +558,37 @@ def test_provider_step_openrouter_full_flow(temp_config_dir: Path) -> None:
     assert "context_window" not in payload["provider"]
 
 
+def test_provider_step_openai_full_flow(temp_config_dir: Path) -> None:
+    wizard = SuccessorSetup()
+    wizard._enter_step(Step.PROVIDER)
+    wizard._handle_provider(KeyEvent(char=" "))  # toggle to openai
+    assert wizard.state.provider_kind == "openai"
+    # Default model should auto-swap to gpt-4o-mini when picking openai
+    assert wizard.state.provider_model == "gpt-4o-mini"
+    # Type the api key
+    wizard._handle_provider(KeyEvent(key=Key.DOWN))
+    for ch in "sk-proj-test-key":
+        wizard._handle_provider(KeyEvent(char=ch))
+    assert wizard.state.provider_api_key == "sk-proj-test-key"
+    # Right advances (model is preset, api_key is set)
+    wizard._handle_provider(KeyEvent(key=Key.RIGHT))
+    assert wizard.current_step == Step.TOOLS
+
+    payload = wizard.state.to_json_dict()
+    assert payload["provider"]["type"] == "openai_compat"
+    assert payload["provider"]["base_url"] == "https://api.openai.com/v1"
+    assert payload["provider"]["model"] == "gpt-4o-mini"
+    assert payload["provider"]["api_key"] == "sk-proj-test-key"
+    assert "context_window" not in payload["provider"]
+
+
 def test_provider_step_left_from_input_returns_to_toggle_then_back(
     temp_config_dir: Path,
 ) -> None:
     wizard = SuccessorSetup()
     wizard._enter_step(Step.PROVIDER)
-    wizard._handle_provider(KeyEvent(char=" "))  # toggle to openrouter
+    # Toggle to openai (one Space) so we have visible input rows
+    wizard._handle_provider(KeyEvent(char=" "))
     wizard._handle_provider(KeyEvent(key=Key.DOWN))
     assert wizard._cursors[Step.PROVIDER] == 1
     # Left from a focused input should pull back to row 0, NOT retreat to INTRO
