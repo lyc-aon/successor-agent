@@ -283,19 +283,121 @@ OFF) and audited to stderr when enabled.
 
 ---
 
+## Phase 4 — rn setup wizard with live preview (2026-04-06)
+
+The showcase. Multi-region App with a live preview pane on the right
+that's a real RoninChat instance the wizard mutates as the user picks
+options. The chat's existing `_set_theme`/`_set_display_mode`/
+`_set_density` machinery animates the smooth blend transitions for
+free — there's zero animation code in the wizard itself. Every
+on-screen pixel uses something the renderer already had, which is
+the proof that the harness can build itself.
+
+### What landed
+
+- `src/ronin/wizard/setup.py` — `RoninSetup` App with eight steps
+  (welcome, name, theme, mode, density, intro, review, saved). State
+  machine dispatches per-step paint methods and key handlers.
+  - Multi-region layout: title row, 16-col sidebar, main content,
+    1-row footer. All coordinates derived from `grid.rows`/`grid.cols`,
+    resize-aware.
+  - Sidebar shows the step list with `▸` (active, gentle 0.7Hz pulse),
+    `✓` (completed), and dim future steps.
+  - Welcome screen plays the bundled Meditating braille frame above
+    typewriter-animated intro text (~35 cps), then a fading hint.
+  - Name step has a rounded-box input field with cursor blink and a
+    validation glow that pulses red→accent over 0.5s on rejected input.
+  - Theme/Mode/Density steps each show their option list on the left
+    and a LIVE preview pane on the right.
+- `src/ronin/wizard/__init__.py` — `run_setup_wizard()` entry point
+  that returns the saved Profile or None on cancel.
+- `src/ronin/cli.py` — `rn setup` subcommand. cmd_setup runs the
+  wizard, then plays the new profile's intro animation if configured,
+  then drops into the chat with the new profile active.
+- `src/ronin/snapshot.py` — `wizard_demo_snapshot(step=, name=, ...)`
+  helper for headless wizard snapshots, shaped like the existing
+  `chat_demo_snapshot`. Pins simulated `elapsed` so animations are
+  deterministic in tests.
+
+### The live preview pane (the centerpiece)
+
+The wizard holds a `_preview_chat: RoninChat` constructed once at
+wizard startup. As the user picks theme/mode/density options, the
+wizard calls `preview_chat._set_theme()` etc. — which trigger the
+chat's existing transition machinery. Every wizard frame, the wizard
+builds a sub-grid sized for the preview pane and calls
+`preview_chat.on_tick(sub_grid)` to render one frame of the chat into
+it, then walks the cells and copies them into the wizard's main
+grid at a fixed offset.
+
+This is what "build the harness from the harness" actually means.
+The preview is the actual chat — same painters, same theme system,
+same density transitions, same Pretext-shaped layout caching. The
+wizard doesn't reimplement any of it. When the user arrows from
+"steel" to a hypothetical user-installed theme, the preview chat's
+`blend_variants` runs and the user literally watches the colors morph.
+
+### Renderer capabilities exercised
+
+| concepts.md category | feature | where |
+|---|---|---|
+| Cat 1 — Mutable cells | live preview pane updates per-frame | `_paint_live_preview` |
+| Cat 2 — Smooth animation | active step pulse, validation glow, section reveal slide-in, save toast slide-in/fade-out, welcome typewriter | `_paint_sidebar`, `_paint_name`, `_paint_main_content`, `_paint_toast`, `_paint_welcome` |
+| Cat 3 — Multi-region UI | sidebar + main + preview + footer + toast all in one frame | `on_tick` |
+| Cat 5 — Replayable, deterministic | every step is a snapshot fixture, full save flow tested headlessly | `wizard_demo_snapshot`, `test_full_save_flow_writes_json_file` |
+| Cat 6 — Inline media | bundled braille Meditating frame on the welcome screen | `_paint_welcome` |
+| Cat 7 — Programmatic UI | save action transitions into the chat with the new profile already active | `cmd_setup` |
+
+### What the wizard deliberately does NOT do (v0 scope)
+
+- System prompt and provider config use sensible defaults baked into
+  the saved profile. The user can edit the JSON file afterward — the
+  review screen tells them so. Multi-line text input is a separate
+  problem and is deferred.
+- No skill or tool selection (those aren't wired into the chat
+  anyway — phases 5/6 ship loaders only).
+- Creates new profiles only. Editing existing profiles via the slash
+  command `/profile <name>` (already shipped in phase 3) is the
+  separate UX for in-flight changes.
+
+### Tests (35)
+
+- `tests/test_wizard.py` — state machine tests (defaults, name
+  validation, step navigation, save flow), input handler tests
+  (typed input, backspace, max length, enter advances, empty
+  rejected), end-to-end save flow with full keystroke sequence
+  asserting the JSON file lands and active_profile is persisted,
+  snapshot rendering tests for every step including too-small
+  fallback and dark/light differ assertion.
+
+### Notes
+
+- The "creating: <name>" pill in the title bar appears as soon as the
+  user enters the name step and types — instant feedback that they're
+  building toward a real profile.
+- The save flow validates the name one more time at submit and
+  bounces back to the NAME step with a glow if it's empty (catches the
+  edge case where the user goes Welcome → Right (advances to NAME)
+  → Right (would advance again if name were valid, but it's not)).
+- Total commit size for phase 4: ~1100 lines of source + ~520 lines
+  of tests. The wizard file is 1000+ lines, which is the biggest
+  single source file in the framework infra. All of it is paint
+  functions and state machine — no clever tricks.
+
+---
+
 ## What's next
 
-- **Phase 4: `rn setup` wizard (the showcase)** — multi-region App
-  with a live preview pane that uses `blend_variants` to smoothly
-  morph through theme + mode options as the user arrows through them.
-  Output is a profile JSON file. The single piece that proves the
-  harness can build itself.
 - **Skill invocation strategy** — pick always-on vs on-demand after
   experimenting with Qwen 3.5 in practice
 - **Agent loop + tool dispatch** — wire `TOOL_REGISTRY` into the
   chat's response cycle once we've studied the llamacpp tool-call
   protocol surface deliberately
 - **Framework docs** — once the surface is stable
+- **Editing existing profiles via the wizard** — currently the wizard
+  only creates new profiles. An "edit existing" entry point that
+  pre-populates the wizard's state from a registered profile would
+  be a small follow-up.
 
 ---
 
@@ -307,7 +409,12 @@ OFF) and audited to stderr when enabled.
 | 2 (provider) | 19 | 107 |
 | 3 (profiles + intro) | 33 | 140 |
 | 5 (skill loader) | 17 | 157 |
-| 6 (tool registry) | 15 | 187 (subset before this commit set may differ) |
+| 6 (tool registry) | 15 | 172 |
+| 4 (setup wizard) | 35 | 207 |
 
-Final: **187 tests, all passing, hermetic via `RONIN_CONFIG_DIR`,
+(Counts above are approximate by phase boundary; actual test
+collection may include additional small additions in subsequent
+commits.)
+
+Final: **222 tests, all passing, hermetic via `RONIN_CONFIG_DIR`,
 no fake mocks, no `.skip()` or `.todo()`.**

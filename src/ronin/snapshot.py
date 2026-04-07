@@ -11,14 +11,17 @@ ever entering an alt screen. This module provides:
                                 can be `cat`ed into a terminal to
                                 replay the rendered frame.
 
-  - rn snapshot subcommand:     load a chat scenario, render one frame
-                                at a chosen size, output text or ANSI
-                                to stdout or a file.
+  - chat_demo_snapshot(...):    construct a fresh RoninChat with a
+                                scripted set of messages and return a
+                                single rendered frame.
 
-The snapshot subcommand is powered by `chat_demo_snapshot()` which
-constructs a fresh RoninChat with a scripted set of messages and
-returns a single rendered frame. Marketing material, documentation
-images, and bug-repro screenshots all flow through here.
+  - wizard_demo_snapshot(...):  construct a fresh RoninSetup wizard at
+                                a chosen step with chosen state and
+                                return a single rendered frame.
+
+The snapshot helpers are used both by tests (visual regression) and
+by `rn snapshot` (marketing material, documentation images, bug-repro
+screenshots).
 """
 
 from __future__ import annotations
@@ -176,4 +179,71 @@ def chat_demo_snapshot(
 
     g = Grid(rows, cols)
     chat.on_tick(g)
+    return g
+
+
+def wizard_demo_snapshot(
+    *,
+    rows: int = 30,
+    cols: int = 100,
+    step: str = "welcome",
+    name: str = "",
+    theme_name: str = "steel",
+    display_mode: str = "dark",
+    density: str = "normal",
+    intro_animation: str | None = None,
+    elapsed: float = 0.5,
+) -> Grid:
+    """Build a Grid showing the setup wizard at a chosen step.
+
+    step: which Step enum value to render. Accepts the lowercase enum
+        name (welcome / name / theme / mode / density / intro / review /
+        saved). Defaults to "welcome".
+
+    name, theme_name, display_mode, density, intro_animation: the
+        wizard's in-progress state when the snapshot is taken. Lets
+        tests assert that the renderer reflects the chosen values
+        (e.g. the title bar shows the entered name, the live preview
+        uses the chosen theme).
+
+    elapsed: simulated time since the wizard started, used to advance
+        animations (typewriter, pulse, transitions). Defaults to 0.5s
+        which is past most reveal animations but before the welcome
+        typewriter completes.
+
+    Returns a fresh Grid containing one fully-rendered frame. No TTY
+    required. Used by both the test suite (visual regression) and
+    `rn snapshot` for marketing material.
+    """
+    from .wizard.setup import RoninSetup, Step, _WizardState
+
+    wizard = RoninSetup()
+
+    # Apply state directly. The wizard's _sync_preview_to_state takes
+    # care of pushing into the preview chat.
+    wizard.state = _WizardState(
+        name=name,
+        theme_name=theme_name,
+        display_mode=display_mode,
+        density=density,
+        intro_animation=intro_animation,
+    )
+    wizard._sync_preview_to_state()
+
+    # Resolve the step name to its enum value
+    step_lookup = {s.name.lower(): s for s in Step}
+    target_step = step_lookup.get(step.lower(), Step.WELCOME)
+    wizard._enter_step(target_step)
+
+    # Pin self.elapsed by setting _t0 retroactively. App.elapsed is
+    # `time.monotonic() - self._t0`, so picking _t0 = now - elapsed
+    # gives the wizard the appearance of having been running for
+    # `elapsed` seconds.
+    wizard._t0 = time.monotonic() - elapsed
+    wizard._step_entered_at = max(0.0, elapsed - 0.5)
+    if target_step == Step.WELCOME:
+        wizard._welcome_started_at = wizard._step_entered_at
+
+    g = Grid(rows, cols)
+    wizard.on_tick(g)
     return g

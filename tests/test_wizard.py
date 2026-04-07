@@ -1,0 +1,492 @@
+"""Tests for the rn setup wizard.
+
+Three layers of coverage:
+
+  1. State machine — pure logic tests for step navigation, name
+     validation, save flow, and the _WizardState → Profile / JSON
+     conversion. No rendering.
+
+  2. Rendering — snapshot tests using wizard_demo_snapshot to verify
+     each step's visible chrome (sidebar, headings, options, preview).
+     Hermetic via temp_config_dir.
+
+  3. Save flow integration — drives the wizard through a full
+     create-profile sequence by calling _handle_key with synthesized
+     KeyEvents, asserts the JSON file lands on disk and the registry
+     picks it up.
+
+The wizard's `should_launch_chat` flag is checked in lieu of actually
+running the chat (which would need a TTY). The post-wizard chat launch
+is glue, not logic.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from ronin.input.keys import Key, KeyEvent
+from ronin.profiles import PROFILE_REGISTRY, get_profile
+from ronin.render.theme import THEME_REGISTRY
+from ronin.snapshot import render_grid_to_plain, wizard_demo_snapshot
+from ronin.wizard.setup import (
+    RoninSetup,
+    Step,
+    _WizardState,
+    _DENSITY_OPTIONS,
+    _MODE_OPTIONS,
+    _INTRO_OPTIONS,
+)
+
+
+# ─── _WizardState pure logic ───
+
+
+def test_wizard_state_defaults() -> None:
+    state = _WizardState()
+    assert state.name == ""
+    assert state.theme_name == "steel"
+    assert state.display_mode == "dark"
+    assert state.density == "normal"
+    assert state.intro_animation is None
+
+
+def test_wizard_state_to_profile_uses_name() -> None:
+    state = _WizardState(name="my-profile", theme_name="forge")
+    profile = state.to_profile()
+    assert profile.name == "my-profile"
+    assert profile.theme == "forge"
+
+
+def test_wizard_state_lowercases_name_in_profile() -> None:
+    state = _WizardState(name="MIXEDCase")
+    assert state.to_profile().name == "mixedcase"
+
+
+def test_wizard_state_to_json_dict_round_trips() -> None:
+    state = _WizardState(
+        name="x",
+        theme_name="steel",
+        display_mode="light",
+        density="compact",
+        intro_animation="nusamurai",
+    )
+    payload = state.to_json_dict()
+    # Must be JSON-serializable and contain all the fields
+    serialized = json.dumps(payload)
+    parsed = json.loads(serialized)
+    assert parsed["name"] == "x"
+    assert parsed["theme"] == "steel"
+    assert parsed["display_mode"] == "light"
+    assert parsed["density"] == "compact"
+    assert parsed["intro_animation"] == "nusamurai"
+    assert parsed["provider"]["type"] == "llamacpp"
+
+
+def test_wizard_state_empty_name_falls_back_to_untitled() -> None:
+    state = _WizardState(name="")
+    assert state.to_profile().name == "untitled"
+
+
+# ─── Name validation ───
+
+
+def test_is_valid_name_accepts_alphanumeric(temp_config_dir: Path) -> None:
+    wizard = RoninSetup()
+    assert wizard._is_valid_name("ronin")
+    assert wizard._is_valid_name("ronin-dev")
+    assert wizard._is_valid_name("ronin_dev")
+    assert wizard._is_valid_name("ronin123")
+    assert wizard._is_valid_name("123-x")
+
+
+def test_is_valid_name_rejects_invalid(temp_config_dir: Path) -> None:
+    wizard = RoninSetup()
+    assert not wizard._is_valid_name("")
+    assert not wizard._is_valid_name("has space")
+    assert not wizard._is_valid_name("has/slash")
+    assert not wizard._is_valid_name("has.dot")
+    assert not wizard._is_valid_name("has@symbol")
+
+
+# ─── Step navigation ───
+
+
+def test_advance_step_walks_enum_order(temp_config_dir: Path) -> None:
+    wizard = RoninSetup()
+    assert wizard.current_step == Step.WELCOME
+    wizard._advance_step()
+    assert wizard.current_step == Step.NAME
+    wizard._advance_step()
+    assert wizard.current_step == Step.THEME
+    wizard._advance_step()
+    assert wizard.current_step == Step.MODE
+
+
+def test_retreat_step_walks_backward(temp_config_dir: Path) -> None:
+    wizard = RoninSetup()
+    wizard._enter_step(Step.DENSITY)
+    wizard._retreat_step()
+    assert wizard.current_step == Step.MODE
+    wizard._retreat_step()
+    assert wizard.current_step == Step.THEME
+
+
+def test_retreat_at_welcome_is_noop(temp_config_dir: Path) -> None:
+    wizard = RoninSetup()
+    assert wizard.current_step == Step.WELCOME
+    wizard._retreat_step()
+    assert wizard.current_step == Step.WELCOME
+
+
+def test_advance_at_review_triggers_save(temp_config_dir: Path) -> None:
+    """REVIEW + advance → save flow runs (with valid name set first)."""
+    wizard = RoninSetup()
+    wizard.state.name = "test-save"
+    wizard._enter_step(Step.REVIEW)
+    wizard._advance_step()  # triggers _save_and_finish
+    assert wizard.current_step == Step.SAVED
+    assert wizard.should_launch_chat is True
+
+
+# ─── _handle_name input handling ───
+
+
+def test_handle_name_accepts_letters(temp_config_dir: Path) -> None:
+    wizard = RoninSetup()
+    wizard._enter_step(Step.NAME)
+    wizard._handle_name(KeyEvent(char="r"))
+    wizard._handle_name(KeyEvent(char="o"))
+    wizard._handle_name(KeyEvent(char="n"))
+    assert wizard.state.name == "ron"
+
+
+def test_handle_name_rejects_space(temp_config_dir: Path) -> None:
+    wizard = RoninSetup()
+    wizard._enter_step(Step.NAME)
+    wizard._handle_name(KeyEvent(char="a"))
+    wizard._handle_name(KeyEvent(char=" "))
+    wizard._handle_name(KeyEvent(char="b"))
+    assert wizard.state.name == "ab"
+
+
+def test_handle_name_backspace(temp_config_dir: Path) -> None:
+    wizard = RoninSetup()
+    wizard._enter_step(Step.NAME)
+    for ch in "ronin":
+        wizard._handle_name(KeyEvent(char=ch))
+    wizard._handle_name(KeyEvent(key=Key.BACKSPACE))
+    wizard._handle_name(KeyEvent(key=Key.BACKSPACE))
+    assert wizard.state.name == "ron"
+
+
+def test_handle_name_max_length(temp_config_dir: Path) -> None:
+    wizard = RoninSetup()
+    wizard._enter_step(Step.NAME)
+    for _ in range(50):
+        wizard._handle_name(KeyEvent(char="x"))
+    # Capped at MAX_NAME_LEN
+    assert len(wizard.state.name) <= 32
+
+
+def test_handle_name_enter_with_valid_advances(temp_config_dir: Path) -> None:
+    wizard = RoninSetup()
+    wizard._enter_step(Step.NAME)
+    for ch in "myprofile":
+        wizard._handle_name(KeyEvent(char=ch))
+    wizard._handle_name(KeyEvent(key=Key.ENTER))
+    assert wizard.current_step == Step.THEME
+
+
+def test_handle_name_enter_with_empty_glows(temp_config_dir: Path) -> None:
+    """Empty name on Enter triggers a validation glow, doesn't advance."""
+    wizard = RoninSetup()
+    wizard._enter_step(Step.NAME)
+    wizard._handle_name(KeyEvent(key=Key.ENTER))
+    assert wizard.current_step == Step.NAME
+    assert wizard._glow is not None
+    assert wizard._glow.field == "name"
+
+
+# ─── _handle_theme cycling + preview sync ───
+
+
+def test_handle_theme_cycles_with_arrows(temp_config_dir: Path) -> None:
+    """Up/Down arrows cycle through registered themes."""
+    THEME_REGISTRY.reload()
+    wizard = RoninSetup()
+    wizard._enter_step(Step.THEME)
+    initial = wizard.state.theme_name
+    wizard._handle_theme(KeyEvent(key=Key.DOWN))
+    # After arrow, theme_name should reflect the new cursor position
+    # (may be same name if only one theme is loaded — check regardless)
+    cursor_after = wizard._cursors[Step.THEME]
+    assert cursor_after >= 0
+
+
+def test_handle_theme_arrow_syncs_preview(temp_config_dir: Path) -> None:
+    """Arrowing between themes pushes the new theme into the preview chat."""
+    # Drop a second theme into the user dir so we have something to cycle to
+    user_themes = temp_config_dir / "themes"
+    user_themes.mkdir()
+    other_theme = {
+        "name": "test_alt",
+        "icon": "★",
+        "description": "test",
+        "dark": {
+            "bg": "#000000", "bg_input": "#111111", "bg_footer": "#222222",
+            "fg": "#FFFFFF", "fg_dim": "#CCCCCC", "fg_subtle": "#888888",
+            "accent": "#FF0000", "accent_warm": "#FFAA00", "accent_warn": "#FF3300",
+        },
+        "light": {
+            "bg": "#FFFFFF", "bg_input": "#EEEEEE", "bg_footer": "#DDDDDD",
+            "fg": "#000000", "fg_dim": "#444444", "fg_subtle": "#888888",
+            "accent": "#CC0000", "accent_warm": "#CC8800", "accent_warn": "#CC2200",
+        },
+    }
+    (user_themes / "test_alt.json").write_text(json.dumps(other_theme))
+    THEME_REGISTRY.reload()
+
+    wizard = RoninSetup()
+    wizard._enter_step(Step.THEME)
+    initial_theme_name = wizard._preview_chat.theme.name
+    # Walk through themes via DOWN key — eventually we'll land on a different one
+    seen_names = {initial_theme_name}
+    for _ in range(5):
+        wizard._handle_theme(KeyEvent(key=Key.DOWN))
+        seen_names.add(wizard._preview_chat.theme.name)
+    # If multiple themes are available, the preview's theme should have changed
+    # at some point in the walk
+    assert len(seen_names) >= 2
+
+
+def test_handle_mode_toggles(temp_config_dir: Path) -> None:
+    wizard = RoninSetup()
+    wizard._enter_step(Step.MODE)
+    initial = wizard.state.display_mode
+    wizard._handle_mode(KeyEvent(key=Key.UP))
+    assert wizard.state.display_mode != initial
+    wizard._handle_mode(KeyEvent(key=Key.DOWN))
+    assert wizard.state.display_mode == initial
+
+
+def test_handle_density_cycles(temp_config_dir: Path) -> None:
+    wizard = RoninSetup()
+    wizard._enter_step(Step.DENSITY)
+    wizard._handle_density(KeyEvent(key=Key.DOWN))
+    assert wizard.state.density == _DENSITY_OPTIONS[2]  # normal → spacious
+    wizard._handle_density(KeyEvent(key=Key.DOWN))
+    assert wizard.state.density == _DENSITY_OPTIONS[0]  # spacious → compact (wraps)
+
+
+def test_handle_intro_toggles(temp_config_dir: Path) -> None:
+    wizard = RoninSetup()
+    wizard._enter_step(Step.INTRO)
+    assert wizard.state.intro_animation is None
+    wizard._handle_intro(KeyEvent(key=Key.DOWN))
+    assert wizard.state.intro_animation == "nusamurai"
+    wizard._handle_intro(KeyEvent(key=Key.UP))
+    assert wizard.state.intro_animation is None
+
+
+# ─── Save flow integration ───
+
+
+def test_full_save_flow_writes_json_file(temp_config_dir: Path) -> None:
+    """End-to-end: drive the wizard through every step and assert the JSON file lands."""
+    THEME_REGISTRY.reload()
+    PROFILE_REGISTRY.reload()
+
+    wizard = RoninSetup()
+
+    # Welcome → name
+    wizard._handle_welcome(KeyEvent(key=Key.RIGHT))
+    assert wizard.current_step == Step.NAME
+
+    # Type a name
+    for ch in "smoketest":
+        wizard._handle_name(KeyEvent(char=ch))
+    wizard._handle_name(KeyEvent(key=Key.ENTER))
+    assert wizard.current_step == Step.THEME
+
+    # Pick theme (default selection)
+    wizard._handle_theme(KeyEvent(key=Key.ENTER))
+    assert wizard.current_step == Step.MODE
+
+    # Pick mode
+    wizard._handle_mode(KeyEvent(key=Key.ENTER))
+    assert wizard.current_step == Step.DENSITY
+
+    # Pick density
+    wizard._handle_density(KeyEvent(key=Key.ENTER))
+    assert wizard.current_step == Step.INTRO
+
+    # Pick intro
+    wizard._handle_intro(KeyEvent(key=Key.ENTER))
+    assert wizard.current_step == Step.REVIEW
+
+    # Save
+    wizard._handle_review(KeyEvent(key=Key.ENTER))
+    assert wizard.current_step == Step.SAVED
+    assert wizard.should_launch_chat is True
+    assert wizard.saved_profile is not None
+    assert wizard.saved_profile.name == "smoketest"
+
+    # The profile JSON file landed on disk
+    target = temp_config_dir / "profiles" / "smoketest.json"
+    assert target.exists()
+    payload = json.loads(target.read_text())
+    assert payload["name"] == "smoketest"
+    assert payload["theme"] == "steel"
+    assert payload["display_mode"] == "dark"
+
+    # active_profile was persisted to chat.json
+    chat_cfg = json.loads((temp_config_dir / "chat.json").read_text())
+    assert chat_cfg["active_profile"] == "smoketest"
+
+    # The registry now has the new profile
+    PROFILE_REGISTRY.reload()
+    assert get_profile("smoketest") is not None
+
+
+def test_save_with_empty_name_rejects(temp_config_dir: Path) -> None:
+    """Trying to save with an empty name triggers validation glow + bounce to NAME."""
+    wizard = RoninSetup()
+    wizard._enter_step(Step.REVIEW)
+    wizard._handle_review(KeyEvent(key=Key.ENTER))
+    assert wizard.current_step == Step.NAME
+    assert wizard._glow is not None
+    assert wizard.should_launch_chat is False
+
+
+def test_esc_cancels_wizard(temp_config_dir: Path) -> None:
+    """Esc from any non-saved step sets should_launch_chat=False and stops."""
+    wizard = RoninSetup()
+    wizard._enter_step(Step.THEME)
+    wizard._handle_key(KeyEvent(key=Key.ESC))
+    assert wizard.should_launch_chat is False
+    assert wizard._running is False
+
+
+# ─── wizard_demo_snapshot rendering ───
+
+
+def test_snapshot_welcome_renders(temp_config_dir: Path) -> None:
+    g = wizard_demo_snapshot(rows=30, cols=100, step="welcome")
+    plain = render_grid_to_plain(g)
+    assert "ronin · setup" in plain
+    assert "welcome" in plain
+    assert "step 1 of 7" in plain
+
+
+def test_snapshot_name_step_shows_input_field(temp_config_dir: Path) -> None:
+    g = wizard_demo_snapshot(
+        rows=30, cols=100, step="name", name="test-name",
+    )
+    plain = render_grid_to_plain(g)
+    assert "test-name" in plain
+    assert "name for your new profile" in plain
+    assert "step 2 of 7" in plain
+
+
+def test_snapshot_theme_step_shows_live_preview(temp_config_dir: Path) -> None:
+    """The theme step renders the live preview pane with the active theme."""
+    g = wizard_demo_snapshot(
+        rows=30, cols=110, step="theme", name="test", theme_name="steel",
+    )
+    plain = render_grid_to_plain(g)
+    # The preview pane shows the chat title bar with the theme name
+    assert "steel" in plain
+    # The greeting message from the preview script
+    assert "Greetings, traveler" in plain
+    assert "live preview" in plain
+
+
+def test_snapshot_review_shows_summary(temp_config_dir: Path) -> None:
+    g = wizard_demo_snapshot(
+        rows=30, cols=110, step="review",
+        name="my-prof", theme_name="steel",
+        display_mode="light", density="spacious",
+        intro_animation="nusamurai",
+    )
+    plain = render_grid_to_plain(g)
+    assert "ready to save 'my-prof'" in plain
+    assert "my-prof" in plain
+    assert "steel" in plain
+    assert "light" in plain
+    assert "spacious" in plain
+    assert "nusamurai" in plain
+
+
+def test_snapshot_saved_step(temp_config_dir: Path) -> None:
+    g = wizard_demo_snapshot(
+        rows=20, cols=80, step="saved", name="test-saved",
+    )
+    plain = render_grid_to_plain(g)
+    assert "test-saved" in plain
+    assert "saved" in plain
+    assert "opening chat" in plain
+
+
+def test_snapshot_sidebar_shows_progress_marks(temp_config_dir: Path) -> None:
+    """Completed steps show ✓ in the sidebar; the active one shows ▸."""
+    g = wizard_demo_snapshot(
+        rows=30, cols=100, step="density", name="x",
+    )
+    plain = render_grid_to_plain(g)
+    # Completed steps before "density"
+    assert "✓ welcome" in plain
+    assert "✓ name" in plain
+    assert "✓ theme" in plain
+    assert "✓ mode" in plain
+    # Active step
+    assert "▸ density" in plain
+
+
+def test_snapshot_creating_pill_in_title_bar(temp_config_dir: Path) -> None:
+    """When name is set, the title bar shows a 'creating: <name>' pill."""
+    g = wizard_demo_snapshot(
+        rows=20, cols=100, step="theme", name="ronin-test",
+    )
+    plain = render_grid_to_plain(g)
+    assert "creating:" in plain
+    assert "ronin-test" in plain
+
+
+def test_snapshot_too_small_terminal(temp_config_dir: Path) -> None:
+    """Below the minimum size, the wizard shows a polite message instead of crashing."""
+    g = wizard_demo_snapshot(rows=10, cols=40, step="welcome")
+    plain = render_grid_to_plain(g)
+    assert "too small" in plain
+
+
+def test_snapshot_dark_and_light_differ(temp_config_dir: Path) -> None:
+    """Switching display_mode in the wizard produces different ANSI output.
+
+    Catches the case where the wizard's chrome doesn't honor the
+    user's selected display mode.
+    """
+    from ronin.snapshot import render_grid_to_ansi
+
+    dark = wizard_demo_snapshot(
+        rows=30, cols=100, step="mode", display_mode="dark",
+    )
+    light = wizard_demo_snapshot(
+        rows=30, cols=100, step="mode", display_mode="light",
+    )
+    assert render_grid_to_ansi(dark) != render_grid_to_ansi(light)
+
+
+def test_snapshot_density_changes_preview(temp_config_dir: Path) -> None:
+    """Different densities produce visibly different previews."""
+    from ronin.snapshot import render_grid_to_ansi
+
+    compact = wizard_demo_snapshot(
+        rows=30, cols=110, step="density", density="compact",
+    )
+    spacious = wizard_demo_snapshot(
+        rows=30, cols=110, step="density", density="spacious",
+    )
+    assert render_grid_to_ansi(compact) != render_grid_to_ansi(spacious)

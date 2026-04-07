@@ -71,6 +71,30 @@ def cmd_chat(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_setup(args: argparse.Namespace) -> int:
+    """Run the profile creation wizard.
+
+    Multi-step interactive wizard with a live preview pane that uses
+    the actual chat renderer to show the user's choices in real time.
+    On save, transitions directly into the chat with the new profile
+    active.
+    """
+    from .demos.chat import RoninChat
+    from .wizard import run_setup_wizard
+
+    saved_profile = run_setup_wizard()
+    if saved_profile is None:
+        # User cancelled — exit cleanly without launching the chat
+        return 0
+
+    # Optionally play the intro animation the user just configured,
+    # then drop into the chat with the new profile active.
+    if saved_profile.intro_animation:
+        _play_intro_animation(saved_profile.intro_animation)
+    RoninChat(profile=saved_profile).run()
+    return 0
+
+
 def _play_intro_animation(name: str) -> None:
     """Play a registered intro animation, blocking until it finishes.
 
@@ -439,6 +463,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_chat = sub.add_parser("chat", help="chat interface (v0, scripted)")
     p_chat.set_defaults(func=cmd_chat)
+
+    p_setup = sub.add_parser(
+        "setup",
+        help="profile creation wizard with live preview",
+    )
+    p_setup.set_defaults(func=cmd_setup)
 
     p_demo = sub.add_parser("demo", help="braille animation demo")
     p_demo.add_argument("--fps", type=float, default=30.0, help="target FPS (default 30)")

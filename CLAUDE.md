@@ -57,6 +57,7 @@ src/ronin/profiles/      Profile dataclass + JSON loader + active-profile resolv
 src/ronin/providers/     ChatProvider protocol + factory + llamacpp/openai_compat
 src/ronin/skills/        Skill dataclass + frontmatter parser + registry (loader-only)
 src/ronin/tools/         @tool decorator + ToolRegistry (Python imports, gated user dir)
+src/ronin/wizard/        rn setup wizard with live preview pane (the showcase)
 
 src/ronin/builtin/       package-shipped data files loaded by the registries
   themes/steel.json      the default theme — instrument-panel oklch
@@ -240,9 +241,19 @@ parameters (`max_duration_s`, `intro_mode`) so a profile's
 `intro_animation: "nusamurai"` plays the bundled braille keyframes for
 4 seconds before the chat opens. Any keypress skips ahead.
 
-**What's NOT yet built**: `rn setup` wizard (the showcase — coming
-next), skill invocation strategy, agent loop, tool dispatch,
-framework docs.
+**`rn setup` wizard** (`src/ronin/wizard/`): multi-region App with a
+LIVE preview pane that's a real RoninChat instance the wizard mutates
+as the user picks options. Eight steps (welcome, name, theme, mode,
+density, intro, review, saved) with sidebar progress, footer
+keybinds + colored progress bar, validation glow on bad input, toast
+notification on save. The preview pane uses the chat's existing
+`_set_theme`/`_set_display_mode`/`_set_density` machinery so the
+smooth blend transitions run for free — no animation code in the
+wizard at all. **The wizard is the proof that the harness can build
+itself**: writing it required ZERO new primitives.
+
+**What's NOT yet built**: skill invocation strategy, agent loop,
+tool dispatch, framework docs.
 
 See [`docs/changelog.md`](docs/changelog.md) for the per-phase notes.
 
