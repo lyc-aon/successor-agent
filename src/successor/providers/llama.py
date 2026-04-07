@@ -70,12 +70,22 @@ class ContentChunk:
 @dataclass(slots=True, frozen=True)
 class StreamEnded:
     """The stream finished cleanly. Includes usage info if the server
-    returned any."""
+    returned any.
+
+    `tool_calls` is the structured list of native tool calls the model
+    emitted during this stream, accumulated from `delta.tool_calls`
+    chunks. Each entry is a dict shaped:
+        {"id": str, "name": str, "arguments": dict, "raw_arguments": str}
+    where `arguments` is the parsed JSON object and `raw_arguments`
+    is the unparsed source string (kept for diagnostics + retries).
+    Empty list when the model emitted text-only.
+    """
     finish_reason: str
     usage: dict | None = None
     timings: dict | None = None
     full_reasoning: str = ""
     full_content: str = ""
+    tool_calls: tuple = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -200,16 +210,32 @@ class ChatStream:
           data: {...}\\n
           \\n
           data: [DONE]\\n
+
+        Tool calls arrive incrementally via `delta.tool_calls`. The
+        first chunk for a given index carries `id`, `type`, and
+        `function.name`; subsequent chunks deliver `function.arguments`
+        as text fragments that we concatenate. The final chunk has
+        `finish_reason: "tool_calls"` instead of "stop".
         """
         finish_reason = "stop"
         usage: dict | None = None
         timings: dict | None = None
+        # Tool call accumulators keyed by `index` from the streaming
+        # protocol. Each entry holds the resolved id+name (set on the
+        # first chunk that mentions them) and a list of argument-text
+        # fragments that get concatenated and JSON-parsed at end.
+        pending_tool_calls: dict[int, dict] = {}
 
         deadline = time.monotonic() + timeout
 
         while True:
             if self._stop.is_set():
-                self._emit_end(finish_reason="cancelled", usage=usage, timings=timings)
+                self._emit_end(
+                    finish_reason="cancelled",
+                    usage=usage,
+                    timings=timings,
+                    tool_calls=self._finalize_tool_calls(pending_tool_calls),
+                )
                 return
             if time.monotonic() > deadline:
                 self._emit_error("stream timed out")
@@ -261,6 +287,22 @@ class ChatStream:
                     self._content_buf.append(content)
                 self._queue.put(ContentChunk(content))
 
+            tool_calls_delta = delta.get("tool_calls")
+            if tool_calls_delta:
+                for tc in tool_calls_delta:
+                    idx = tc.get("index", 0)
+                    slot = pending_tool_calls.setdefault(
+                        idx,
+                        {"id": "", "name": "", "args_buf": []},
+                    )
+                    if tc.get("id"):
+                        slot["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        slot["name"] = fn["name"]
+                    if "arguments" in fn:
+                        slot["args_buf"].append(fn["arguments"])
+
             fr = choice.get("finish_reason")
             if fr:
                 finish_reason = fr
@@ -271,7 +313,40 @@ class ChatStream:
                     timings = chunk["timings"]
                 # Don't break — keep reading until [DONE] or EOF.
 
-        self._emit_end(finish_reason=finish_reason, usage=usage, timings=timings)
+        self._emit_end(
+            finish_reason=finish_reason,
+            usage=usage,
+            timings=timings,
+            tool_calls=self._finalize_tool_calls(pending_tool_calls),
+        )
+
+    @staticmethod
+    def _finalize_tool_calls(pending: dict[int, dict]) -> tuple:
+        """Convert the per-index accumulator into the final tuple of
+        tool-call dicts that StreamEnded carries.
+
+        Each entry is `{"id", "name", "arguments", "raw_arguments"}`.
+        Argument JSON is parsed; on parse error, `arguments` is `{}`
+        and `raw_arguments` keeps the raw text so the consumer can
+        diagnose. Tuples are used so StreamEnded stays frozen.
+        """
+        out = []
+        for idx in sorted(pending.keys()):
+            slot = pending[idx]
+            raw = "".join(slot["args_buf"])
+            try:
+                parsed = json.loads(raw) if raw else {}
+                if not isinstance(parsed, dict):
+                    parsed = {"_value": parsed}
+            except json.JSONDecodeError:
+                parsed = {}
+            out.append({
+                "id": slot["id"],
+                "name": slot["name"],
+                "arguments": parsed,
+                "raw_arguments": raw,
+            })
+        return tuple(out)
 
     def _emit_end(
         self,
@@ -279,6 +354,7 @@ class ChatStream:
         finish_reason: str,
         usage: dict | None,
         timings: dict | None,
+        tool_calls: tuple = (),
     ) -> None:
         self._queue.put(
             StreamEnded(
@@ -287,6 +363,7 @@ class ChatStream:
                 timings=timings,
                 full_reasoning=self.reasoning_so_far,
                 full_content=self.content_so_far,
+                tool_calls=tool_calls,
             )
         )
 
@@ -343,27 +420,55 @@ class LlamaCppClient:
         temperature: float | None = None,
         timeout: float | None = None,
         extra: dict | None = None,
+        tools: list[dict] | None = None,
     ) -> ChatStream:
         """Open a streaming chat completion.
 
-        messages: iterable of {"role": "system|user|assistant", "content": str}
+        messages: iterable of message dicts. Standard fields:
+            {"role": "system|user|assistant|tool", "content": str}
+          Assistant messages may also carry `tool_calls` (list of
+          tool-call dicts in OpenAI format). Tool messages may carry
+          `tool_call_id` linking back to a previous assistant call.
+          The serializer preserves all of these fields verbatim so
+          Qwen's chat template can render them as `<tool_call>` and
+          `<tool_response>` blocks.
+
+        tools: optional list of tool definitions in OpenAI format.
+          When set, the chat template's "tools" branch fires and
+          the model is told what tools are available. Pass None
+          for plain chat.
+
         extra:    optional dict merged into the request body for any
                   llama.cpp-specific knobs (top_p, top_k, repeat_penalty,
                   reasoning_effort, etc.)
 
         Returns a ChatStream that the caller polls via .drain().
         """
+        # Preserve all known fields on each message — flattening to
+        # role+content drops `tool_calls` and `tool_call_id`, which
+        # breaks the native Qwen tool-call round trip.
+        serialized_messages: list[dict] = []
+        for m in messages:
+            entry: dict = {"role": m["role"], "content": m.get("content", "") or ""}
+            if "tool_calls" in m and m["tool_calls"]:
+                entry["tool_calls"] = m["tool_calls"]
+            if "tool_call_id" in m and m["tool_call_id"]:
+                entry["tool_call_id"] = m["tool_call_id"]
+            if "name" in m and m["name"]:
+                entry["name"] = m["name"]
+            serialized_messages.append(entry)
+
         body: dict = {
             "model": self.model,
-            "messages": [
-                {"role": m["role"], "content": m["content"]} for m in messages
-            ],
+            "messages": serialized_messages,
             "stream": True,
             "max_tokens": max_tokens if max_tokens is not None else self.default_max_tokens,
             "temperature": (
                 temperature if temperature is not None else self.default_temperature
             ),
         }
+        if tools:
+            body["tools"] = tools
         if extra:
             body.update(extra)
 

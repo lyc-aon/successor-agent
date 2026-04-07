@@ -803,3 +803,294 @@ def test_live_stream_never_exposes_bash_block_mid_stream(
     # But the surrounding prose IS visible
     joined = "\n".join(observed_visible)
     assert "I'll run that" in joined, "prose before the block was elided"
+
+
+# ─── Native tool_calls path (Qwen 3.5 structured tool calling) ───
+#
+# These tests cover the Qwen-native tool_calls flow added in the
+# 2026-04-07 architectural fix. Provider parses streamed tool_calls
+# into StreamEnded.tool_calls; chat dispatches them via
+# _dispatch_native_tool_calls; api_messages serializer round-trips
+# them as `tool_calls` on assistant messages with `tool_call_id`
+# linking on tool messages. The chat template renders this as
+# native `<tool_call>` and `<tool_response>` blocks.
+
+
+def _native_tool_call_stream(
+    command: str,
+    call_id: str = "call_test_0",
+    pre_text: str = "",
+):
+    """Build a fake stream that delivers a single native bash tool_call.
+
+    Mirrors what llama.cpp's SSE parser feeds the chat: optional content
+    text, then a StreamEnded with `tool_calls` populated. Used by
+    multiple tests below.
+    """
+    events: list = []
+    if pre_text:
+        events.append(_content(pre_text))
+    events.append(StreamEnded(
+        finish_reason="tool_calls",
+        usage=None,
+        timings=None,
+        full_reasoning="",
+        full_content=pre_text,
+        tool_calls=({
+            "id": call_id,
+            "name": "bash",
+            "arguments": {"command": command},
+            "raw_arguments": '{"command": "' + command + '"}',
+        },),
+    ))
+    return _FakeStream(events)
+
+
+def test_native_tool_call_dispatches_via_pump(temp_config_dir: Path) -> None:
+    """A StreamEnded carrying tool_calls should produce one tool card
+    per call, dispatched through dispatch_bash, with the model's id
+    propagated onto the card."""
+    from successor.profiles import Profile
+    chat = SuccessorChat()
+    chat.profile = Profile(
+        name="yolo",
+        tools=("bash",),
+        tool_config={"bash": {"allow_dangerous": True, "allow_mutating": True}},
+    )
+    chat.messages = []
+    chat._stream_bash_detector = None  # native path only
+    chat._stream = _native_tool_call_stream(
+        "echo from-native-call",
+        call_id="call_native_42",
+    )
+    chat._pump_stream()
+
+    tool_msgs = [m for m in chat.messages if m.tool_card is not None]
+    assert len(tool_msgs) == 1
+    card = tool_msgs[0].tool_card
+    assert card.exit_code == 0
+    assert "from-native-call" in card.output
+    assert card.tool_call_id == "call_native_42"
+
+
+def test_native_tool_call_unknown_function_skipped(temp_config_dir: Path) -> None:
+    """Tool calls with a name other than 'bash' should NOT dispatch
+    and should produce a synthetic error message instead."""
+    from successor.profiles import Profile
+    chat = SuccessorChat()
+    chat.profile = Profile(
+        name="yolo",
+        tools=("bash",),
+        tool_config={"bash": {"allow_dangerous": True, "allow_mutating": True}},
+    )
+    chat.messages = []
+    chat._stream_bash_detector = None
+    chat._stream = _FakeStream([
+        StreamEnded(
+            finish_reason="tool_calls",
+            usage=None,
+            timings=None,
+            full_reasoning="",
+            full_content="",
+            tool_calls=({
+                "id": "call_x",
+                "name": "ls",
+                "arguments": {"path": "/tmp"},
+                "raw_arguments": '{"path": "/tmp"}',
+            },),
+        ),
+    ])
+    chat._pump_stream()
+
+    tool_msgs = [m for m in chat.messages if m.tool_card is not None]
+    assert tool_msgs == []
+    error_notes = [
+        m for m in chat.messages
+        if m.synthetic and "unknown tool" in m.raw_text.lower()
+    ]
+    assert len(error_notes) == 1
+
+
+def test_api_messages_emits_tool_calls_for_assistant_with_cards(
+    temp_config_dir: Path,
+) -> None:
+    """When the chat builds api_messages from a history that has an
+    assistant message followed by tool cards, it should produce ONE
+    assistant message with `tool_calls` populated and one `role: tool`
+    message per card with `tool_call_id` linking back."""
+    from successor.profiles import Profile
+    chat = SuccessorChat()
+    chat.profile = Profile(
+        name="yolo",
+        tools=("bash",),
+        tool_config={"bash": {"allow_dangerous": True, "allow_mutating": True}},
+    )
+
+    # Build a synthetic history: user → empty assistant marker → tool card
+    chat.messages = [
+        _Message("user", "list things"),
+        _Message("successor", "", display_text=""),
+        _Message(
+            "tool", "",
+            tool_card=dispatch_bash("echo hi", tool_call_id="call_abc123"),
+        ),
+    ]
+
+    api_messages = chat._build_api_messages_native("SYS")
+
+    # Walk and find the assistant + tool pair
+    roles = [m["role"] for m in api_messages]
+    assert "system" in roles
+    assert "user" in roles
+    assert "assistant" in roles
+    assert "tool" in roles
+
+    asst_msgs = [m for m in api_messages if m["role"] == "assistant"]
+    assert len(asst_msgs) == 1
+    assert "tool_calls" in asst_msgs[0]
+    assert len(asst_msgs[0]["tool_calls"]) == 1
+    tc = asst_msgs[0]["tool_calls"][0]
+    assert tc["id"] == "call_abc123"
+    assert tc["function"]["name"] == "bash"
+
+    tool_role_msgs = [m for m in api_messages if m["role"] == "tool"]
+    assert len(tool_role_msgs) == 1
+    assert tool_role_msgs[0]["tool_call_id"] == "call_abc123"
+
+
+def test_api_messages_separate_turns_keep_distinct_tool_calls(
+    temp_config_dir: Path,
+) -> None:
+    """When two separate agent turns each emit a tool call, the api
+    messages must have TWO distinct (assistant, tool) pairs — not one
+    grouped pair. Otherwise the model thinks it made parallel calls
+    in a single turn and re-issues them."""
+    from successor.profiles import Profile
+    chat = SuccessorChat()
+    chat.profile = Profile(
+        name="yolo",
+        tools=("bash",),
+        tool_config={"bash": {"allow_dangerous": True, "allow_mutating": True}},
+    )
+
+    chat.messages = [
+        _Message("user", "do two things"),
+        _Message("successor", "", display_text=""),  # turn 1 marker
+        _Message(
+            "tool", "",
+            tool_card=dispatch_bash("echo first", tool_call_id="call_1"),
+        ),
+        _Message("successor", "", display_text=""),  # turn 2 marker
+        _Message(
+            "tool", "",
+            tool_card=dispatch_bash("echo second", tool_call_id="call_2"),
+        ),
+    ]
+
+    api_messages = chat._build_api_messages_native("SYS")
+
+    asst_msgs = [m for m in api_messages if m["role"] == "assistant"]
+    assert len(asst_msgs) == 2, (
+        f"expected 2 distinct assistant turns, got {len(asst_msgs)}"
+    )
+    # Each assistant turn carries exactly its OWN single tool call
+    assert asst_msgs[0]["tool_calls"][0]["id"] == "call_1"
+    assert asst_msgs[1]["tool_calls"][0]["id"] == "call_2"
+
+    tool_role_msgs = [m for m in api_messages if m["role"] == "tool"]
+    assert len(tool_role_msgs) == 2
+    assert tool_role_msgs[0]["tool_call_id"] == "call_1"
+    assert tool_role_msgs[1]["tool_call_id"] == "call_2"
+
+
+def test_api_messages_orphan_tool_card_synthesizes_assistant(
+    temp_config_dir: Path,
+) -> None:
+    """A tool card without a preceding assistant marker (e.g., from
+    the /bash slash command echo) should still get an assistant turn
+    synthesized so the tool result has a tool_call to link back to."""
+    from successor.profiles import Profile
+    chat = SuccessorChat()
+    chat.profile = Profile(
+        name="yolo",
+        tools=("bash",),
+        tool_config={"bash": {"allow_dangerous": True, "allow_mutating": True}},
+    )
+
+    chat.messages = [
+        _Message(
+            "tool", "",
+            tool_card=dispatch_bash("echo orphan", tool_call_id="call_orphan"),
+        ),
+    ]
+
+    api_messages = chat._build_api_messages_native("SYS")
+
+    asst_msgs = [m for m in api_messages if m["role"] == "assistant"]
+    assert len(asst_msgs) == 1
+    assert asst_msgs[0]["tool_calls"][0]["id"] == "call_orphan"
+
+    tool_role_msgs = [m for m in api_messages if m["role"] == "tool"]
+    assert len(tool_role_msgs) == 1
+    assert tool_role_msgs[0]["tool_call_id"] == "call_orphan"
+
+
+def test_dispatch_bash_assigns_synthetic_call_id_when_omitted() -> None:
+    """dispatch_bash should always populate tool_call_id on the
+    returned card, generating a synthetic uuid when the caller didn't
+    provide one (legacy bash detector path, /bash slash command,
+    direct test invocations)."""
+    card = dispatch_bash("echo hi")
+    assert card.tool_call_id
+    assert card.tool_call_id.startswith("call_")
+    # Two consecutive dispatches must produce DIFFERENT ids
+    card2 = dispatch_bash("echo hi")
+    assert card.tool_call_id != card2.tool_call_id
+
+
+def test_dispatch_bash_propagates_provided_call_id() -> None:
+    """When the chat passes a model-provided id (from a streamed
+    tool_calls block), dispatch_bash should use it verbatim instead
+    of generating a fresh one."""
+    card = dispatch_bash("echo hi", tool_call_id="call_from_model")
+    assert card.tool_call_id == "call_from_model"
+
+
+def test_provider_finalizes_streamed_tool_call_args() -> None:
+    """The provider's _finalize_tool_calls helper concatenates
+    fragmented arguments JSON and parses it. This is the unit-level
+    check that the streaming protocol → structured StreamEnded.tool_calls
+    transformation works."""
+    from successor.providers.llama import ChatStream
+    pending = {
+        0: {
+            "id": "call_xyz",
+            "name": "bash",
+            "args_buf": ['{"comm', 'and": "ls', ' -la"}'],
+        },
+    }
+    final = ChatStream._finalize_tool_calls(pending)
+    assert len(final) == 1
+    tc = final[0]
+    assert tc["id"] == "call_xyz"
+    assert tc["name"] == "bash"
+    assert tc["arguments"] == {"command": "ls -la"}
+    assert tc["raw_arguments"] == '{"command": "ls -la"}'
+
+
+def test_provider_finalize_handles_invalid_json_gracefully() -> None:
+    """If the model produced malformed JSON in arguments, the parser
+    should NOT crash — return arguments={} and preserve raw_arguments
+    for the consumer to inspect."""
+    from successor.providers.llama import ChatStream
+    pending = {
+        0: {
+            "id": "call_bad",
+            "name": "bash",
+            "args_buf": ['{"command": "ls'],  # missing close
+        },
+    }
+    final = ChatStream._finalize_tool_calls(pending)
+    assert len(final) == 1
+    assert final[0]["arguments"] == {}
+    assert final[0]["raw_arguments"] == '{"command": "ls'

@@ -32,6 +32,7 @@ remain testable in isolation.
 from __future__ import annotations
 
 import os
+import secrets
 import shlex
 import subprocess
 import time
@@ -192,6 +193,15 @@ def _truncate_output(text: str, *, max_bytes: int = MAX_OUTPUT_BYTES) -> tuple[s
 # ─── Public dispatch ───
 
 
+def _new_tool_call_id() -> str:
+    """Generate a synthetic tool_call_id for cards that don't get one
+    from the model (legacy fenced-bash detection, /bash slash command,
+    direct test invocations). Format mirrors what llama.cpp's
+    tool-call streaming produces — opaque alphanumeric, ~32 chars.
+    """
+    return "call_" + secrets.token_urlsafe(24).replace("-", "").replace("_", "")[:24]
+
+
 def dispatch_bash(
     command: str,
     *,
@@ -201,6 +211,7 @@ def dispatch_bash(
     max_output_bytes: int = MAX_OUTPUT_BYTES,
     cwd: str | None = None,
     env: dict[str, str] | None = None,
+    tool_call_id: str | None = None,
 ) -> ToolCard:
     """Parse, classify, and execute a bash command. Return enriched card.
 
@@ -222,11 +233,19 @@ def dispatch_bash(
             truncated flag is set.
         cwd: working directory. None means the current process's cwd.
         env: subprocess environment. None means inherit from parent.
+        tool_call_id: optional id from the model's structured tool
+            call. When dispatching as a result of a streamed
+            `tool_calls` block, the chat passes the model's id here
+            so the resulting card can be linked back to the assistant
+            turn that originated it. When omitted (legacy bash-block
+            detection, /bash slash command, tests), a synthetic id
+            is generated so the field is always populated.
 
     Returns:
         A new ToolCard with output, stderr, exit_code, duration_ms,
-        and truncated set. The verb/params/risk fields come from the
-        parser (with risk possibly escalated by the classifier).
+        truncated, and tool_call_id set. The verb/params/risk fields
+        come from the parser (with risk possibly escalated by the
+        classifier).
     """
     # 1. Parse the command structurally
     parsed = parse_bash(command)
@@ -237,8 +256,12 @@ def dispatch_bash(
     # 3. Take the more cautious of the two risks
     final_risk: Risk = max_risk(parsed.risk, classifier_risk)
 
-    # Build a card with the elevated risk in case we refuse
-    gated_card = replace(parsed, risk=final_risk)
+    # Resolve the tool call id once so refusal cards and execution
+    # cards both carry the same value.
+    resolved_call_id = tool_call_id or _new_tool_call_id()
+
+    # Build a card with the elevated risk + call id in case we refuse
+    gated_card = replace(parsed, risk=final_risk, tool_call_id=resolved_call_id)
 
     # 4a. Refuse dangerous commands unless explicitly allowed
     if final_risk == "dangerous" and not allow_dangerous:

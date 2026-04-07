@@ -45,6 +45,7 @@ communicate via a thread-safe queue.
 
 from __future__ import annotations
 
+import json
 import os
 import random
 import time
@@ -371,6 +372,69 @@ MAX_AGENT_TURNS = 25
 # that takes a partial-arg string and returns a list of full matches.
 # Static commands use the static_args() helper. Dynamic commands
 # (e.g. file paths) supply a custom callable.
+
+
+# OpenAI-style tool schema for the bash tool. Sent as the `tools`
+# parameter in stream_chat() requests so Qwen 3.5's chat template
+# fires its `if tools` branch — that branch injects the canonical
+# "use <tool_call>" instructions into the system message and puts
+# the model in its trained tool-calling mode. The schema is plain
+# JSON so it round-trips cleanly through the chat completions API.
+_BASH_TOOL_SCHEMA: dict = {
+    "type": "function",
+    "function": {
+        "name": "bash",
+        "description": (
+            "Execute a shell command (or multi-line script / heredoc) "
+            "in the user's working directory and return its stdout, "
+            "stderr, and exit code. Successful commands may produce "
+            "no stdout — that is normal for writes, redirects, mkdir, "
+            "touch, chmod, and most mutating commands."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": (
+                        "The bash command to execute. Pipes, "
+                        "redirects, substitutions, heredocs, and "
+                        "multi-step scripts all work because the "
+                        "harness runs the string with shell=True."
+                    ),
+                },
+            },
+            "required": ["command"],
+        },
+    },
+}
+
+
+def _assistant_with_tool_calls(content: str, cards: list[ToolCard]) -> dict:
+    """Build the assistant-message dict for an assistant turn that
+    issued one or more tool calls.
+
+    Each card becomes one entry in the `tool_calls` list with its
+    `tool_call_id` as the call id, `bash` as the function name, and
+    the raw command serialized as a JSON `{"command": ...}` string
+    in `arguments`. This matches the OpenAI tool-call shape that
+    Qwen's chat template renders into native `<tool_call>` blocks.
+    """
+    return {
+        "role": "assistant",
+        "content": content or "",
+        "tool_calls": [
+            {
+                "id": card.tool_call_id,
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "arguments": json.dumps({"command": card.raw_command}),
+                },
+            }
+            for card in cards
+        ],
+    }
 
 
 def _tool_card_content_for_api(card: ToolCard) -> str:
@@ -2565,104 +2629,215 @@ class SuccessorChat(App):
         # stale profile referencing a future tool doesn't crash us.
         enabled_tools = filter_known(self.profile.tools or ())
 
-        # Build the system prompt for THIS turn. When tools are enabled,
-        # append the "## Available Tools" section so the model knows
-        # what it can call. The base profile system_prompt is unchanged
-        # — we only ADD the tools listing on top.
+        # Build the system prompt for THIS turn. When `tools=` is sent
+        # to the model, Qwen's chat template auto-injects its OWN
+        # canonical "use <tool_call> blocks" instructions into the
+        # system message — that's the format the model is trained on.
+        # We intentionally do NOT inject the legacy BASH_DOC fenced-
+        # bash guidance in that case because two conflicting sets of
+        # instructions confuse the model into emitting half-formed
+        # raw text instead of structured calls.
+        #
+        # We DO append two short sections for bash:
+        #   1. cwd hint — the chat template doesn't know about our
+        #      workspace pinning, so the model has to be told
+        #      explicitly. Without this, files land in the wrong
+        #      place or the model uses bare relative paths the user
+        #      didn't intend.
+        #   2. multi-step guidance — Qwen 3.5's reasoning chains
+        #      occasionally get stuck retrying the same successful
+        #      tool call when the task involves multiple steps and
+        #      tool results come back empty. The fix is one explicit
+        #      sentence: read your previous tool results before
+        #      deciding what to do next. This is the model behavior
+        #      analog of free-code's "If the user denies a tool you
+        #      call, do not re-attempt the exact same tool call"
+        #      guidance — same shape, different trigger.
         sys_prompt = self.system_prompt
-        if enabled_tools:
-            tools_section = build_system_prompt_tools_section(list(enabled_tools))
-            if tools_section:
-                sys_prompt = f"{sys_prompt}\n\n{tools_section}"
-            # If bash is enabled, ALWAYS tell the model the truth
-            # about where its commands run. Profile override first,
-            # process cwd otherwise — never let the model guess.
-            if "bash" in enabled_tools:
-                bash_cfg = resolve_bash_config(self.profile)
-                effective_cwd = bash_cfg.working_directory or os.getcwd()
-                sys_prompt = (
-                    f"{sys_prompt}\n\n"
-                    f"## Bash working directory\n\n"
-                    f"Every bash command you emit runs with "
-                    f"`cwd={effective_cwd}`. Relative paths resolve "
-                    f"from there. If the user asks for a file "
-                    f"somewhere specific (like `~/Desktop/foo.html`), "
-                    f"use the absolute path — do not assume your cwd "
-                    f"is what the user had in mind."
-                )
+        if enabled_tools and "bash" in enabled_tools:
+            bash_cfg = resolve_bash_config(self.profile)
+            effective_cwd = bash_cfg.working_directory or os.getcwd()
+            sys_prompt = (
+                f"{sys_prompt}\n\n"
+                f"## Bash working directory\n\n"
+                f"Every bash command you run executes with "
+                f"`cwd={effective_cwd}`. Relative paths resolve from "
+                f"there. If the user asks for a file in a specific "
+                f"location (like `~/Desktop/foo.html`), use the "
+                f"absolute path — do not assume your cwd is what the "
+                f"user had in mind.\n\n"
+                f"## Working with tool results\n\n"
+                f"Before making each tool call, scan the conversation "
+                f"history above and check what you have ALREADY done. "
+                f"A tool result with no stdout means the command "
+                f"succeeded — that is normal for writes, redirects, "
+                f"`mkdir`, `touch`, `chmod`, and most mutating "
+                f"commands. NEVER re-issue a tool call that already "
+                f"appears earlier in the conversation; instead, take "
+                f"the next step toward the user's goal, or respond "
+                f"with plain text if you are done. Plain text "
+                f"(no tool call) is how you finish the task and "
+                f"return control to the user."
+            )
 
-        # Build the conversation history for the model. Walk in API
-        # order (summary at the START — chronologically correct) and
-        # skip synthetic non-summary, non-tool-card messages (greetings,
-        # error notes). The summary AND tool card messages ARE included
-        # because they carry context the model needs:
-        #   - summary: older conversation content
-        #   - tool cards: previous bash outputs the model already saw
-        #
-        # Tool cards become `role: "tool"` messages — Qwen 3.5's chat
-        # template renders those as `<tool_response>` blocks, which is
-        # the format the model was trained on. Using role=user with a
-        # custom XML wrapper looked like random user text to the model
-        # and caused it to loop on commands with no stdout. role=tool
-        # is the structural fix: empty content + role=tool is read as
-        # "command succeeded with no output", which matches what writes
-        # and redirects actually produce.
-        #
-        # Same-role merging is still applied for plain user/assistant
-        # turns to keep the alternation strict and avoid HTTP 400 from
-        # the chat template, but tool messages are emitted standalone.
+        # Build the conversation history for the model in NATIVE Qwen
+        # tool-call shape. Each pass through the message list pairs an
+        # assistant message with any immediately-following tool cards
+        # and emits them as ONE assistant message with `tool_calls`
+        # populated, followed by `role: "tool"` messages linked via
+        # `tool_call_id`. Qwen's chat template renders this as
+        # `<tool_call>` and `<tool_response>` blocks — the format the
+        # model was trained on. Using fenced bash text in the
+        # assistant content (the previous approach) caused the model
+        # to loop on heredocs because text-format bash blocks are
+        # ambiguous between "I'm running this" and "I'm citing this
+        # for documentation".
+        api_messages = self._build_api_messages_native(sys_prompt)
+
+        # Build the OpenAI-style tools schema when bash is enabled.
+        # The chat template's `if tools` branch fires and injects the
+        # canonical "use <tool_call>" instructions into the system
+        # message, putting the model in its trained tool-calling mode.
+        # Only pass tools= when non-None so older client implementations
+        # (test mocks, providers without tool support) keep working.
+        if "bash" in enabled_tools:
+            self._stream = self.client.stream_chat(
+                messages=api_messages,
+                tools=[_BASH_TOOL_SCHEMA],
+            )
+        else:
+            self._stream = self.client.stream_chat(messages=api_messages)
+        self._stream_content = []
+        self._stream_reasoning_chars = 0
+        # The bash detector stays active as a LEGACY fallback for
+        # streams where the model emits raw fenced bash blocks instead
+        # of structured tool_calls. With `tools` set, the model should
+        # almost always use the structured channel — but we keep the
+        # detector wired so a model that goes off-format still works.
+        if "bash" in enabled_tools:
+            self._stream_bash_detector = BashStreamDetector()
+        else:
+            self._stream_bash_detector = None
+
+    def _build_api_messages_native(self, sys_prompt: str) -> list[dict]:
+        """Build the api_messages list in native Qwen tool-call shape.
+
+        Walks `_api_ordered_messages` and groups each assistant message
+        with the tool cards that immediately follow it. The group
+        becomes:
+
+            {"role": "assistant", "content": <prose>, "tool_calls": [
+                {"id", "type": "function",
+                 "function": {"name": "bash", "arguments": '{"command": ...}'}},
+                ...
+            ]}
+            {"role": "tool", "tool_call_id": <id>, "content": <stdout>}
+            {"role": "tool", "tool_call_id": <id>, "content": <stdout>}
+
+        Tool cards without a preceding assistant (e.g., the /bash
+        slash command echoes a card directly) get a synthesized
+        empty-content assistant turn so the tool message has a tool
+        call to link back to.
+
+        Summary messages from compaction are still emitted as user
+        messages with the standard `[summary of earlier conversation
+        …]` prefix.
+        """
         api_messages: list[dict] = [{"role": "system", "content": sys_prompt}]
+        ordered = self._api_ordered_messages()
 
-        def _append_text(role: str, content: str) -> None:
-            """Append with same-role merge. If the last non-system
-            entry has the same role, extend its content with a blank
-            line separator; otherwise start a new entry. Used for
-            user and assistant turns; tool messages bypass this and
-            go straight onto the list.
+        def _append_text_merging(role: str, content: str) -> None:
+            """Append with same-role merge for plain text turns. Tool
+            and tool_call-bearing messages bypass this and go straight
+            onto the list.
             """
             if not content:
                 return
-            if len(api_messages) > 1 and api_messages[-1].get("role") == role:
+            if (
+                len(api_messages) > 1
+                and api_messages[-1].get("role") == role
+                and "tool_calls" not in api_messages[-1]
+            ):
                 api_messages[-1]["content"] = (
                     api_messages[-1]["content"].rstrip() + "\n\n" + content
                 )
                 return
             api_messages.append({"role": role, "content": content})
 
-        for m in self._api_ordered_messages():
+        i = 0
+        n = len(ordered)
+        while i < n:
+            m = ordered[i]
+
             if m.is_summary:
-                _append_text(
+                _append_text_merging(
                     "user",
                     "[summary of earlier conversation, provided by the "
                     "harness — treat as authoritative context, not a "
                     "user turn]\n\n" + m.raw_text,
                 )
+                i += 1
                 continue
-            if m.tool_card is not None:
-                # Native role=tool message — chat template wraps the
-                # content in `<tool_response>` tags. Empty content is
-                # the canonical "succeeded silently" signal.
-                api_messages.append({
-                    "role": "tool",
-                    "content": _tool_card_content_for_api(m.tool_card),
-                })
-                continue
-            if m.synthetic:
-                continue
-            api_role = "user" if m.role == "user" else "assistant"
-            _append_text(api_role, m.raw_text)
 
-        self._stream = self.client.stream_chat(messages=api_messages)
-        self._stream_content = []
-        self._stream_reasoning_chars = 0
-        # Initialize the bash detector for this stream — only when bash
-        # is enabled in the active profile. The detector consumes
-        # ContentChunk text and queues completed fenced bash blocks
-        # for execution after StreamEnded.
-        if "bash" in enabled_tools:
-            self._stream_bash_detector = BashStreamDetector()
-        else:
-            self._stream_bash_detector = None
+            # Plain user message
+            if m.role == "user" and m.tool_card is None:
+                if m.synthetic:
+                    i += 1
+                    continue
+                _append_text_merging("user", m.raw_text)
+                i += 1
+                continue
+
+            # Assistant message → look ahead for following tool cards
+            if m.role == "successor" and m.tool_card is None:
+                if m.synthetic:
+                    i += 1
+                    continue
+                tool_cards: list[ToolCard] = []
+                j = i + 1
+                while j < n and ordered[j].tool_card is not None:
+                    tool_cards.append(ordered[j].tool_card)
+                    j += 1
+
+                if tool_cards:
+                    api_messages.append(_assistant_with_tool_calls(
+                        m.raw_text or "", tool_cards,
+                    ))
+                    for card in tool_cards:
+                        api_messages.append({
+                            "role": "tool",
+                            "tool_call_id": card.tool_call_id,
+                            "content": _tool_card_content_for_api(card),
+                        })
+                else:
+                    _append_text_merging("assistant", m.raw_text)
+                i = j
+                continue
+
+            # Tool card with no preceding assistant in this batch
+            # (e.g., /bash slash command). Synthesize an empty-content
+            # assistant turn carrying the tool call so the tool result
+            # has something to link to.
+            if m.tool_card is not None:
+                tool_cards = [m.tool_card]
+                j = i + 1
+                while j < n and ordered[j].tool_card is not None:
+                    tool_cards.append(ordered[j].tool_card)
+                    j += 1
+                api_messages.append(_assistant_with_tool_calls("", tool_cards))
+                for card in tool_cards:
+                    api_messages.append({
+                        "role": "tool",
+                        "tool_call_id": card.tool_call_id,
+                        "content": _tool_card_content_for_api(card),
+                    })
+                i = j
+                continue
+
+            # Anything else (synthetic placeholders, etc.) — skip
+            i += 1
+
+        return api_messages
 
     # ─── Agent loop adapter (for /budget /burn /compact) ───
     #
@@ -3227,41 +3402,58 @@ class SuccessorChat(App):
                 if self._stream_bash_detector is not None:
                     self._stream_bash_detector.feed(ev.text)
             elif isinstance(ev, StreamEnded):
-                # Two text streams to capture: the FULL stream content
-                # (raw, includes any fenced bash blocks the model
-                # emitted) is what the model needs to see in its own
-                # API history. The DISPLAY text is the bash-elided
-                # variant from the detector — that's what the chat
-                # paints, so the user doesn't see a duplicate of the
-                # bash command above the tool card it produced.
+                # The model can produce tool calls in two channels:
                 #
-                # Critical: never strip bash blocks from the API path.
-                # If the model can't see what it ran, it re-runs the
-                # same command on the next turn — the loop never
-                # converges. Free-code's BashTool.tsx maintains the
-                # same separation: tool calls live in the assistant
-                # message structure, results in a separate user
-                # message, and the model reads both.
+                #   1. NATIVE  — `delta.tool_calls` chunks accumulated
+                #      by the provider into `ev.tool_calls`. This is
+                #      the format Qwen 3.5 was trained on, fired when
+                #      we send the `tools` parameter.
+                #
+                #   2. LEGACY — fenced ```bash blocks parsed by the
+                #      `BashStreamDetector` from `ContentChunk` text.
+                #      Kept as a fallback for streams where the model
+                #      goes off-format.
+                #
+                # We process BOTH and merge the results. Native takes
+                # precedence visually because the cards land with the
+                # exact tool_call_id the model used, which keeps the
+                # next turn's history coherent.
                 raw_content = "".join(self._stream_content).strip()
                 if self._stream_bash_detector is not None:
                     self._stream_bash_detector.flush()
                     display_content = self._stream_bash_detector.cleaned_text().strip()
-                    all_blocks = self._stream_bash_detector.completed()
+                    legacy_blocks = self._stream_bash_detector.completed()
                     self._stream_bash_detector = None
                 else:
                     display_content = raw_content
-                    all_blocks = []
-                # Commit the assistant body if there's real raw text.
-                # If both raw and display are empty (reasoning-only
-                # turn that produced nothing), commit an honest marker
-                # so the user knows the model didn't say anything.
+                    legacy_blocks = []
+                native_calls = list(getattr(ev, "tool_calls", ()) or ())
+
+                # Commit an assistant message for this stream UNCONDITIONALLY
+                # when there's prose text OR when there are tool calls
+                # of any kind. The empty-content variant acts as a TURN
+                # BOUNDARY MARKER so the api_messages builder knows
+                # where one assistant turn ends and the next begins.
+                # Without it, multiple tool cards from separate turns
+                # get bundled into a single assistant call in the next
+                # api_messages payload, and the model reads "I made N
+                # parallel calls in one turn" and loops re-running them.
                 if raw_content:
                     self.messages.append(_Message(
                         "successor",
                         raw_content,
                         display_text=display_content,
                     ))
-                elif not all_blocks:
+                elif legacy_blocks or native_calls:
+                    # Empty-display assistant marker — display_text=""
+                    # so the renderer skips it; raw_text="" so the
+                    # api builder still recognizes the role boundary.
+                    self.messages.append(_Message(
+                        "successor",
+                        "",
+                        display_text="",
+                    ))
+                else:
                     self.messages.append(_Message(
                         "successor",
                         "(no answer — model produced only reasoning)",
@@ -3270,25 +3462,27 @@ class SuccessorChat(App):
                 self._stream = None
                 self._stream_content = []
                 self._stream_reasoning_chars = 0
-                # Tool cards appear AFTER the assistant message in the
-                # chat — visually: assistant text, then tool cards
-                # stacked below as separate _Message instances. If any
-                # card ran successfully (not all refused), continue
-                # the agent loop: the model gets another turn with the
-                # tool output fed back as context and produces real
-                # commentary describing what just happened.
+
+                # Dispatch native tool calls first (they carry the
+                # model-provided ids), then any legacy bash blocks the
+                # detector caught from raw text.
                 #
                 # The `_agent_turn > 0` guard is important: tests drive
                 # `_pump_stream` directly with a pre-installed fake
                 # stream WITHOUT going through `_submit`, so they never
                 # increment the counter. Only user-initiated submissions
                 # trigger continuation; synthetic test streams don't.
-                if all_blocks:
-                    any_ran = self._dispatch_streamed_bash_blocks(all_blocks)
-                    if any_ran and self._agent_turn > 0:
-                        self._begin_agent_turn()
-                        return
-                # No tool blocks OR nothing successfully ran — turn
+                any_ran = False
+                if native_calls:
+                    any_ran |= self._dispatch_native_tool_calls(native_calls)
+                if legacy_blocks:
+                    any_ran |= self._dispatch_streamed_bash_blocks(legacy_blocks)
+
+                if any_ran and self._agent_turn > 0:
+                    self._begin_agent_turn()
+                    return
+
+                # No tool calls OR nothing successfully ran — turn
                 # ends here. Reset the agent-turn counter so the next
                 # user submission starts fresh.
                 self._agent_turn = 0
@@ -3351,6 +3545,84 @@ class SuccessorChat(App):
             except RefusedCommand as exc:
                 # Show the refused (preview) card so the user sees
                 # what was blocked and why
+                self.messages.append(_Message(
+                    "tool", "", tool_card=exc.card,
+                ))
+                hint = self._refusal_hint(exc, bash_cfg)
+                self.messages.append(_Message(
+                    "successor",
+                    f"refused: {exc.reason}. {hint}",
+                    synthetic=True,
+                ))
+                continue
+            except Exception as exc:
+                self.messages.append(_Message(
+                    "successor",
+                    f"bash dispatch failed for {command!r}: {exc}",
+                    synthetic=True,
+                ))
+                continue
+            self.messages.append(_Message(
+                "tool", "", tool_card=card,
+            ))
+            any_ran = True
+        return any_ran
+
+    def _dispatch_native_tool_calls(self, tool_calls: list[dict]) -> bool:
+        """Execute each native tool call from the model's structured
+        `delta.tool_calls` stream and append the resulting tool cards.
+
+        Each tool_call dict has shape `{"id", "name", "arguments",
+        "raw_arguments"}` where `arguments` is the parsed JSON object
+        and `id` is the model-provided call id we propagate into the
+        ToolCard so api_messages can link the tool result back to the
+        assistant turn.
+
+        Only `name == "bash"` is recognized in v0; unknown function
+        names append a synthetic error message and don't run anything.
+        Refusal/error semantics mirror `_dispatch_streamed_bash_blocks`.
+        Returns True if any call ran (regardless of exit code).
+        """
+        if not tool_calls:
+            return False
+        bash_cfg = resolve_bash_config(self.profile)
+        any_ran = False
+        for tc in tool_calls:
+            name = tc.get("name") or ""
+            args = tc.get("arguments") or {}
+            call_id = tc.get("id") or ""
+
+            if name != "bash":
+                self.messages.append(_Message(
+                    "successor",
+                    f"unknown tool {name!r} — only `bash` is supported",
+                    synthetic=True,
+                ))
+                continue
+
+            command = args.get("command") if isinstance(args, dict) else ""
+            if not command:
+                # Malformed tool call — treat as a no-op error so the
+                # next turn can recover. The card has no preceding
+                # bash to run, so we don't enter dispatch_bash.
+                self.messages.append(_Message(
+                    "successor",
+                    f"bash tool call had no command (raw_arguments={tc.get('raw_arguments','')!r})",
+                    synthetic=True,
+                ))
+                continue
+
+            try:
+                card = dispatch_bash(
+                    command,
+                    allow_dangerous=bash_cfg.allow_dangerous,
+                    allow_mutating=bash_cfg.allow_mutating,
+                    timeout=bash_cfg.timeout_s,
+                    max_output_bytes=bash_cfg.max_output_bytes,
+                    cwd=bash_cfg.working_directory,
+                    tool_call_id=call_id,
+                )
+            except RefusedCommand as exc:
                 self.messages.append(_Message(
                     "tool", "", tool_card=exc.card,
                 ))

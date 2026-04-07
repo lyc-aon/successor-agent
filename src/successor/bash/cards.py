@@ -90,6 +90,14 @@ class ToolCard:
     exit_code: int | None = None
     duration_ms: float | None = None
     truncated: bool = False
+    # Tool-call linkage for native Qwen tool calling. When the model
+    # emits a structured tool_call, the harness propagates the model's
+    # call id here so the corresponding `role: "tool"` message can
+    # link back via `tool_call_id`. For cards created from legacy
+    # paths (the /bash slash command, the bash-block detector
+    # fallback, tests), the executor synthesizes a uuid so the
+    # field is always populated and api_messages stays consistent.
+    tool_call_id: str = ""
 
     @property
     def executed(self) -> bool:
