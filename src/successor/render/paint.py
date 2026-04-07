@@ -7,6 +7,8 @@ Public surface:
     paint_lines(grid, lines, x, y, *, style)
     paint_centered(grid, lines, *, style, y_offset=0)
     fill_region(grid, x, y, w, h, *, style, char=' ')
+    paint_box(grid, x, y, w, h, *, style, fill_style, fill_char, chars)
+    paint_horizontal_divider(grid, x, y, w, *, style, char, t)
 """
 
 from __future__ import annotations
@@ -205,3 +207,45 @@ def paint_box(
                 grid.set(ry, x, Cell(vbar, style))
             if 0 <= x + w - 1 < grid.cols:
                 grid.set(ry, x + w - 1, Cell(vbar, style))
+
+
+def paint_horizontal_divider(
+    grid: Grid,
+    x: int,
+    y: int,
+    w: int,
+    *,
+    style: Style = DEFAULT_STYLE,
+    char: str = "━",
+    t: float = 1.0,
+) -> int:
+    """Draw a horizontal line `w` cells wide, optionally as a partial
+    materialize at progress `t` (0.0 = nothing, 1.0 = full line).
+
+    The materialize draws from the CENTER outward in both directions
+    so the line "grows" symmetrically — gives a sense of inevitability
+    rather than a directional sweep. Returns the number of cells
+    actually drawn this frame.
+
+    Used by the compaction boundary animation but also handy for any
+    "divider draws in" effect (search results separator, section
+    breaks, etc.).
+    """
+    if w <= 0 or y < 0 or y >= grid.rows:
+        return 0
+    t = max(0.0, min(1.0, t))
+    if t == 0.0:
+        return 0
+    # Half-width on each side of center, rounded
+    half = w // 2
+    visible_half = int(round(half * t))
+    center = x + half
+    left_start = max(x, center - visible_half)
+    right_end = min(x + w, center + visible_half + (1 if w % 2 else 0))
+
+    drawn = 0
+    for cx in range(left_start, right_end):
+        if 0 <= cx < grid.cols:
+            grid.set(y, cx, Cell(char, style))
+            drawn += 1
+    return drawn

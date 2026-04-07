@@ -93,7 +93,7 @@ src/successor/recorder.py    record/replay session traces
 src/successor/cli.py         argparse subcommand dispatch (`successor` binary)
 src/successor/__main__.py    `python -m successor` entry point
 
-tests/                   pytest suite — 602 tests, hermetic via SUCCESSOR_CONFIG_DIR
+tests/                   pytest suite — 630 tests, hermetic via SUCCESSOR_CONFIG_DIR
   conftest.py            temp_config_dir fixture
   test_loader.py         Registry pattern tests
   test_theme.py          color parsing, variant resolver, blend math, registry
@@ -115,6 +115,8 @@ tests/                   pytest suite — 602 tests, hermetic via SUCCESSOR_CONF
   test_agent_compact.py  full compaction with mocked stream + PTL retry
   test_bash_stream.py    fenced ```bash detection across stream fragments
   test_agent_loop.py     QueryLoop state machine + transitions + error paths
+  test_compaction_animation.py  5-phase animation state machine + paint_horizontal_divider primitive
+  test_context_fill_bar.py      static footer threshold transitions + badges + window scaling
 
 scripts/                 manual-run scripts (no auto-execution)
   swap_to_a3b.sh         swap qwopus → A3B at 50K context for compaction stress test
@@ -596,11 +598,115 @@ shared lib references. Both wait for `/health` before returning.
 Documented Nyx-impact in the script header — qwopus is what the
 Nyx Telegram Relay uses, so swapping to A3B takes it down briefly.
 
-**What's NOT yet built**: visible compaction animation in the chat
-(events fire but the smooth fade-in to the boundary divider needs
-the renderer wiring), title-bar context-fill pill (data is there,
-needs the visual), concurrent tool execution, streaming tool
-execution (tools start AFTER stream commits in v0), framework docs.
+## Compaction animation (added 2026-04-07, phase 5.2)
+
+The compaction event becomes the harness's signature visual moment.
+Five phases over ~5 seconds, every cell driven by `(state, time) →
+cells` math through the existing renderer primitives. Lives entirely
+in `chat.py` + a new `paint_horizontal_divider` primitive.
+
+**The arc**:
+
+```
+T=0     compaction completes → snapshot pre-compact messages
+T=0-300   ANTICIPATION  base_color tinted toward accent_warm by 35%
+                        (the rounds-to-be-summarized get a subtle glow)
+T=300-1500 FOLD         per-row fade_alpha lerps fg → bg via
+                        ease_out_cubic. Old rounds dissolve into the
+                        void; chars stay but their fg matches bg
+T=1500-1900 MATERIALIZE the boundary divider draws in from CENTER
+                        outward via paint_horizontal_divider(t).
+                        Pill snaps in at t > 0.6 with its own
+                        alpha fade-in over the remaining 0.6 → 1.0
+T=1900-2500 REVEAL      summary message fades in from theme.bg →
+                        theme.fg_dim via lerp_rgb on its rows
+T=2500-5000 SETTLED     boundary stays as a permanent visible artifact
+                        with a subtle 0.4 Hz pulse via lerp_rgb
+                        toward theme.accent — "living artifact"
+```
+
+**Why this is unique to Successor**: Other agent harnesses can't
+animate compaction because once they `print()` a message line, it
+belongs to the terminal and they can't reach it. Our diff layer owns
+every cell, so we can fade them out, draw a divider through them,
+and replace them with a summary artifact — frame by frame,
+deterministic, no flicker.
+
+**Architecture**:
+
+- **`render/paint.py:paint_horizontal_divider`** — generic primitive
+  that draws a horizontal line growing from the center outward at
+  progress `t` (0 → 1). Returns cells drawn. Useful for any "divider
+  draws in" effect, not just compaction.
+
+- **`_Message`** gained `is_boundary` / `is_summary` / `boundary_meta`
+  fields. Boundary messages route to `_paint_compaction_boundary`
+  (the divider painter), summary messages get a dim/italic treatment
+  with a `▼` prefix. Both flags force `synthetic=True` (never sent
+  to the model).
+
+- **`_RenderedRow`** gained `is_boundary`, `boundary_meta`,
+  `materialize_t`, `is_summary`, `fade_alpha`. The `_faded` inner
+  helper in `_paint_chat_row` applies fade_alpha uniformly to
+  leading text, blockquote borders, and body spans.
+
+- **`_CompactionAnimation` dataclass** with the 5-phase state machine.
+  `phase_at(now)` returns `(phase_name, t)` where t is 0-1 progress
+  within the current phase. Phase names: `pending → anticipation →
+  fold → materialize → reveal → toast → done`.
+
+- **`_handle_compact_cmd`** snapshots `self.messages` BEFORE running
+  compaction, swaps to the post-compact state immediately after,
+  arms the animation. The painter then drives the visible transition.
+  No "compacting…" status message — the animation IS the status.
+
+- **`_build_message_lines`** routes through `_build_rows_from_messages`
+  with animation-phase-aware overrides:
+  - `fold` / `anticipation` → paint the snapshot
+  - `materialize` / `reveal` / `toast` → paint `self.messages` with
+    overrides on boundary materialize_t and summary fade_alpha
+  - `done` → clear `_compaction_anim`, paint normally
+
+- **`_paint_chat_area`** has a scroll override during materialize/
+  reveal/toast that finds the boundary row and pins `effective_scroll`
+  so the divider sits in the upper-sixth of the visible chat region.
+  This guarantees materialization is IN VIEW regardless of where
+  the user was scrolled when /compact fired.
+
+- **`_paint_compaction_boundary`** is the divider painter:
+  ```
+  ━━━━━━━━━━━━━━━━━━━━━━━━━┤ ▼ 6 rounds · 3k → 2k · 37% saved ▼ ├━━━━━━━━━━━━━━━━━━━━━━━━━
+  ```
+  Risk-tinted via `theme.accent_warm`. Subtle 0.4 Hz pulse via
+  `lerp_rgb` toward `theme.accent` after materialize completes.
+
+**The fade-reads-as-bg trick**: chars stay in the grid during fold,
+but their fg color converges to `theme.bg` exactly. Verified by
+reading actual cell colors at multiple elapsed times — at t=1.5s
+(end of fold) the channel distance from bg is 0, meaning the chars
+are perfectly invisible. No char deletion, just color transitions.
+
+**Live E2E results** (qwopus, /burn 3000 → /compact, 10.8s wall time):
+all 7 captured animation phases render correctly. The boundary
+materializes from center outward, the pill snaps in, the summary
+appears below, the kept rounds stay anchored at the bottom.
+
+**Context fill bar overhaul** (also phase 5.2): the static-footer
+ctx bar now reads its count from the agent's TokenCounter (when
+cached) and its window from `profile.provider.context_window`
+(replacing the hardcoded `CONTEXT_MAX`). Adds threshold-state
+classification mirroring `agent.budget.ContextBudget`:
+- `◉ COMPACT` badge at autocompact threshold
+- `⚠ BLOCKED` badge at blocking threshold
+- Continuous 0.5 Hz pulse via `math.sin` blending the bar color
+  toward fg when in autocompact/blocking state
+
+**What's NOT yet built**: visible toast notification that slides
+in after the boundary settles (currently the boundary's continuous
+pulse handles the "look at me" signal), wiring `/profile compact-test`
+end-to-end for the burn rig to run from inside the chat without
+scripts, concurrent tool execution, streaming tool execution (tools
+start AFTER stream commits in v0), framework docs.
 
 See [`docs/changelog.md`](docs/changelog.md) for the per-phase notes.
 

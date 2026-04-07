@@ -1550,6 +1550,245 @@ so the unit suite stays hermetic:
 
 ---
 
+## Phase 5.2 — visible compaction animation (2026-04-07)
+
+The compaction event becomes the harness's signature visual moment.
+Five phases, total ~5 seconds, every cell driven by `(state, time) →
+cells` math through the existing renderer primitives. No external
+animation library — pure `lerp_rgb` + `ease_out_cubic` + a new
+`paint_horizontal_divider` that grows from the center outward.
+
+### The animation arc
+
+```
+T=0     compaction completes → snapshot pre-compact messages
+T=0-300   ANTICIPATION  base_color tinted toward accent_warm 35%
+                        the rounds-to-be-summarized get a subtle glow
+T=300-1500 FOLD         per-row fade_alpha lerps fg → bg via
+                        ease_out_cubic — old rounds dissolve into
+                        the void; chars stay but their fg matches bg
+T=1500-1900 MATERIALIZE the boundary divider draws in from CENTER
+                        outward via paint_horizontal_divider(t).
+                        Pill snaps in at t > 0.6 with its own alpha
+                        fade-in over the remaining 0.6 → 1.0 range
+T=1900-2500 REVEAL      summary message fades in from theme.bg →
+                        theme.fg_dim via lerp_rgb on its rows
+T=2500-5000 TOAST       (toast wiring deferred — handled by the
+                        boundary's continuous pulse instead)
+T=5000+   SETTLED       boundary stays as a permanent visible artifact
+                        with a subtle 0.4 Hz pulse via lerp_rgb
+                        toward theme.accent — "living artifact"
+```
+
+### What landed
+
+- **`src/successor/render/paint.py`** gained
+  `paint_horizontal_divider(grid, x, y, w, *, style, char, t)` —
+  pure paint function that draws a horizontal line growing from
+  the center outward at progress `t` (0 → 1). Returns the number
+  of cells actually drawn this frame. Generic primitive — useful
+  for any "divider draws in" effect (search results separator,
+  section breaks, etc.), not just compaction.
+
+- **`src/successor/chat.py:_Message`** gained explicit boundary/
+  summary fields:
+  - `is_boundary: bool` — marks a message as a compaction boundary
+    divider. The chat painter routes is_boundary rows through
+    `_paint_compaction_boundary` instead of the normal markdown flow.
+  - `is_summary: bool` — marks a message as a compaction summary,
+    rendered with a dim/italic treatment + `▼` prefix glyph.
+  - `boundary_meta` — attached `BoundaryMarker` so the painter can
+    read the pre/post token counts and reduction_pct for the pill.
+  Both flags force `synthetic=True` (boundary/summary messages
+  are never sent to the model in the conversation history).
+
+- **`_RenderedRow`** gained:
+  - `is_boundary: bool` — fast-path flag for the painter
+  - `boundary_meta: object | None` — the BoundaryMarker
+  - `materialize_t: float = 1.0` — partial draw-in progress for
+    the materialize phase
+  - `is_summary: bool` — fast-path flag
+  - `fade_alpha: float = 1.0` — per-row alpha used by the fold
+    phase to dim cells uniformly toward `theme.bg`. The `_faded`
+    inner helper in `_paint_chat_row` applies this to leading,
+    blockquote borders, and body spans uniformly.
+
+- **`_CompactionAnimation` dataclass** with the 5-phase state
+  machine:
+  - `started_at: float` — wall-clock anchor
+  - `pre_compact_snapshot: list[_Message]` — captured BEFORE the
+    chat swaps to the post-compact state, used by the FOLD phase
+    as the visual content to fade out
+  - `boundary` + `summary_text` + `reason`
+  - `phase_at(now)` returns `(phase_name, t)` where t is 0-1
+    progress within the current phase. Phase names: `pending →
+    anticipation → fold → materialize → reveal → toast → done`
+
+- **`_handle_compact_cmd`** now snapshots `self.messages` BEFORE
+  running compaction, swaps to the post-compact state immediately
+  after, and arms the animation. The painter then drives the
+  visible transition. No "compacting…" status message — the
+  animation IS the status indicator.
+
+- **`_build_message_lines`** routes through a new
+  `_build_rows_from_messages` helper that accepts:
+  - `global_fade_alpha` (used by FOLD phase)
+  - `anticipation_glow` (used by ANTICIPATION phase to tint
+    toward accent_warm)
+  - `anim_phase` + `anim_t` for the boundary row's `materialize_t`
+    and the summary row's `fade_alpha` during MATERIALIZE / REVEAL
+  Animation routing in `_build_message_lines`:
+  - `fold` / `anticipation` → paint the snapshot
+  - `materialize` / `reveal` / `toast` → paint `self.messages`
+    with overrides
+  - `done` → clear `_compaction_anim`, paint normally
+
+- **`_paint_chat_area`** gained a scroll override during the
+  materialize/reveal/toast phases: it finds the boundary row in
+  the committed list and pins `effective_scroll` so the divider
+  sits in the upper-sixth of the visible chat region. This
+  guarantees the materialization is IN VIEW regardless of where
+  the user was scrolled when /compact fired.
+
+- **`_paint_compaction_boundary`** is the painter for boundary
+  rows. Layout:
+  ```
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┤ ▼ 6 rounds · 3k → 2k · 37% saved ▼ ├━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ```
+  Risk-tinted via `theme.accent_warm`. Subtle 0.4 Hz pulse via
+  `lerp_rgb` toward `theme.accent` after the materialize completes
+  — gives the divider a "living artifact" feel rather than dead
+  chrome. Pill text format: ` ▼ N rounds · X → Y · Z% saved ▼ `.
+
+- **`_format_boundary_pill`** is a small static helper that
+  formats a `BoundaryMarker` as the pill label. Duck-typed read
+  of the marker so the painter doesn't import from `agent.log`.
+
+### Context fill bar overhaul
+
+The existing static-footer ctx bar gained:
+- **Token count from the agent's TokenCounter** when cached
+  (accurate via `/tokenize`). Falls back to the legacy char/4
+  heuristic when no counter is set.
+- **Window from the profile's `provider.context_window`**
+  instead of the hardcoded `CONTEXT_MAX = 262144`. The
+  compact-test profile at 50K window now gets the correctly-
+  scaled bar.
+- **Threshold-state classification** mirrors `agent.budget.ContextBudget`:
+  ok → warning → autocompact → blocking
+- **State badges** when over threshold:
+  - `◉ COMPACT` at autocompact
+  - `⚠ BLOCKED` at blocking
+- **Continuous pulse** via `math.sin(self.elapsed * 0.5 * 2 * pi)`
+  blending the bar color toward fg when state is autocompact or
+  blocking — gentle "compact me!" signal that doesn't shout.
+- **Right-label color** shifts with state too: `theme.fg` (ok) →
+  `theme.accent_warm` (warning) → pulsing accent_warm/accent_warn
+  (autocompact) → `theme.accent_warn` (blocking).
+
+### Tests (28 new — 630 total, all passing)
+
+- **`test_compaction_animation.py`** (19 tests):
+  - phase machine: anticipation/fold/materialize/reveal/done/pending
+  - `paint_horizontal_divider` primitive: full width, half progress,
+    zero progress, grows-from-center, clamps t>1, skips offscreen
+  - chat-level orchestration: anticipation paints snapshot,
+    fold dims cells (verified by reading actual fg color
+    distance from bg), materialize shows growing divider count,
+    reveal shows pill, done clears state, post-anim boundary
+    persists
+  - boundary message in chat → divider renders correctly
+
+- **`test_context_fill_bar.py`** (9 tests):
+  - threshold transitions (ok / autocompact / blocked badges)
+  - window from profile.provider.context_window
+  - token counter usage when cached, fallback when not
+  - bar grows with fill
+  - percentage label + model name presence
+
+### The "fade reads as bg" insight
+
+The fold animation works because the chars STAY in the grid but
+their fg color matches `theme.bg` exactly when fade_alpha → 0.
+Verified empirically by reading cell colors at multiple elapsed
+times:
+
+```
+t=0.00s  anticipation start  fg=#616368  Δfrom_bg=298  (fully visible)
+t=0.40s  fold 8%             fg=#4b4d51  Δfrom_bg=231  (starting to dim)
+t=0.60s  fold 25%            fg=#292a2c  Δfrom_bg=125  (clearly dimmer)
+t=0.90s  fold 50%            fg=#0c0d0e  Δfrom_bg=37   (mostly faded)
+t=1.20s  fold 75%            fg=#010202  Δfrom_bg=3    (essentially invisible)
+t=1.50s  fold→materialize    fg=#000101  Δfrom_bg=0    (gone — exact bg)
+```
+
+The `ease_out_cubic` curve hits cleanly: anticipation holds visible,
+fold ramps fast at first then settles to invisible. **No char
+deletions** — just color transitions. This is exactly the kind of
+in-place mutation no Rich/prompt_toolkit-based harness can do
+because once they `print()` a line, they can't reach it.
+
+### Live E2E results
+
+Driven against qwopus on /burn 3000 → /compact:
+- Compaction wall time: 10.8s (qwopus 27B summarizing 12 rounds)
+- Reduction: 6 → 6 rounds, 3,092 → 1,978 tokens (37% saved)
+- All 7 captured animation phases render correctly:
+  - anticipation: snapshot visible
+  - fold_mid: snapshot visible (colors faded, plaintext can't
+    show)
+  - materialize_start: divider at ~36% extent, no pill yet
+  - materialize_mid: divider at ~75%, pill snaps in
+  - materialize_full: divider at full extent
+  - reveal_mid: summary fading in (alpha invisible in plaintext)
+  - settled: boundary persists with subtle pulse
+
+The summary content was excellent — Qwen captured every burn
+topic accurately:
+
+> "I noted that the user asked about the rendering layers in
+> successor, and I explained that there are five layers: measure,
+> cells, paint, composite, and diff. The user then asked about
+> how the bash subsystem parses commands… [continues with all
+> 6 burn topics]"
+
+### Renderer features the animation exercises
+
+| concepts.md cat | feature | where |
+|---|---|---|
+| Cat 1 (mutable cells) | every cell of every pre-compact message gets re-styled toward bg over the fold phase | `_faded` helper in `_paint_chat_row` |
+| Cat 2 (smooth animation) | every animation effect is a per-frame function of `(state, time) → cells` via lerp_rgb + ease_out_cubic | phase-based `_build_rows_from_messages` overrides |
+| Cat 3 (multi-region UI) | divider, summary, kept rounds, footer pill all paint in the same frame as a coherent composition | `_paint_chat_area` + `_paint_static_footer` |
+| Cat 5 (deterministic) | every animation frame is `(elapsed, viewport, state) → grid`, fully snapshot-testable | `test_compaction_animation.py` reads cell colors directly |
+| Cat 7 (programmatic UI) | the chat scroll is pinned to the boundary during materialize/reveal regardless of where the user was | `_paint_chat_area`'s scroll_override |
+| Cat 8 (smooth transitions) | the divider materializes from the center outward via `ease_out_cubic`, the pill alpha-fades on top | `paint_horizontal_divider(t)` + pill_alpha calc |
+
+### Notes
+
+- **The visible compaction event is unique to Successor.** Other
+  agent harnesses can't do this because once they `print()` a
+  message line, it belongs to the terminal and they can't reach
+  it. Our diff layer owns every cell, so we can fade them out,
+  draw a divider through them, and replace them with a summary
+  artifact — frame by frame, deterministic, no flicker.
+- **The animation duration (5s total)** is long enough to feel
+  like a narrative but short enough to never feel slow. The
+  individual phases are tuned to give the user time to read each
+  visual change before the next happens.
+- **The scroll override** was the trickiest detail. Before adding
+  it, the boundary materialized off-screen above the chat region
+  because the kept rounds dominated the visible area. The fix:
+  during materialize/reveal/toast, find the boundary row in the
+  committed list and compute a temporary scroll_offset that
+  positions it in the upper-sixth of the visible chat region.
+  After the animation completes, normal scrolling resumes.
+- **The continuous pulse on the settled boundary** is a 0.4 Hz
+  sine wave applied to the divider color. Subtle but present —
+  signals that the boundary is alive context, not a piece of
+  static chrome you can ignore.
+
+---
+
 ## What's next
 
 - **Skill invocation strategy** — pick always-on vs on-demand after
@@ -1585,10 +1824,11 @@ so the unit suite stays hermetic:
 | 4.9 (delete profile from config menu) | 17 | 356 |
 | 5.0 (bash-masking subsystem: parser + risk + exec + render + chat) | 131 | 487 |
 | 5.1 (agent loop + compaction + burn rig) | 115 | 602 |
+| 5.2 (visible compaction animation + context fill bar) | 28 | 630 |
 
 (Counts above are approximate by phase boundary; actual test
 collection may include additional small additions in subsequent
 commits.)
 
-Final: **602 tests, all passing, hermetic via `SUCCESSOR_CONFIG_DIR`,
+Final: **630 tests, all passing, hermetic via `SUCCESSOR_CONFIG_DIR`,
 no fake mocks, no `.skip()` or `.todo()`.**

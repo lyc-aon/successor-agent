@@ -115,7 +115,7 @@ from .render.markdown import (
     LaidOutSpan,
     PreparedMarkdown,
 )
-from .render.paint import fill_region, paint_box, paint_text
+from .render.paint import fill_region, paint_box, paint_horizontal_divider, paint_text
 from .render.terminal import Terminal
 from .render.text import PreparedText, ease_out_cubic, hard_wrap, lerp_rgb
 from .render.theme import (
@@ -601,9 +601,21 @@ class _Message:
     this and renders the message via paint_tool_card instead of the
     normal span flow. Tool messages are NEVER sent to the model in
     the conversation history (synthetic-by-construction).
+
+    is_boundary, when True, marks this as a compaction boundary. The
+    chat painter renders a horizontal divider with a central pill
+    showing the compaction stats from boundary_meta. Always synthetic.
+
+    is_summary, when True, marks this as a compaction summary message.
+    The chat painter applies a special "summary" treatment (dim, italic,
+    indented) so it visually distinguishes from a real assistant turn.
+    Always synthetic.
     """
 
-    __slots__ = ("role", "raw_text", "body", "created_at", "synthetic", "tool_card")
+    __slots__ = (
+        "role", "raw_text", "body", "created_at", "synthetic", "tool_card",
+        "is_boundary", "is_summary", "boundary_meta",
+    )
 
     def __init__(
         self,
@@ -612,16 +624,25 @@ class _Message:
         *,
         synthetic: bool = False,
         tool_card: ToolCard | None = None,
+        is_boundary: bool = False,
+        is_summary: bool = False,
+        boundary_meta: object | None = None,
     ) -> None:
         self.role = role  # "user" | "successor" | "tool"
         self.raw_text = content
         self.body = PreparedMarkdown(content)
         self.created_at = time.monotonic()
         # Synthetic messages (the greeting, error notices) are NOT sent
-        # to the model in the conversation history. Tool cards are
-        # forced synthetic since they aren't part of the model's voice.
-        self.synthetic = synthetic or (tool_card is not None)
+        # to the model in the conversation history. Tool cards, boundary
+        # markers, and summary messages are all forced synthetic.
+        self.synthetic = synthetic or (tool_card is not None) or is_boundary or is_summary
         self.tool_card = tool_card
+        self.is_boundary = is_boundary
+        self.is_summary = is_summary
+        # The BoundaryMarker dataclass from agent.log, holding pre/post
+        # token counts + reduction_pct + summary_text. The painter reads
+        # these to render the divider's central pill.
+        self.boundary_meta = boundary_meta
 
 
 # Prefix strings shown at the start of every message.
@@ -651,6 +672,16 @@ class _RenderedRow:
                     span flow. Used by tool card messages where the
                     paint_tool_card primitive has already produced
                     fully-styled cells in a sub-grid.
+    is_boundary:    when True, this row is a compaction boundary marker.
+                    boundary_meta carries the BoundaryMarker for the
+                    painter to render the divider + central pill.
+    boundary_meta:  attached BoundaryMarker (from agent.log) used by the
+                    painter when is_boundary is True.
+    is_summary:     when True, this row is part of a compaction summary
+                    message — painted with a dim/italic treatment.
+    fade_alpha:     0.0 - 1.0 — when < 1.0, the painter blends the row's
+                    text color toward bg by (1 - fade_alpha). Used by the
+                    fold animation phase. Default 1.0 = fully visible.
     """
     leading_text: str = ""
     leading_attrs: int = 0
@@ -660,6 +691,91 @@ class _RenderedRow:
     line_tag: str = ""
     body_indent: int = 0
     prepainted_cells: tuple = ()  # tuple of Cell — pre-rendered tool card row
+    is_boundary: bool = False
+    boundary_meta: object | None = None
+    materialize_t: float = 1.0  # for boundary rows: 0-1 draw-in progress
+    is_summary: bool = False
+    fade_alpha: float = 1.0
+
+
+# ─── Compaction animation ───
+#
+# When /compact fires (or autocompact triggers in the future), the chat
+# enters a 5-phase animation sequence that's the harness's signature
+# visual moment. The phases overlap to create a seamless narrative arc:
+#
+#   T=0       compaction starts → snapshot pre-compact messages
+#   T=0-300   ANTICIPATION : pre-compact rounds get a subtle glow
+#   T=300-1500 FOLD        : pre-compact rounds fade fg → bg via lerp_rgb,
+#                            ease_out_cubic on alpha
+#   T=1500-1900 MATERIALIZE : the boundary divider draws in left-to-right
+#   T=1900-2500 REVEAL      : the summary message fades in from bg → fg_dim
+#   T=2500-5000 SETTLED     : toast slides in showing stats, fades out at end
+#
+# Total: 5 seconds. Long enough for the user to see the narrative,
+# short enough to never feel slow.
+
+_COMPACT_ANTICIPATION_S = 0.30
+_COMPACT_FOLD_S = 1.20         # 300ms → 1500ms
+_COMPACT_MATERIALIZE_S = 0.40  # 1500ms → 1900ms
+_COMPACT_REVEAL_S = 0.60       # 1900ms → 2500ms
+_COMPACT_TOAST_HOLD_S = 2.50   # 2500ms → 5000ms
+
+
+@dataclass(slots=True)
+class _CompactionAnimation:
+    """In-progress compaction animation state.
+
+    Held by the chat between /compact (or autocompact firing) and the
+    end of the toast hold. The painter checks this on every frame and
+    overlays the appropriate per-phase treatment on the chat region.
+
+    Fields:
+      started_at:        time.monotonic() when compaction completed
+      pre_compact_snapshot: the chat's _Message list captured BEFORE
+                         the compaction was applied, used by the FOLD
+                         phase as the visual content to fade out
+      pre_compact_count: how many pre-compact messages will fade —
+                         used to scope the fade-out to just the rounds
+                         that were summarized (not preserved verbatim)
+      boundary:          the BoundaryMarker from the agent.compact()
+                         call, used by the materialize / settle phases
+                         and the toast
+      summary_text:      the summary content the model produced
+      reason:            "manual" | "auto" | "reactive" — for the toast label
+    """
+    started_at: float
+    pre_compact_snapshot: list  # list of _Message — captured before swap
+    pre_compact_count: int
+    boundary: object  # BoundaryMarker (forward reference to avoid circular import)
+    summary_text: str
+    reason: str = "manual"
+
+    def phase_at(self, now: float) -> tuple[str, float]:
+        """Return (phase_name, t) where t is 0-1 progress within the phase."""
+        elapsed = now - self.started_at
+        if elapsed < 0:
+            return ("pending", 0.0)
+        anticipation_end = _COMPACT_ANTICIPATION_S
+        fold_end = anticipation_end + _COMPACT_FOLD_S
+        materialize_end = fold_end + _COMPACT_MATERIALIZE_S
+        reveal_end = materialize_end + _COMPACT_REVEAL_S
+        settled_end = reveal_end + _COMPACT_TOAST_HOLD_S
+
+        if elapsed < anticipation_end:
+            return ("anticipation", elapsed / _COMPACT_ANTICIPATION_S)
+        if elapsed < fold_end:
+            return ("fold", (elapsed - anticipation_end) / _COMPACT_FOLD_S)
+        if elapsed < materialize_end:
+            return ("materialize", (elapsed - fold_end) / _COMPACT_MATERIALIZE_S)
+        if elapsed < reveal_end:
+            return ("reveal", (elapsed - materialize_end) / _COMPACT_REVEAL_S)
+        if elapsed < settled_end:
+            return ("toast", (elapsed - reveal_end) / _COMPACT_TOAST_HOLD_S)
+        return ("done", 1.0)
+
+    def is_done(self, now: float) -> bool:
+        return self.phase_at(now)[0] == "done"
 
 
 # ─── The chat App ───
@@ -868,6 +984,18 @@ class SuccessorChat(App):
         # checks the flag after run() returns to decide what to do
         # next. None means a normal exit.
         self._pending_action: str | None = None
+
+        # Compaction animation state — None when no animation is in
+        # progress. Set by /compact (and future autocompact) when
+        # compaction completes; the chat painter checks it on every
+        # frame to drive the 5-phase animation. Cleared in on_tick when
+        # the animation reaches "done".
+        self._compaction_anim: _CompactionAnimation | None = None
+
+        # Cached TokenCounter for the agent log adapter — lazy-init
+        # on first /budget or /compact so we don't pay the construction
+        # cost for chats that never use the agent loop.
+        self._cached_token_counter: TokenCounter | None = None
 
     # ─── Input handling ───
 
@@ -2006,25 +2134,27 @@ class SuccessorChat(App):
             ))
         return log
 
-    def _from_agent_log(self, log: MessageLog) -> None:
-        """Replace self.messages from an agent.MessageLog (after compact)."""
+    def _from_agent_log(self, log: MessageLog, *, boundary_meta: object | None = None) -> None:
+        """Replace self.messages from an agent.MessageLog (after compact).
+
+        boundary_meta, when provided, is attached to the boundary marker
+        message so the painter can read the BoundaryMarker stats for the
+        divider's central pill.
+        """
         new_messages: list[_Message] = []
         for m in log.iter_messages():
             if m.is_boundary:
-                # Boundary marker → synthetic system-style message
-                # marked with the role "successor" so the existing
-                # painter renders it; carry the raw text intact.
                 new_messages.append(_Message(
-                    "successor",
-                    f"━━━ {m.content[1:-1]} ━━━",  # strip surrounding [ ]
-                    synthetic=True,
+                    "successor", "",  # content is empty — painter renders the divider
+                    is_boundary=True,
+                    boundary_meta=boundary_meta,
                 ))
                 continue
             if m.is_summary:
                 new_messages.append(_Message(
-                    "successor",
-                    m.content,
-                    synthetic=True,
+                    "successor", m.content,
+                    is_summary=True,
+                    boundary_meta=boundary_meta,
                 ))
                 continue
             if m.tool_card is not None:
@@ -2173,8 +2303,9 @@ class SuccessorChat(App):
 
         Builds an agent.MessageLog from the current chat history,
         runs compact() against the live client, then writes the
-        result back to self.messages. Reports the boundary stats
-        as a synthetic message.
+        result back to self.messages and starts the compaction
+        animation. The animation is the harness's signature visual
+        moment — see `_CompactionAnimation` for the phase sequence.
         """
         counter = self._agent_token_counter()
         log = self._to_agent_log()
@@ -2187,11 +2318,15 @@ class SuccessorChat(App):
             ))
             return
         pre_tokens = counter.count_log(log)
-        self.messages.append(_Message(
-            "successor",
-            f"compacting {log.round_count} rounds ({pre_tokens:,} tokens)…",
-            synthetic=True,
-        ))
+        # NB: we don't append a "compacting…" status message because
+        # the animation IS the status indicator. The pre-compact rounds
+        # visibly fade out during the fold phase.
+
+        # Snapshot the messages BEFORE running compaction so the fold
+        # phase can paint them dimming out.
+        snapshot = list(self.messages)
+        snapshot_count = len(snapshot)
+
         try:
             new_log, boundary = agent_compact(
                 log, self.client,
@@ -2206,15 +2341,21 @@ class SuccessorChat(App):
             ))
             return
 
-        self._from_agent_log(new_log)
-        self.messages.append(_Message(
-            "successor",
-            f"✓ compacted: {boundary.pre_compact_tokens:,} → "
-            f"{boundary.post_compact_tokens:,} tokens "
-            f"({boundary.reduction_pct:.1f}% reduction · "
-            f"{boundary.rounds_summarized} rounds summarized)",
-            synthetic=True,
-        ))
+        # Apply the new log + arm the animation. The painter will
+        # overlay the snapshot during the fold phase, then transition
+        # to the new state for materialize/reveal/toast. The chat
+        # painter detects the active animation and pins the scroll
+        # to keep the boundary visible during materialize/reveal/toast
+        # phases (see _paint_chat_area's animation override).
+        self._from_agent_log(new_log, boundary_meta=boundary)
+        self._compaction_anim = _CompactionAnimation(
+            started_at=time.monotonic(),
+            pre_compact_snapshot=snapshot,
+            pre_compact_count=snapshot_count,
+            boundary=boundary,
+            summary_text=boundary.summary_text,
+            reason="manual",
+        )
         self._scroll_to_bottom()
 
     def _pump_stream(self) -> None:
@@ -2475,8 +2616,43 @@ class SuccessorChat(App):
         if self.scroll_offset == 0:
             self._auto_scroll = True
 
+        # ─── Compaction animation scroll override ───
+        # During the materialize/reveal/toast phases, find the boundary
+        # row in the committed list and pin the scroll so it sits in
+        # the upper third of the visible area. This guarantees the
+        # divider materializes IN VIEW regardless of where the user
+        # was scrolled before /compact fired. Fold/anticipation phases
+        # don't override — the snapshot is being painted then, not the
+        # post-compact state, so the existing scroll is correct.
+        scroll_override: int | None = None
+        if self._compaction_anim is not None:
+            phase, _t = self._compaction_anim.phase_at(time.monotonic())
+            if phase in ("materialize", "reveal", "toast"):
+                boundary_idx = next(
+                    (i for i, r in enumerate(committed) if r.is_boundary),
+                    None,
+                )
+                if boundary_idx is not None:
+                    # We want boundary_idx to be near the top of the
+                    # visible region. Visible region is committed[start:end]
+                    # where end = committed_h - scroll_offset and
+                    # start = end - chat_h. To put boundary_idx at
+                    # position `target_top` from the top of visible:
+                    #   start = boundary_idx - target_top
+                    #   end = start + chat_h
+                    #   scroll_offset = committed_h - end
+                    target_top = max(2, chat_h // 6)  # ~upper sixth
+                    desired_start = max(0, boundary_idx - target_top)
+                    desired_end = desired_start + chat_h
+                    scroll_override = max(0, committed_h - desired_end)
+
+        if scroll_override is not None:
+            effective_scroll = scroll_override
+        else:
+            effective_scroll = self.scroll_offset
+
         # Slice the committed lines for the current scroll position.
-        end = committed_h - self.scroll_offset
+        end = committed_h - effective_scroll
         start = max(0, end - chat_h)
         visible = committed[start:end]
 
@@ -2533,6 +2709,24 @@ class SuccessorChat(App):
                 grid.set(y, cx, cell)
             return
 
+        # ─── Boundary divider row — special path ───
+        # This is the permanent visible artifact of a past compaction.
+        # The painter draws a horizontal line + a central pill showing
+        # the compaction stats. The pill carries the BoundaryMarker info.
+        # row.materialize_t controls the partial draw-in animation
+        # during the compaction MATERIALIZE phase.
+        if row.is_boundary:
+            # Subtle continuous pulse on settled boundaries — gives the
+            # divider a "living artifact" feel rather than dead chrome.
+            pulse_phase = self.elapsed if row.materialize_t >= 1.0 else 0.0
+            self._paint_compaction_boundary(
+                grid, x, y, body_width, theme,
+                boundary=row.boundary_meta,
+                materialize_t=row.materialize_t,
+                pulse_phase=pulse_phase,
+            )
+            return
+
         # ─── Row-level treatments ───
         line_bg = theme.bg
         if row.line_tag in ("code_block", "code_lang"):
@@ -2562,6 +2756,14 @@ class SuccessorChat(App):
             # Will paint a left bar after we've drawn the leading region
             pass
 
+        # Helper: apply per-row fade_alpha to a foreground color so the
+        # compaction fold animation (and any future per-row dim) is
+        # uniform across leading + body. Pulls alpha toward theme.bg.
+        def _faded(fg: int) -> int:
+            if row.fade_alpha >= 1.0:
+                return fg
+            return lerp_rgb(theme.bg, fg, row.fade_alpha)
+
         # ─── Leading text (prefix or continuation indent) ───
         leading_text = row.leading_text
         if leading_text:
@@ -2569,7 +2771,7 @@ class SuccessorChat(App):
                 row.leading_color_kind, row.base_color, theme
             )
             leading_style = Style(
-                fg=leading_color,
+                fg=_faded(leading_color),
                 bg=line_bg,
                 attrs=row.leading_attrs,
             )
@@ -2582,7 +2784,7 @@ class SuccessorChat(App):
         if row.line_tag == "blockquote":
             paint_text(
                 grid, "▎", cx, y,
-                style=Style(fg=theme.accent_warm, bg=line_bg, attrs=ATTR_BOLD),
+                style=Style(fg=_faded(theme.accent_warm), bg=line_bg, attrs=ATTR_BOLD),
             )
             cx += 1
             # Skip an extra space after the bar
@@ -2594,10 +2796,137 @@ class SuccessorChat(App):
         # ─── Body spans ───
         for span in row.body_spans:
             style = self._resolve_span_style(span, row.base_color, line_bg, theme)
+            if row.fade_alpha < 1.0:
+                style = Style(
+                    fg=_faded(style.fg),
+                    bg=style.bg,
+                    attrs=style.attrs,
+                )
             paint_text(grid, span.text, cx, y, style=style)
             cx += sum(1 for _ in span.text)  # rough; assumes width-1 chars
             # NOTE: for full UTF-8 width support we'd use char_width here,
             # but markdown content is overwhelmingly width-1 in practice.
+
+    def _paint_compaction_boundary(
+        self,
+        grid: Grid,
+        x: int,
+        y: int,
+        body_width: int,
+        theme: ThemeVariant,
+        *,
+        boundary: object | None,
+        materialize_t: float = 1.0,
+        pulse_phase: float = 0.0,
+    ) -> None:
+        """Paint a compaction boundary divider with central pill.
+
+        Layout (full materialize):
+
+            ━━━━━━━━━━━━━━━━━━┤ ▼ summary · 165 → 6 rounds · 96.9% saved ▼ ├━━━━━━━━━━━━
+
+        materialize_t controls the partial draw-in (0.0 → 1.0). At t=0
+        nothing is drawn; at t=1 the divider is fully visible. The line
+        materializes from the center outward (gives a sense of inevitability
+        rather than a directional sweep).
+
+        pulse_phase, when > 0, adds a subtle brightness pulse to the
+        pill — used after the animation completes to make the divider
+        a living artifact rather than dead chrome.
+
+        boundary may be None (e.g. before the BoundaryMarker has been
+        attached), in which case we paint just an unlabeled divider.
+        """
+        if body_width < 12:
+            return
+
+        # The pill text — concise but information-dense
+        if boundary is not None:
+            pill_text = self._format_boundary_pill(boundary)
+        else:
+            pill_text = " compaction "
+
+        # Color: accent_warm — warm, attention-getting but not alarming.
+        # Pulse_phase adds a subtle brightness modulation.
+        base_color = theme.accent_warm
+        if pulse_phase > 0:
+            import math
+            pulse = 0.5 + 0.5 * math.sin(pulse_phase * 2 * math.pi * 0.4)
+            base_color = lerp_rgb(theme.accent_warm, theme.accent, pulse * 0.3)
+
+        line_style = Style(fg=base_color, bg=theme.bg, attrs=ATTR_BOLD)
+        pill_style = Style(fg=theme.bg, bg=base_color, attrs=ATTR_BOLD)
+        bracket_style = Style(fg=base_color, bg=theme.bg, attrs=ATTR_BOLD)
+
+        # Step 1: paint the horizontal line via the primitive (handles
+        # the partial materialize from the center outward)
+        paint_horizontal_divider(
+            grid, x, y, body_width,
+            style=line_style,
+            char="━",
+            t=materialize_t,
+        )
+
+        # Step 2: at materialize_t < 0.6 we don't show the pill yet.
+        # The pill appears as the line nears full extent so the user
+        # sees the line draw FIRST and then the metadata snap in.
+        if materialize_t < 0.6 or not pill_text:
+            return
+
+        # Compute pill geometry
+        pill_w = len(pill_text) + 2  # 2 for the bracket characters
+        if pill_w >= body_width - 4:
+            return  # too narrow to show the pill, just leave the line
+        pill_x = x + (body_width - pill_w) // 2
+
+        # Step 3: erase the line under where the pill goes (just the bracket
+        # characters and the pill body), then paint the pill on top.
+        # Bracket characters frame the pill: ┤ ... ├
+        if 0 <= pill_x < grid.cols:
+            grid.set(y, pill_x, Cell("┤", bracket_style))
+        # Pill body — fade in alpha based on materialize_t (0.6 → 1.0)
+        pill_alpha = max(0.0, min(1.0, (materialize_t - 0.6) / 0.4))
+        if pill_alpha < 1.0:
+            faded_bg = lerp_rgb(theme.bg, base_color, pill_alpha)
+            faded_fg = lerp_rgb(theme.bg, theme.bg, 1.0)  # bg → bg = stay bg
+            pill_style = Style(fg=theme.bg if pill_alpha > 0.5 else faded_bg,
+                               bg=faded_bg, attrs=ATTR_BOLD)
+        paint_text(
+            grid, pill_text, pill_x + 1, y,
+            style=pill_style,
+        )
+        right_bracket_x = pill_x + 1 + len(pill_text)
+        if 0 <= right_bracket_x < grid.cols:
+            grid.set(y, right_bracket_x, Cell("├", bracket_style))
+
+    @staticmethod
+    def _format_boundary_pill(boundary: object) -> str:
+        """Format the BoundaryMarker as a one-line pill label.
+
+        Examples:
+          " ▼ 161 rounds · 40k → 1k tokens · 96.9% saved ▼ "
+          " ▼ summary · 12 rounds · 6k → 1k · 80% saved ▼ "
+        """
+        # Duck-typed read of BoundaryMarker — we accept anything with
+        # the right attributes so the painter doesn't need to import
+        # from agent.log
+        try:
+            n_rounds = getattr(boundary, "rounds_summarized", 0)
+            pre = getattr(boundary, "pre_compact_tokens", 0)
+            post = getattr(boundary, "post_compact_tokens", 0)
+            reduction = getattr(boundary, "reduction_pct", 0.0)
+        except Exception:
+            return " ▼ compaction ▼ "
+
+        def _fmt_tokens(n: int) -> str:
+            if n >= 1000:
+                return f"{n / 1000:.0f}k"
+            return str(n)
+
+        return (
+            f" ▼ {n_rounds} rounds · {_fmt_tokens(pre)} → "
+            f"{_fmt_tokens(post)} · {reduction:.0f}% saved ▼ "
+        )
 
     @staticmethod
     def _resolve_leading_color(kind: str, base_color: int, theme: ThemeVariant) -> int:
@@ -2659,18 +2988,76 @@ class SuccessorChat(App):
         When search is active, spans are split at match boundaries and
         the matching cells get a highlight background applied via a
         special tag the painter recognizes.
+
+        When a compaction animation is in progress, this method
+        switches between the snapshot (FOLD phase) and the post-compact
+        message list (MATERIALIZE / REVEAL / TOAST phases), and applies
+        per-row fade_alpha + boundary materialize_t overrides so the
+        painter draws the right frame.
+        """
+        # ─── Compaction animation routing ───
+        if self._compaction_anim is not None:
+            now = time.monotonic()
+            phase, phase_t = self._compaction_anim.phase_at(now)
+            if phase == "done":
+                # Animation finished — clear it and fall through to
+                # normal painting of self.messages
+                self._compaction_anim = None
+            elif phase in ("anticipation", "fold"):
+                # Paint the snapshot. During fold, apply progressive
+                # fade. During anticipation, no fade yet — just give
+                # the rounds a subtle glow via accent_warm tint.
+                if phase == "fold":
+                    fade_alpha = 1.0 - ease_out_cubic(phase_t)
+                else:
+                    fade_alpha = 1.0
+                return self._build_rows_from_messages(
+                    self._compaction_anim.pre_compact_snapshot,
+                    body_width, theme,
+                    global_fade_alpha=fade_alpha,
+                    anticipation_glow=(phase == "anticipation"),
+                )
+            else:
+                # materialize / reveal / toast — paint the post-compact
+                # state but override the boundary row's materialize_t
+                # and the summary row's fade_alpha
+                return self._build_rows_from_messages(
+                    self.messages, body_width, theme,
+                    anim_phase=phase, anim_t=phase_t,
+                )
+
+        return self._build_rows_from_messages(self.messages, body_width, theme)
+
+    def _build_rows_from_messages(
+        self,
+        messages: list,
+        body_width: int,
+        theme: ThemeVariant,
+        *,
+        global_fade_alpha: float = 1.0,
+        anticipation_glow: bool = False,
+        anim_phase: str = "",
+        anim_t: float = 1.0,
+    ) -> list[_RenderedRow]:
+        """The actual row builder. Pulled out of _build_message_lines so
+        the animation routing can pass the snapshot or self.messages
+        with appropriate per-row overrides.
+
+        global_fade_alpha: applied to every emitted row's fade_alpha
+            (used by the FOLD phase)
+        anticipation_glow: when True, base_color shifts toward accent_warm
+            for the soon-to-be-summarized rounds
+        anim_phase: when "materialize" / "reveal", boundary/summary
+            rows get the appropriate animation state
+        anim_t: 0-1 progress within the current phase
         """
         out: list[_RenderedRow] = []
         now = time.monotonic()
-        n = len(self.messages)
+        n = len(messages)
         spacing = self._current_density().message_spacing
-        # Markdown content is laid out into a slightly narrower width
-        # than the body width because the prefix takes the leftmost
-        # _PREFIX_W cells. Continuation lines reserve the same indent
-        # to align with the first line's content column.
         md_width = max(1, body_width - _PREFIX_W)
 
-        for i, msg in enumerate(self.messages):
+        for i, msg in enumerate(messages):
             age = now - msg.created_at
             fade_t = (
                 ease_out_cubic(min(1.0, age / FADE_IN_S))
@@ -2680,18 +3067,73 @@ class SuccessorChat(App):
             base_color = theme.fg if msg.role == "user" else theme.accent
             if msg.synthetic:
                 base_color = theme.fg_dim
+            if anticipation_glow:
+                # Subtle warm tint on every row to "preview" the fold
+                base_color = lerp_rgb(base_color, theme.accent_warm, 0.35)
             if fade_t < 1.0:
                 base_color = lerp_rgb(theme.fg_subtle, base_color, fade_t)
 
+            # ─── Boundary marker message ───
+            # Emit a special row that the painter routes to
+            # _paint_compaction_boundary. During materialize phase the
+            # divider draws in from the center outward; otherwise it's
+            # fully visible.
+            if msg.is_boundary:
+                materialize_t = 1.0
+                if anim_phase == "materialize":
+                    materialize_t = ease_out_cubic(anim_t)
+                elif anim_phase in ("", "reveal", "toast"):
+                    materialize_t = 1.0
+                out.append(_RenderedRow(
+                    is_boundary=True,
+                    boundary_meta=msg.boundary_meta,
+                    materialize_t=materialize_t,
+                    base_color=base_color,
+                    fade_alpha=global_fade_alpha,
+                ))
+                if i < n - 1:
+                    for _ in range(spacing):
+                        out.append(_RenderedRow(base_color=base_color))
+                continue
+
+            # ─── Summary message ───
+            # Treated as a regular message but with a dim/italic style
+            # and a fade-in during the REVEAL phase.
+            if msg.is_summary:
+                summary_alpha = global_fade_alpha
+                if anim_phase == "materialize":
+                    # Not yet visible during materialize
+                    summary_alpha = 0.0
+                elif anim_phase == "reveal":
+                    summary_alpha = ease_out_cubic(anim_t)
+                # Render with dim summary styling
+                prefix = "▼ "  # marker glyph instead of role prefix
+                md_lines = msg.body.lines(md_width)
+                summary_color = lerp_rgb(theme.fg_subtle, theme.fg_dim, 0.6)
+                rendered_rows = self._render_md_lines_with_search(
+                    md_lines, msg.raw_text, [], prefix, summary_color,
+                )
+                # Override fade_alpha + is_summary on each row
+                for r in rendered_rows:
+                    r.is_summary = True
+                    r.fade_alpha = summary_alpha
+                out.extend(rendered_rows)
+                if i < n - 1:
+                    for _ in range(spacing):
+                        out.append(_RenderedRow(base_color=base_color))
+                continue
+
             # ─── Tool card message ───
-            # Pre-paint the card into a sub-grid sized to body_width,
-            # then emit one _RenderedRow per row of the sub-grid carrying
-            # the cells verbatim. This keeps the chat's flat-row scroll
-            # model intact while letting paint_tool_card own the visuals.
             if msg.tool_card is not None:
                 card_rows = self._render_tool_card_rows(
                     msg.tool_card, body_width, theme,
                 )
+                # Apply global_fade_alpha to tool card rows by tinting
+                # their pre-painted cells (a no-op when 1.0)
+                if global_fade_alpha < 1.0:
+                    card_rows = self._fade_prepainted_rows(
+                        card_rows, theme.bg, 1.0 - global_fade_alpha,
+                    )
                 out.extend(card_rows)
                 if i < n - 1:
                     for _ in range(spacing):
@@ -2701,9 +3143,6 @@ class SuccessorChat(App):
             prefix = _USER_PREFIX if msg.role == "user" else _SUCCESSOR_PREFIX
             md_lines = msg.body.lines(md_width)
 
-            # Search highlighting: collect the spans of this message's
-            # raw_text that match the current query. We pass them to
-            # the row builder so the painter can render highlight cells.
             msg_matches: list[tuple[int, int, int]] = []
             if self._search_active and self._search_matches:
                 for mi_focused, start, end in self._search_matches:
@@ -2716,27 +3155,73 @@ class SuccessorChat(App):
                         msg_matches.append((start, end, 2 if is_focused else 1))
 
             if not md_lines:
-                # Empty body — still emit a single row showing the prefix.
                 out.append(
                     _RenderedRow(
                         leading_text=prefix,
                         leading_attrs=ATTR_BOLD,
                         leading_color_kind="accent",
                         base_color=base_color,
+                        fade_alpha=global_fade_alpha,
                     )
                 )
             else:
-                # Build the message rows. If search is active, apply
-                # highlight tags to spans whose chars fall in match ranges.
                 rendered_rows = self._render_md_lines_with_search(
                     md_lines, msg.raw_text, msg_matches, prefix, base_color,
                 )
+                # Apply the global fade to every row produced by this msg
+                if global_fade_alpha < 1.0:
+                    for r in rendered_rows:
+                        r.fade_alpha = global_fade_alpha
                 out.extend(rendered_rows)
 
-            # Density-driven spacer rows between messages.
             if i < n - 1:
                 for _ in range(spacing):
                     out.append(_RenderedRow(base_color=base_color))
+        return out
+
+    @staticmethod
+    def _fade_prepainted_rows(
+        rows: list[_RenderedRow],
+        bg_color: int,
+        toward_bg_amount: float,
+    ) -> list[_RenderedRow]:
+        """Tint all cells in pre-painted rows toward bg_color by the
+        given amount (0.0 = unchanged, 1.0 = fully bg). Used to fade
+        out tool cards during the compaction fold animation.
+        """
+        if toward_bg_amount <= 0:
+            return rows
+        out: list[_RenderedRow] = []
+        for r in rows:
+            if not r.prepainted_cells:
+                out.append(r)
+                continue
+            new_cells = tuple(
+                Cell(
+                    c.char,
+                    Style(
+                        fg=lerp_rgb(c.style.fg, bg_color, toward_bg_amount),
+                        bg=lerp_rgb(c.style.bg, bg_color, toward_bg_amount),
+                        attrs=c.style.attrs,
+                    ),
+                    wide_tail=c.wide_tail,
+                )
+                for c in r.prepainted_cells
+            )
+            out.append(_RenderedRow(
+                leading_text=r.leading_text,
+                leading_attrs=r.leading_attrs,
+                leading_color_kind=r.leading_color_kind,
+                body_spans=r.body_spans,
+                base_color=r.base_color,
+                line_tag=r.line_tag,
+                body_indent=r.body_indent,
+                prepainted_cells=new_cells,
+                is_boundary=r.is_boundary,
+                boundary_meta=r.boundary_meta,
+                is_summary=r.is_summary,
+                fade_alpha=r.fade_alpha,
+            ))
         return out
 
     def _render_tool_card_rows(
@@ -3394,24 +3879,95 @@ class SuccessorChat(App):
         width: int,
         theme: ThemeVariant,
     ) -> None:
-        # Compute approximate token usage from the latest known usage
-        # info, falling back to a char-count estimate.
-        if self._last_usage and "total_tokens" in self._last_usage:
+        """Paint the bottom-row context fill bar.
+
+        Token count comes from the agent's TokenCounter (driven by
+        llama.cpp's /tokenize endpoint when available, char heuristic
+        fallback). The window size comes from the profile's
+        provider.context_window — this lets the compact-test profile
+        at 50K context show a properly-scaled fill bar instead of
+        the qwopus 262K-token denominator.
+
+        Threshold state drives:
+          - bar fill color (accent → accent_warm → accent_warn)
+          - a subtle continuous pulse when past the autocompact
+            threshold (signals "compact me!")
+          - an explicit state badge ("AUTOCOMPACT" / "BLOCKING") on
+            the right side when over threshold
+        """
+        # Compute token usage via the agent counter (accurate) when
+        # we have a counter cached, otherwise fall back to the legacy
+        # char-count heuristic so the footer keeps working before any
+        # /budget call materializes the counter.
+        if self._cached_token_counter is not None:
+            try:
+                log = self._to_agent_log()
+                used = self._cached_token_counter.count_log(log)
+                if self._stream is not None:
+                    # Add the streaming-but-not-committed content
+                    used += self._cached_token_counter.count(
+                        "".join(self._stream_content)
+                    )
+            except Exception:
+                used = self._fallback_token_count()
+        elif self._last_usage and "total_tokens" in self._last_usage:
             used = int(self._last_usage["total_tokens"])
         else:
-            used = sum(len(m.raw_text) for m in self.messages) // 4
-            if self._stream is not None:
-                used += (self._stream_reasoning_chars + len("".join(self._stream_content))) // 4
-        used = max(0, min(used, CONTEXT_MAX))
-        pct = used / CONTEXT_MAX
+            used = self._fallback_token_count()
+
+        # Window: profile-driven, falls back to CONTEXT_MAX
+        provider_cfg = self.profile.provider or {}
+        window = int(provider_cfg.get("context_window", CONTEXT_MAX))
+        used = max(0, min(used, window))
+        pct = used / window if window > 0 else 0.0
 
         # Footer background
         fill_region(grid, 0, y, width, 1, style=Style(bg=theme.bg_footer))
 
-        label = f" ctx {used:>6}/{CONTEXT_MAX} "
-        right_label = f" {pct * 100:5.2f}%  {self.client.model[:20]} "
+        # ─── Threshold state classification ───
+        # Mirrors agent.budget.ContextBudget but inlined here so the
+        # footer doesn't need an active BudgetTracker.
+        autocompact_at = window - max(4_000, window // 32)
+        warning_at = window - max(8_000, window // 16)
+        blocking_at = window - max(1_000, window // 128)
+        if used >= blocking_at:
+            state = "blocking"
+        elif used >= autocompact_at:
+            state = "autocompact"
+        elif used >= warning_at:
+            state = "warning"
+        else:
+            state = "ok"
+
+        # ─── Continuous pulse when past autocompact ───
+        # Slow sine wave (0.5 Hz) blends the bar color toward fg so
+        # the bar gently breathes — signals "compact me!" without
+        # being jarring.
+        pulse = 0.0
+        if state in ("autocompact", "blocking"):
+            import math
+            pulse = 0.5 + 0.5 * math.sin(self.elapsed * 0.5 * 2 * math.pi)
+
+        label = f" ctx {used:>7}/{window:>7} "
+        # State badge: empty in ok/warning, explicit in autocompact/blocking
+        state_badge = ""
+        if state == "autocompact":
+            state_badge = " ◉ COMPACT "
+        elif state == "blocking":
+            state_badge = " ⚠ BLOCKED "
+        right_label = f"{state_badge} {pct * 100:5.2f}%  {self.client.model[:20]} "
         label_style = Style(fg=theme.fg_dim, bg=theme.bg_footer, attrs=ATTR_DIM)
-        right_style = Style(fg=theme.fg, bg=theme.bg_footer, attrs=ATTR_BOLD)
+
+        # Right-label color depends on state — warm in autocompact, warn in blocking
+        if state == "blocking":
+            right_fg = theme.accent_warn
+        elif state == "autocompact":
+            right_fg = lerp_rgb(theme.accent_warm, theme.accent_warn, pulse)
+        elif state == "warning":
+            right_fg = theme.accent_warm
+        else:
+            right_fg = theme.fg
+        right_style = Style(fg=right_fg, bg=theme.bg_footer, attrs=ATTR_BOLD)
 
         paint_text(grid, label, 0, y, style=label_style)
 
@@ -3422,11 +3978,15 @@ class SuccessorChat(App):
         if bar_w > 0:
             filled = int(round(bar_w * pct))
             empty = bar_w - filled
-            if pct < 0.6:
-                bar_fg = lerp_rgb(theme.accent, theme.accent_warm, pct / 0.6)
-            elif pct < 0.85:
-                bar_fg = lerp_rgb(theme.accent_warm, theme.accent_warn, (pct - 0.6) / 0.25)
-            else:
+            # Bar color thresholds (smoother than the old hardcoded 0.6/0.85)
+            if state == "ok":
+                bar_fg = lerp_rgb(theme.accent, theme.accent_warm, pct / 0.85)
+            elif state == "warning":
+                bar_fg = theme.accent_warm
+            elif state == "autocompact":
+                # Pulse between accent_warm and accent_warn
+                bar_fg = lerp_rgb(theme.accent_warm, theme.accent_warn, pulse)
+            else:  # blocking
                 bar_fg = theme.accent_warn
             if filled > 0:
                 paint_text(
@@ -3446,6 +4006,14 @@ class SuccessorChat(App):
                 )
 
         paint_text(grid, right_label, right_x, y, style=right_style)
+
+    def _fallback_token_count(self) -> int:
+        """Char-count heuristic for the footer when no agent counter is
+        available. Includes the streaming buffer if a stream is active."""
+        used = sum(len(m.raw_text) for m in self.messages) // 4
+        if self._stream is not None:
+            used += (self._stream_reasoning_chars + len("".join(self._stream_content))) // 4
+        return used
 
     # ─── Input area ───
 

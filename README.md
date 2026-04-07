@@ -16,7 +16,12 @@ context budget tracker + circuit breaker + recompact chain detection,
 microcompact + autocompact via LLM summarization with PTL retry,
 streaming bash block detector, `/budget` `/burn` `/compact` slash
 commands, burn-tested live against A3B at 50K context with 96.9%
-reduction and 100% semantic recall). 602 tests passing, all hermetic.
+reduction and 100% semantic recall) + Phase 5.2 visible compaction
+animation (5-phase narrative arc — anticipation → fold → materialize →
+reveal → settled, ~5 seconds total, every cell driven by lerp_rgb +
+ease_out_cubic, boundary divider grows from center outward, summary
+fades in below, context fill bar with threshold badges and pulse).
+630 tests passing, all hermetic.
 
 ## Layout
 
@@ -66,7 +71,7 @@ scripts/                 # Manual swap scripts (qwopus ↔ A3B for compaction st
     tools/read_file.py
     intros/successor/{00..10}-*.txt
 docs/                    # rendering-superpowers, concepts, plan, llamacpp, changelog
-tests/                   # 602 tests, hermetic via SUCCESSOR_CONFIG_DIR
+tests/                   # 630 tests, hermetic via SUCCESSOR_CONFIG_DIR
 ```
 
 ## Install
