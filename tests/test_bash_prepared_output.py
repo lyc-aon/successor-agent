@@ -185,19 +185,52 @@ def test_prepared_tool_output_stderr_becomes_warn_lines() -> None:
 # ─── No line cap: every wrapped output row is returned ───
 
 
-def test_layout_returns_all_lines_with_no_cap() -> None:
-    """PreparedToolOutput.layout no longer truncates at a line count.
-    The 8 KiB byte cap at the exec layer is the only ceiling, and the
-    full (post-byte-cap) output is wrapped and returned.
+def test_layout_returns_all_lines_when_max_lines_none() -> None:
+    """PreparedToolOutput.layout returns every wrapped line when
+    called without a max_lines cap. Tests and callers that want
+    the raw body still use this form.
     """
     card = dispatch_bash("for i in $(seq 1 20); do echo line$i; done")
     prep = PreparedToolOutput(card)
-    lines = prep.layout(80)
-    # Every one of the 20 lines is present — no truncation marker
+    lines = prep.layout(80)  # max_lines=None by default
     assert not any(l.kind == "truncated" for l in lines)
     plain_concat = "\n".join(l.plain for l in lines)
     for i in range(1, 21):
         assert f"line{i}" in plain_concat
+
+
+def test_layout_max_lines_caps_head_and_adds_overflow_marker() -> None:
+    """When max_lines is set, long outputs clip to a head window
+    plus a single "⋯ +N more lines ⋯" marker row. The clipped
+    result has EXACTLY max_lines rows — (max_lines - 1) content
+    rows + 1 marker row.
+    """
+    card = dispatch_bash("for i in $(seq 1 20); do echo line$i; done")
+    prep = PreparedToolOutput(card)
+    clipped = prep.layout(80, max_lines=5)
+    assert len(clipped) == 5
+    # First 4 rows are the head — line1..line4
+    for i in range(1, 5):
+        assert f"line{i}" in clipped[i - 1].plain
+    # line5..line20 are NOT in the head
+    head_text = "\n".join(l.plain for l in clipped[:-1])
+    for i in range(5, 21):
+        assert f"line{i}" not in head_text
+    # Last row is the overflow marker mentioning 16 hidden lines
+    assert clipped[-1].kind == "truncated"
+    assert "16 more" in clipped[-1].plain
+
+
+def test_layout_max_lines_unchanged_when_output_fits() -> None:
+    """Short outputs that fit inside max_lines pass through
+    unchanged — no marker added, no content clipped.
+    """
+    card = dispatch_bash("echo one; echo two; echo three")
+    prep = PreparedToolOutput(card)
+    clipped = prep.layout(80, max_lines=5)
+    # 3 lines of output, no marker
+    assert len(clipped) == 3
+    assert not any(l.kind == "truncated" for l in clipped)
 
 
 # ─── Search integration: grep output renders with highlights ───

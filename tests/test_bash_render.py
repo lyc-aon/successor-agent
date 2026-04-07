@@ -204,21 +204,26 @@ def test_no_output_placeholder() -> None:
     assert "(no output)" in plain
 
 
-def test_long_output_renders_every_line_without_cap() -> None:
-    """The renderer no longer caps output at a fixed line count. A
-    30-line command paints all 30 lines into a tall-enough grid, and
-    no "more lines" truncation marker appears. The only real ceiling
-    is MAX_OUTPUT_BYTES at the exec layer, which the status footer
-    flags via the `truncated` glyph when it trips.
+def test_long_output_shows_head_window_plus_overflow_marker() -> None:
+    """The settled card caps its visible output region at
+    DEFAULT_MAX_OUTPUT_LINES rows, showing a head window plus a
+    "⋯ +N more lines ⋯" marker. This is a DISPLAY-only cap —
+    the full output is still passed to the model via the tool
+    result message. Keeps reads/grep/ls from flooding the chat.
     """
+    from successor.bash import DEFAULT_MAX_OUTPUT_LINES
     card = dispatch_bash("for i in $(seq 1 30); do echo line$i; done")
-    g = Grid(60, 80)  # plenty of rows for 30 output lines + box + status
+    g = Grid(20, 80)
     paint_tool_card(g, card, x=0, y=0, w=80, theme=THEME)
     plain = render_grid_to_plain(g)
-    assert "more line" not in plain
-    # Every numbered line is visible
-    for i in range(1, 31):
-        assert f"line{i}" in plain, f"line{i} missing from paint"
+    # Overflow marker is present
+    assert "more line" in plain
+    # Head lines are visible (first few)
+    assert "line1" in plain
+    # Tail lines are NOT visible
+    assert "line30" not in plain
+    # Neither is something well past the cap
+    assert "line25" not in plain
 
 
 # ─── measure_tool_card_height ───

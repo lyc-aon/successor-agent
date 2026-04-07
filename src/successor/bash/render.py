@@ -72,6 +72,19 @@ _RUNNER_PULSE_HZ: float = 0.6
 
 # ─── Constants ───
 
+# Visible row cap for the settled card's output region. Long outputs
+# (cat of a big file, ls -la /usr/lib, grep with many matches) get
+# clipped to this many rows with a "⋯ +N more lines ⋯" overflow
+# marker, keeping the card compact in the chat flow. The full
+# untrimmed output (up to the exec-layer byte cap) is still passed
+# to the model via _tool_card_content_for_api so the next turn can
+# reason about the whole result — this cap is a DISPLAY concern only.
+#
+# 5 rows matches the streaming preview's scrolling window size, so
+# the visual weight of a settled card and the in-flight preview
+# stay consistent.
+DEFAULT_MAX_OUTPUT_LINES = 5
+
 # How wide the param label column gets, max. Wider labels wrap to
 # next line for readability.
 MAX_LABEL_WIDTH = 16
@@ -237,12 +250,15 @@ def measure_tool_card_height(
     if not show_output or not card.executed:
         return box_h
 
-    # Output rows + status line. No display-side line cap — the exec
-    # layer's MAX_OUTPUT_BYTES is the real ceiling, and the card's
-    # `truncated` flag + status footer handle the overflow case.
+    # Output rows + status line. The display-side line cap keeps
+    # long cat/ls/grep output from dominating the chat flow — the
+    # card shows a compact head window with an overflow marker
+    # while the full content still reaches the model via the tool
+    # result message. Exec-layer byte cap (MAX_OUTPUT_BYTES) is a
+    # separate hard ceiling at a lower level.
     prep = prepared if prepared is not None else PreparedToolOutput(card)
     avail = max(20, width - OUTPUT_INDENT - 2)
-    out_lines = prep.layout(avail)
+    out_lines = prep.layout(avail, max_lines=DEFAULT_MAX_OUTPUT_LINES)
     return box_h + len(out_lines) + 1  # +1 for the trailing status line
 
 
@@ -385,7 +401,7 @@ def paint_tool_card(
 
     prep = prepared if prepared is not None else PreparedToolOutput(card)
     avail = max(20, w - OUTPUT_INDENT - 2)
-    out_lines = prep.layout(avail)
+    out_lines = prep.layout(avail, max_lines=DEFAULT_MAX_OUTPUT_LINES)
     out_x = x + OUTPUT_INDENT
     for line in out_lines:
         if cur_y >= grid.rows:

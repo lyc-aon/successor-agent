@@ -61,6 +61,7 @@ from .verbclass import (  # noqa: E402
 
 # Renderer (kept inside the bash package so paint.py stays generic)
 from .render import (  # noqa: E402
+    DEFAULT_MAX_OUTPUT_LINES,
     measure_tool_card_height,
     paint_tool_card,
 )
@@ -68,6 +69,7 @@ from .render import (  # noqa: E402
 
 __all__ = [
     "BashConfig",
+    "DEFAULT_MAX_OUTPUT_LINES",
     "DEFAULT_TIMEOUT_S",
     "DangerousCommandRefused",
     "MAX_OUTPUT_BYTES",

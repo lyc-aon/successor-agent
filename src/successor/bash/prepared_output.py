@@ -323,25 +323,40 @@ class PreparedToolOutput:
     and does one wrap pass.
     """
 
-    __slots__ = ("_prepared", "_cache_w", "_cache_lines")
+    __slots__ = ("_prepared", "_cache_key", "_cache_lines")
 
     def __init__(self, card: ToolCard) -> None:
         self._prepared = _prepare_for_card(card)
-        self._cache_w: int = -1
+        # Cache keyed by (width, max_lines) so changes to either
+        # invalidate a single entry. Both axes can change at render
+        # time (resize → new width, max_lines stays constant in
+        # practice but we key on it anyway for correctness).
+        self._cache_key: tuple[int, int] = (-1, -1)
         self._cache_lines: list[OutputLine] = []
 
-    def layout(self, width: int) -> list[OutputLine]:
+    def layout(
+        self, width: int, *, max_lines: int | None = None,
+    ) -> list[OutputLine]:
         """Return wrapped OutputLine rows for the target width.
 
-        No display-side line cap — the exec layer's `MAX_OUTPUT_BYTES`
-        (8 KiB) is the real ceiling on how much content reaches here,
-        and that cap is already reflected in `ToolCard.truncated` and
-        the status footer. The full (post-byte-cap) output is wrapped
-        and returned so the user can scroll through every line.
+        When `max_lines` is set, the result is clipped to a head of
+        that many visible rows with one trailing "⋯ +N more lines ⋯"
+        marker appended — a compact "streaming window" view that
+        keeps long read/grep/ls output from flooding the chat with
+        the full file/match dump. The settled card can still convey
+        the gist without showing every line, while the full untrimmed
+        output (up to `MAX_OUTPUT_BYTES`) still reaches the model via
+        `_tool_card_content_for_api` so the next turn can reason
+        about it.
+
+        `max_lines=None` returns the full wrapped list (used by tests
+        and by callers that want the raw body).
         """
         if width <= 0:
             return []
-        if width == self._cache_w:
+        effective_max = -1 if max_lines is None else int(max_lines)
+        cache_key = (width, effective_max)
+        if cache_key == self._cache_key:
             return self._cache_lines
 
         wrapped: list[OutputLine] = []
@@ -353,8 +368,23 @@ class PreparedToolOutput:
                 spans=(OutputSpan(text="(no output)", kind="dim"),),
                 kind="truncated",
             )]
+        elif max_lines is not None and len(wrapped) > max_lines:
+            # Clip to a head window + one overflow marker. The
+            # marker steals a row, so show (max_lines - 1) content
+            # rows plus the marker (total = max_lines).
+            head_rows = max(1, max_lines - 1)
+            hidden = len(wrapped) - head_rows
+            clipped: list[OutputLine] = wrapped[:head_rows]
+            clipped.append(OutputLine(
+                spans=(OutputSpan(
+                    text=f"⋯ +{hidden} more line{'s' if hidden != 1 else ''} ⋯",
+                    kind="dim",
+                ),),
+                kind="truncated",
+            ))
+            wrapped = clipped
 
-        self._cache_w = width
+        self._cache_key = cache_key
         self._cache_lines = wrapped
         return wrapped
 
