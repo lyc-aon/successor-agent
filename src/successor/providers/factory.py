@@ -5,7 +5,7 @@ Profiles store provider configuration as a JSON dict like:
     {
       "type": "llamacpp",
       "base_url": "http://localhost:8080",
-      "model": "qwopus",
+      "model": "local",
       "max_tokens": 32768,
       "temperature": 0.7
     }

@@ -5,7 +5,7 @@ exact tokens for any text input. This is the gold-standard count for
 budget tracking — much better than the chars/4 heuristic free-code
 uses, because llama.cpp can call the actual model's tokenizer.
 
-Probed shape (b1-ecd99d6, qwopus, 2026-04-07):
+Probed shape (llama.cpp build b1-ecd99d6, 2026-04-07):
     POST /tokenize
     Content-Type: application/json
     Body: {"content": "hello world"}

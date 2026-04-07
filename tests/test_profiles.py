@@ -67,7 +67,7 @@ def test_parse_full_profile(tmp_path: Path) -> None:
         "provider": {
             "type": "llamacpp",
             "base_url": "http://localhost:8080",
-            "model": "qwopus",
+            "model": "local",
             "max_tokens": 16384,
         },
         "skills": ["skill-a", "skill-b"],

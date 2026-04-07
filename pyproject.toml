@@ -4,11 +4,32 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "successor"
-version = "0.0.1"
-description = "Successor Agent — omni-agent harness for locally-run mid-grade models"
+version = "0.1.0"
+description = "Terminal chat harness for local llama.cpp models with a custom cell-based renderer, async bash tool dispatch, and live compaction"
+readme = "README.md"
+license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
-authors = [{ name = "lycaon" }]
+authors = [{ name = "Lycaon" }]
+keywords = ["llm", "llama.cpp", "terminal", "tui", "agent", "renderer"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Terminals",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = []
+
+[project.urls]
+Repository = "https://github.com/lyc-aon/successor-agent"
+Issues = "https://github.com/lyc-aon/successor-agent/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

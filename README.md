@@ -1,69 +1,127 @@
 # Successor
 
 A terminal chat harness for local LLMs, built on a custom cell-based
-renderer. Runs against llama.cpp (or any OpenAI-compatible endpoint)
-with a bash tool the model can drive live.
+renderer where one module owns the screen end to end. Runs against
+llama.cpp (or any OpenAI-compatible endpoint) with bash tool dispatch
+the model can drive live.
+
+```
+                                          successor · chat     successor-dev   normal   ☾   ◆ steel
+
+
+
+
+ successor ▸ I am successor. Speak freely. Ctrl+C, /quit, or ? for help.
+
+ you ▸ show me what's in this directory
+
+ successor ▸ Here you go.
+
+ ╭── ☰ list-directory ────────────────────────────────────────────────────────────────────────────╮
+ │    path  /tmp                                                                                  │
+ │  hidden  yes                                                                                   │
+ │  format  long                                                                                  │
+ ╰── $ ls -la /tmp ───────────────────────────────────────────────────────────────────────────────╯
+    total 738664
+    drwxrwxrwt  574 root     294980  Apr  7 14:38  ▸ .
+    drwxr-xr-x  20 root       4096  Mar 26 19:37  ▸ ..
+    -rw-rw-r--   1 user          0  Apr  2 10:15  · .session-cache
+    ⋯ +105 more lines ⋯
+      ↳ ✓ exit 0 in 53ms  · output truncated
+▍
+ ctx      36/ 262144  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0.01%  local
+```
+
+## The architectural premise
+
+`src/successor/render/diff.py` is the only module in the entire
+codebase allowed to write to stdout. Not Rich, not prompt_toolkit, not
+`print()`, not your own one-off escape sequences from somewhere
+convenient. Every visible cell, every animation, every tool card, the
+streaming preview, the compaction sequence, the setup wizard, the
+config menu — all of it paints into one virtual cell grid that gets
+diff-committed once per frame.
+
+This is the single decision that lets Successor:
+
+- edit any cell of any past message in-place at frame rate
+- animate compaction as the rounds dissolve into a summary boundary
+- stream tool stdout into a card with a pulsing border while it runs
+- search and re-style scrollback after the fact
+- survive resize without flicker, and run headless without a TTY
+
+Other harnesses can't do most of these because once they `print()` a
+line, it belongs to the terminal scrollback and they can't reach it
+anymore. Read [`docs/rendering-superpowers.md`](docs/rendering-superpowers.md)
+for the full list of what the architecture buys you.
 
 ## What it does
 
-Streaming chat against a local model over llama.cpp's OpenAI-compatible
-HTTP API. Qwen-style thinking content is rendered as a live scrolling
-preview while the model is working, so the wait never looks like a hang.
+**Streaming chat against a local model.** Qwen-style thinking content
+is rendered as a live scrolling preview while the model is working,
+so the wait never looks like a hang.
 
-Bash dispatch through an async subprocess runner. When the model emits
-a tool call the harness spawns a background thread, streams stdout and
-stderr into a live tool card with a pulsing border and elapsed-time
-counter, then feeds the result back to the model for a continuation
-turn. The card's verb and parameters are inferred from the partial
-command as the arguments stream in, so the header resolves to
-`write-file path: about.html` (or whatever it happens to be) while the
-body is still arriving.
+**Bash dispatch through an async subprocess runner.** When the model
+emits a tool call, the harness spawns a background thread, streams
+stdout and stderr into a live tool card with a pulsing border and
+elapsed-time counter, then feeds the result back to the model for a
+continuation turn. The card's verb and parameters are inferred from
+the partial command as the arguments stream in, so the header
+resolves to `write-file path: about.html` while the body is still
+arriving.
 
-Compaction runs as a visible animation when the context budget
+**Compaction runs as a visible animation** when the context budget
 tightens. The chat stays responsive throughout; once the summary is
-ready the kept turns slide back in under a materialized boundary.
+ready the kept turns slide back in under a materialized boundary
+divider.
 
-Profiles, themes, and a three-pane config menu let you edit the active
-profile without leaving the chat. A multi-line prompt editor with
-soft-wrap, shift-arrow selection, and OSC 52 clipboard support is
-used for the system prompt field so you can rewrite it inline.
+**Profiles, themes, and a three-pane config menu** let you edit the
+active profile without leaving the chat. A multi-line prompt editor
+with soft-wrap, shift-arrow selection, and OSC 52 clipboard support
+is used for the system prompt field so you can rewrite it inline.
 
-The chat's scrollback is custom, not terminal-native. It survives
+**The chat's scrollback is custom**, not terminal-native. It survives
 resize without flicker, supports search across history, and keeps
 every past message mutable in memory so the renderer can re-color or
 annotate after the fact.
 
-## Architecture
+## Quick start
 
-The core is a five-layer terminal renderer where only one module,
-`src/successor/render/diff.py`, is allowed to write to stdout.
-Everything above that is a pure function over a cell grid. The chat
-surface, the tool cards, the compaction animation, the running-state
-pulse, the streaming preview, the setup wizard, and the config menu
-all paint into the same grid and get diff-committed together every
-frame.
+You need a running llama.cpp server first. The standard quickstart:
 
-See [`docs/rendering-superpowers.md`](docs/rendering-superpowers.md)
-for the design rules and anti-patterns, and
-[`docs/rendering-plan.md`](docs/rendering-plan.md) for the original
-architectural decisions.
-
-## Install
-
+```bash
+llama-server -m <your-model.gguf> --host 0.0.0.0 --port 8080
 ```
+
+Then install Successor:
+
+```bash
+git clone https://github.com/lyc-aon/successor-agent
+cd successor-agent
 pip install -e .
 ```
 
-Registers two binaries in `~/.local/bin`:
+The install registers two binaries in `~/.local/bin`:
 
-- `successor`, the canonical command
-- `sx`, a short alias for daily use
+- `successor` — the canonical command
+- `sx` — a two-letter alias for daily use
 
 Both point at the same entry. Python 3.11 or newer. No third-party
-runtime dependencies. Pure stdlib for the renderer, chat, tool dispatch,
-compaction, and everything shipped in the package.
+runtime dependencies — pure stdlib for the renderer, chat, tool
+dispatch, compaction, and everything shipped in the package.
 
-## Run
+Then:
+
+```bash
+successor chat
+```
+
+If the chat opens but your first message reports
+`[no llama.cpp server at http://localhost:8080]`, the server isn't
+running yet. The hint message names the URL the chat tried so you can
+verify the active profile.
+
+## Commands
 
 ```
 successor                 show help
@@ -96,26 +154,70 @@ default. The base URL and model name come from the active profile's
 `provider` field, so you can point Successor at any OpenAI-compatible
 endpoint by editing the profile.
 
-## Tests
+## Slash command palette
+
+Typing `/` opens an inline command palette with arrow-key navigation
+and ghost-text argument hints:
 
 ```
+  ╭────────────────────────────────────────────────────────────────────────────╮
+  │ /bash     run a bash command and render it as a structured tool card       │
+  │ /budget   show current context fill % + token usage stats                  │
+  │ /burn     inject N synthetic tokens to stress-test compaction              │
+  │ /compact  manually trigger compaction of the current chat history          │
+  │ /config   open the profile config menu                                     │
+  │ /density  adjust layout density                                            │
+  │ /mode     switch display mode                                              │
+  │ /mouse    toggle mouse reporting                                           │
+  │ /profile  switch active profile (theme + prompt + provider)                │
+  │ /quit     leave the chat                                                   │
+  │ /theme    switch color theme                                               │
+  ╰────────────────────────────────────────────────────────────────────────────╯
+```
+
+## Tests
+
+```bash
 pytest
 ```
 
 The suite is hermetic. Each test gets its own `SUCCESSOR_CONFIG_DIR`,
 and bash dispatch tests use real shell builtins (no mocks). There are
-811 tests at the time of writing.
+826 tests at the time of writing.
+
+## Architecture
+
+Five layers, only the bottom one writes to stdout:
+
+```
+Layer 5 - diff.py        the ONLY module that writes to stdout
+Layer 4 - paint.py       compose into a virtual cell grid
+Layer 3 - paint.py       layout (text/art -> grid mutations at width W)
+Layer 2 - text/braille   prepare (parse source ONCE, cache by target size)
+Layer 1 - measure.py     grapheme width, ANSI strip, EAW table
+```
+
+Layers 1 through 4 are pure functions over a cell grid. Nothing above
+Layer 5 ever touches the terminal. The renderer is testable by
+inspecting Grid contents directly, with no PTY required, which is why
+the test suite can validate the full visual output of the wizard, the
+config menu, the compaction animation, and every tool card without
+spawning a subprocess.
 
 ## Docs
 
-- [`docs/rendering-superpowers.md`](docs/rendering-superpowers.md),
-  the design rules and what the architecture enables
-- [`docs/rendering-plan.md`](docs/rendering-plan.md), original
-  architecture notes
-- [`docs/concepts.md`](docs/concepts.md), speculative features the
-  architecture can support with small additive changes
-- [`docs/llamacpp-protocol.md`](docs/llamacpp-protocol.md), reference
-  for the llama.cpp HTTP API we consume
-- [`docs/changelog.md`](docs/changelog.md), running development history
-- [`CLAUDE.md`](CLAUDE.md), repo orientation auto-loaded by Claude Code
-  sessions working in this directory
+- [`docs/rendering-superpowers.md`](docs/rendering-superpowers.md) —
+  the design rules and what the architecture enables. Read this first.
+- [`docs/rendering-plan.md`](docs/rendering-plan.md) — original
+  architecture notes and the reasoning behind the layer split
+- [`docs/concepts.md`](docs/concepts.md) — features the architecture
+  can support with small additive changes
+- [`docs/llamacpp-protocol.md`](docs/llamacpp-protocol.md) — what we
+  send to and receive from llama.cpp's HTTP server
+- [`docs/changelog.md`](docs/changelog.md) — running development history
+- [`CLAUDE.md`](CLAUDE.md) — repo orientation auto-loaded by Claude
+  Code sessions working in this directory
+
+## License
+
+Apache 2.0. See [`LICENSE`](LICENSE).

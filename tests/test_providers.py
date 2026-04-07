@@ -79,12 +79,12 @@ def test_factory_dispatches_llamacpp() -> None:
     config = {
         "type": "llamacpp",
         "base_url": "http://localhost:8080",
-        "model": "qwopus",
+        "model": "local",
     }
     provider = make_provider(config)
     assert isinstance(provider, LlamaCppClient)
     assert provider.base_url == "http://localhost:8080"
-    assert provider.model == "qwopus"
+    assert provider.model == "local"
 
 
 def test_factory_dispatches_openai_compat() -> None:
@@ -149,12 +149,12 @@ def test_factory_drops_unknown_keys() -> None:
     """Forward-compat: profiles can carry extra fields without breaking."""
     provider = make_provider({
         "type": "llamacpp",
-        "model": "qwopus",
+        "model": "local",
         "future_field": "we don't know what this is yet",
         "another_one": 42,
     })
     # Construction succeeded; the unknown keys were silently ignored.
-    assert provider.model == "qwopus"
+    assert provider.model == "local"
 
 
 # ─── Error paths ───
@@ -162,7 +162,7 @@ def test_factory_drops_unknown_keys() -> None:
 
 def test_factory_missing_type_raises() -> None:
     with pytest.raises(ValueError, match="missing required 'type'"):
-        make_provider({"model": "qwopus"})
+        make_provider({"model": "local"})
 
 
 def test_factory_unknown_type_raises() -> None:

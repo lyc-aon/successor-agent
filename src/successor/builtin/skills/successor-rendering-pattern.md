@@ -16,12 +16,13 @@ calls. Exactly one place in the codebase emits bytes to the terminal,
 and everything else paints into a virtual cell grid that the one place
 diffs and commits.
 
-The previous attempt at this harness (`hk13`) ended up with **nine
-non-negotiable rules** in its rendering reference doc just to keep
-Rich + prompt_toolkit + patch_stdout from corrupting each other's
-screen state. Every rule was a treaty clause between two libraries that
-each assumed they owned stdout. Successor eliminates that war by having
-one screen owner. Not "fewer fights" — *zero* fights, by construction.
+A previous Python TUI harness this codebase replaces ended up with
+**nine non-negotiable rules** in its rendering reference doc just to
+keep Rich + prompt_toolkit + patch_stdout from corrupting each other's
+screen state. Every rule was a treaty clause between two libraries
+that each assumed they owned stdout. Successor eliminates that war by
+having one screen owner. Not "fewer fights" — *zero* fights, by
+construction.
 
 ## The five layers
 

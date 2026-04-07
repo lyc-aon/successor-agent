@@ -510,7 +510,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_snapshot.add_argument(
         "--scenario", default="showcase",
-        choices=["blank", "showcase", "thinking", "search", "help", "autocomplete"],
+        choices=["blank", "showcase", "thinking", "search", "help", "autocomplete", "tool_card"],
         help="which chat state to render",
     )
     p_snapshot.add_argument(

@@ -1,0 +1,32 @@
+                                          successor · chat     successor-dev   normal   ☾   ◆ steel
+
+
+
+
+
+ successor ▸ I am successor. The forge is hot — local stands ready. Speak freely. Ctrl+C, /quit, or
+       help.
+
+ you ▸ show me what you can do
+
+ successor ▸ What I can render
+       ────────────────────────────────────────────────────────────────────────────────────────────
+
+       Bold, italic, strikethrough, and inline code.
+
+       • Bullet lists work
+       • With multiple items
+       • And bold inside them
+
+       1. Numbered lists too
+       2. With proper alignment
+
+        python
+         def meditate():
+             return 'stillness'
+
+       ▎   A quote, of course. Brevity is honor.
+
+       Plus linked text.
+▍
+ ctx     114/ 262144  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0.04%  local

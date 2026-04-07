@@ -167,7 +167,7 @@ _DEFAULT_SYSTEM_PROMPT = (
 _DEFAULT_PROVIDER = {
     "type": "llamacpp",
     "base_url": "http://localhost:8080",
-    "model": "qwopus",
+    "model": "local",
     "max_tokens": 32768,
     "temperature": 0.7,
 }

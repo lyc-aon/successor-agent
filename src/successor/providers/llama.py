@@ -429,9 +429,9 @@ class LlamaCppClient:
     """Configured llama.cpp endpoint factory.
 
     Default base_url is the standard llama.cpp server port. Defaults
-    are intentionally generous because Lycaon's local Qwen3.5 setup
-    runs at 256K context — never apologize for token cost on local
-    inference.
+    are intentionally generous because local inference is free; the
+    harness is built around mid-grade models running at large context
+    windows (typically 32K-256K).
 
     Conforms structurally to `providers.base.ChatProvider`. The
     `provider_type` class attribute is used by `make_provider` to
@@ -444,7 +444,7 @@ class LlamaCppClient:
         self,
         *,
         base_url: str = "http://localhost:8080",
-        model: str = "qwopus",
+        model: str = "local",
         default_max_tokens: int = 32768,
         default_temperature: float = 0.7,
         default_timeout: float = 600.0,

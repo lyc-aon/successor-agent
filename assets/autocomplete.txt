@@ -1,0 +1,32 @@
+                                          successor · chat     successor-dev   normal   ☾   ◆ steel
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ╭────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ /bash     run a bash command and render it as a structured tool card  <command>                │
+  │ /budget   show current context fill % + token usage stats                                      │
+  │ /burn     inject N synthetic tokens to stress-test compaction         <N|loop N>               │
+  │ /compact  manually trigger compaction of the current chat history                              │
+  │ /config   open the profile config menu                                                         │
+  │ /density  adjust layout density                                       [compact|normal|spacious|c
+  │ /mode     switch display mode                                         [dark|light|toggle]      │
+  │ /mouse    toggle mouse reporting                                      [on|off|toggle]          │
+  │ /profile  switch active profile (theme + prompt + provider)           [<profile>|cycle]        │
+  │ /quit     leave the chat                                                                       │
+  │ /theme    switch color theme                                          [<theme>|cycle]          │
+  ╰────────────────────────────────────────────────────────────────────────────────────────────────╯
+       help.
+▍ /
+ ctx      25/ 262144  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0.01%  local

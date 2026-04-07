@@ -998,7 +998,7 @@ def _drop_user_profile(temp_config_dir: Path, name: str, **overrides: object) ->
         "display_mode": "dark",
         "density": "normal",
         "system_prompt": "you are a test profile",
-        "provider": {"type": "llamacpp", "model": "qwopus"},
+        "provider": {"type": "llamacpp", "model": "local"},
         "skills": [],
         "tools": [],
         "tool_config": {},

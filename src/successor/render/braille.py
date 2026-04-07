@@ -1,8 +1,8 @@
 """Braille frame loader and dot-level interpolation.
 
-Direct port of:
-  /home/lycaon/dev/web/lycaonwtf/src/lib/braille/codec.ts
-  /home/lycaon/dev/web/lycaonwtf/src/lib/braille/interpolate.ts
+Direct port of a TypeScript braille codec + Bayer-dot interpolator.
+The original implementation lives in another personal project; this
+file is the standalone Python equivalent.
 
 Unicode Braille Patterns block: U+2800–U+28FF. Each codepoint encodes 8
 dots as an 8-bit value where dots 1–6 occupy bits 0–5 (the classic 6-dot

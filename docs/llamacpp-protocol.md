@@ -1,9 +1,9 @@
 # llama.cpp Protocol Reference
 
 What we send to llama.cpp's HTTP server, what we get back, and the
-quirks Lycaon's local Qwen3.5-27B-Opus-Distilled-v2 setup specifically.
-This doc exists so future Claude doesn't have to re-probe the API to
-figure out the response shape, read this first when touching anything
+quirks of running a Qwen3.5-27B-Opus-Distilled-v2 instance against it.
+This doc exists so future contributors don't have to re-probe the API
+to figure out the response shape. Read this first when touching anything
 in `src/successor/providers/llama.py`.
 
 Probed against `b1-ecd99d6` (llama.cpp build identifier from the
@@ -65,7 +65,7 @@ Accept: text/event-stream
 
 ```json
 {
-  "model": "qwopus",
+  "model": "local",
   "messages": [
     {"role": "system",    "content": "You are successor..."},
     {"role": "user",      "content": "Greet me."},
@@ -82,7 +82,7 @@ Accept: text/event-stream
 
 | Field | Required | Notes |
 |---|---|---|
-| `model` | yes | **Ignored by llama.cpp**, any string works. We send `"qwopus"` for clarity in logs. |
+| `model` | yes | **Ignored by llama.cpp**, any string works. We send `"local"` for clarity in logs. |
 | `messages` | yes | Standard OpenAI shape. Roles: `system`, `user`, `assistant`. Note we map our internal `"successor"` role to `"assistant"` before sending. |
 | `stream` | optional | `true` for SSE, `false` for one-shot JSON. Successor always streams. |
 | `max_tokens` | optional | **Use generous values** (16K-32K). The 256K context easily handles it. |
@@ -314,7 +314,8 @@ just stop reading and accept the wasted tokens (it's local, free).
 
 ## Practical performance numbers
 
-Measured on Lycaon's RTX 5090 / Qwen3.5-27B-Opus-Distilled-v2 / Q4_K_M:
+Reference numbers, measured on a consumer RTX 5090 running
+Qwen3.5-27B-Opus-Distilled-v2 / Q4_K_M:
 
 | Metric | Value |
 |---|---|

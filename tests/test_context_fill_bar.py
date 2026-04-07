@@ -136,4 +136,4 @@ def test_footer_percentage_label_present(temp_config_dir: Path) -> None:
 def test_footer_model_name_present(temp_config_dir: Path) -> None:
     chat = _chat_with_window(50_000)
     line = _footer_line(chat)
-    assert "qwopus" in line  # default model name from successor-dev profile
+    assert "local" in line  # default model name from successor-dev profile

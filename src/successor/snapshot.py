@@ -78,6 +78,7 @@ def chat_demo_snapshot(
       "search"     search mode active over a sample conversation
       "help"       help overlay open
       "autocomplete"  the slash command palette open at /
+      "tool_card"  a finished bash tool card with output and exit code
 
     Returns a fresh Grid containing one fully-rendered frame. The
     chat App is constructed without entering its terminal context, so
@@ -176,6 +177,19 @@ def chat_demo_snapshot(
         chat._help_opened_at = time.monotonic() - 1.0
     elif scenario == "autocomplete":
         chat.input_buffer = "/"
+    elif scenario == "tool_card":
+        from .bash import dispatch_bash
+        chat.messages.append(_Message("user", "show me what's in this directory"))
+        chat.messages.append(
+            _Message(
+                "successor",
+                "Here you go.",
+            )
+        )
+        # Real bash dispatch against the cwd, no mocks. The card will
+        # render with verb/params/output/exit just like a live tool.
+        card = dispatch_bash("ls -la /tmp")
+        chat.messages.append(_Message("tool", "", tool_card=card))
 
     g = Grid(rows, cols)
     chat.on_tick(g)

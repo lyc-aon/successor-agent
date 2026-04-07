@@ -22,8 +22,8 @@ Layout (resize-aware, three panes + footer):
   │                     │                                 │ │                  │ │
   │                     │ provider                        │ │ successor            │ │
   │                     │     type        llamacpp        │ │ Patience and …   │ │
-  │                     │     model       qwopus          │ │                  │ │
-  │                     │     base_url    localhost…      │ │ ctx 48/256k qw…  │ │
+  │                     │     model       local           │ │                  │ │
+  │                     │     base_url    localhost…      │ │ ctx 48/256k loc… │ │
   │                     │     temperature 0.7             │ └──────────────────┘ │
   │                     │     max_tokens  32768           │                      │
   │                     │                                 │                      │

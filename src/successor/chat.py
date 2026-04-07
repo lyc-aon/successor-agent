@@ -24,7 +24,7 @@ Layout (alt-screen with locked footer):
     │ ▍ user input here                   │ input area (1+ rows)
     │   wraps upward as it grows          │
     ├─────────────────────────────────────┤
-    │ ctx 1234/262144 ████░ 0.5%  qwopus  │ static footer (1 row)
+    │ ctx 1234/262144 ████░ 0.5%  local   │ static footer (1 row)
     └─────────────────────────────────────┘
 
 The streaming response lives in two phases:
@@ -800,9 +800,10 @@ PROMPT_WIDTH = 2
 INPUT_MIN_ROWS = 1
 INPUT_MAX_ROWS = 8
 
-# Real context limit — Lycaon's local Qwen3.5-27B-Opus-Distilled-v2
-# server is launched with -c 262144 (256K). Don't apologize for token
-# cost on local inference.
+# Default context-window denominator. Mid-grade models running on
+# llama.cpp typically expose 32K-256K windows; the harness assumes
+# generous budgets because local inference is free. Profiles can
+# override this via provider.context_window.
 CONTEXT_MAX = 262144
 
 SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -1955,11 +1956,18 @@ class SuccessorChat(App):
 
         # ─── Character input (printable + UTF-8 + paste chunks) ───
         if event.is_char and event.char and not event.is_ctrl:
-            # Filter out anything that's not safe to display in the input.
-            # Allow newlines (for pasted multi-line content), printable
-            # ASCII, and any Unicode codepoint >= 0x20.
+            # Normalize pasted content before filtering:
+            #   \r\n / \r → \n  (Windows / classic-Mac line endings)
+            #   \t       → 4 spaces (most pasted code is 4-space indent)
+            # Then strip orphan focus-event tails ([I / [O) that some
+            # terminals leak inside bracketed paste, and finally drop
+            # any leftover control codes below 0x20.
+            chunk = event.char.replace("\r\n", "\n").replace("\r", "\n")
+            chunk = chunk.replace("\t", "    ")
+            if self._in_paste and chunk.endswith(("\x1b[I", "\x1b[O")):
+                chunk = chunk[:-3]
             safe = "".join(
-                c for c in event.char
+                c for c in chunk
                 if c == "\n" or ord(c) >= 0x20
             )
             if safe:
@@ -3113,9 +3121,9 @@ class SuccessorChat(App):
     def _agent_budget(self) -> ContextBudget:
         """Build a ContextBudget from the profile's window setting.
 
-        Default: window=262_144 (qwopus). Profiles can override via
-        provider.context_window. Headroom buffers are static defaults
-        for now — they could move into the profile later.
+        Default: window=262_144 (a 256K mid-grade model). Profiles can
+        override via provider.context_window. Headroom buffers are static
+        defaults for now — they could move into the profile later.
         """
         provider_cfg = self.profile.provider or {}
         window = int(provider_cfg.get("context_window", 262_144))
@@ -3646,7 +3654,7 @@ class SuccessorChat(App):
                 if partial:
                     msg = f"{partial}\n\n[stream interrupted: {ev.message}]"
                 else:
-                    msg = f"[stream failed: {ev.message}]"
+                    msg = self._format_stream_error(ev.message)
                 self.messages.append(_Message("successor", msg, synthetic=True))
                 self._stream = None
                 self._stream_content = []
@@ -3662,6 +3670,45 @@ class SuccessorChat(App):
                 # the chat returns to IDLE instead of waiting forever
                 # for a stream that'll never come back.
                 self._agent_turn = 0
+
+    def _format_stream_error(self, raw: str) -> str:
+        """Translate a raw StreamError message into a friendlier hint.
+
+        The most common failure mode for new users is "the chat opens
+        but my first message gets [stream failed: connection failed:
+        <urlopen error [Errno 111] Connection refused>]". That tells
+        the user nothing actionable, so detect connection-refused /
+        DNS / unreachable cases and surface the llama.cpp quickstart
+        instead. Other errors fall through with the raw message.
+        """
+        provider_cfg = self.profile.provider or {}
+        base_url = provider_cfg.get("base_url", "http://localhost:8080")
+        lower = raw.lower()
+        is_conn_refused = (
+            "connection refused" in lower
+            or "errno 111" in lower
+            or "could not connect" in lower
+        )
+        is_dns = (
+            "name or service not known" in lower
+            or "nodename nor servname" in lower
+            or "temporary failure in name resolution" in lower
+        )
+        is_unreachable = "network is unreachable" in lower
+        if is_conn_refused or is_dns or is_unreachable:
+            return (
+                f"[no llama.cpp server at {base_url}]\n"
+                f"\n"
+                f"successor expects an OpenAI-compatible HTTP endpoint at\n"
+                f"the URL above. The standard llama.cpp quickstart is:\n"
+                f"\n"
+                f"  llama-server -m <your-model.gguf> --host 0.0.0.0 --port 8080\n"
+                f"\n"
+                f"Once the server is up, retry your message. To point at a\n"
+                f"different endpoint open /config and edit the active\n"
+                f"profile's provider.base_url field."
+            )
+        return f"[stream failed: {raw}]"
 
     def _spawn_bash_runner(
         self,
@@ -5761,9 +5808,9 @@ class SuccessorChat(App):
         Token count comes from the agent's TokenCounter (driven by
         llama.cpp's /tokenize endpoint when available, char heuristic
         fallback). The window size comes from the profile's
-        provider.context_window — this lets the compact-test profile
-        at 50K context show a properly-scaled fill bar instead of
-        the qwopus 262K-token denominator.
+        provider.context_window — this lets a small-context profile
+        (e.g. 50K for compaction stress testing) show a properly-scaled
+        fill bar instead of the default 262K denominator.
 
         Threshold state drives:
           - bar fill color (accent → accent_warm → accent_warn)
@@ -5932,8 +5979,9 @@ class SuccessorChat(App):
 
         fill_region(grid, 0, y, width, height, style=Style(bg=theme.bg_input))
 
-        wrapped = self._input_lines_at_width(width)
-        wrapped = wrapped[-height:] if len(wrapped) > height else wrapped
+        all_wrapped = self._input_lines_at_width(width)
+        hidden_above = max(0, len(all_wrapped) - height)
+        wrapped = all_wrapped[-height:] if hidden_above else all_wrapped
 
         prompt_style = Style(fg=theme.accent, bg=theme.bg_input, attrs=ATTR_BOLD)
         paint_text(grid, PROMPT, 0, y, style=prompt_style)
@@ -5944,6 +5992,26 @@ class SuccessorChat(App):
             if ly >= y + height:
                 break
             paint_text(grid, line, PROMPT_WIDTH, ly, style=text_style)
+
+        # Overflow indicator: when a paste (or long manual input) wraps
+        # to more lines than the 8-row input cap can show, surface a
+        # right-aligned "↑ N more lines" badge on the topmost visible
+        # row so the user knows their content didn't get truncated —
+        # the cursor is at the end and the older lines scrolled up.
+        if hidden_above > 0:
+            badge = f"↑ {hidden_above} more {'line' if hidden_above == 1 else 'lines'}"
+            badge_x = max(PROMPT_WIDTH, width - len(badge) - 1)
+            paint_text(
+                grid,
+                badge,
+                badge_x,
+                y,
+                style=Style(
+                    fg=theme.accent_warm,
+                    bg=theme.bg_input,
+                    attrs=ATTR_DIM | ATTR_ITALIC,
+                ),
+            )
 
         # Cursor / streaming-status indicator on the last visible line.
         if self._stream is None:

@@ -191,14 +191,18 @@ def hard_wrap(text: str, width: int) -> list[str]:
     line = ""
     line_w = 0
     for ch in text:
-        cw = char_width(ch)
-        if cw == 0:
-            line += ch
-            continue
+        # Newlines first — char_width('\n') is 0, so we have to check
+        # this BEFORE the zero-width branch or every \n would attach
+        # to the current line as a literal control char and never
+        # produce a row break.
         if ch == "\n":
             out.append(line)
             line = ""
             line_w = 0
+            continue
+        cw = char_width(ch)
+        if cw == 0:
+            line += ch
             continue
         if line_w + cw > width:
             out.append(line)

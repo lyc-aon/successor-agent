@@ -68,7 +68,7 @@ TURN_TIMEOUT_S = 240.0  # per user prompt, including all continuation turns
 TICK_SLEEP_S = 0.05  # how long to sleep between _pump_stream calls
 MID_STREAM_SNAPSHOT_INTERVAL_S = 0.25  # capture a frame every N seconds while a stream is open
 DEFAULT_BASE_URL = "http://localhost:8080"
-DEFAULT_MODEL = "qwopus"
+DEFAULT_MODEL = "local"
 ARTIFACT_ROOT = Path("/tmp/successor-e2e")
 
 

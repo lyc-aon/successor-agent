@@ -31,8 +31,8 @@ from typing import Literal
 #
 # Threshold semantics (used > window − buffer means "fire X"):
 #
-#   window         total context size from the model (e.g., 50_000 for the
-#                  burn-test A3B setup, 262_144 for production qwopus)
+#   window         total context size from the model (e.g., 50_000 for a
+#                  small burn-test setup, 262_144 for a 256K mid-grade model)
 #   warning_buf    when used > (window - warning_buf), the title bar pill
 #                  goes accent_warm and shows the fill %
 #   autocompact_buf when used > (window - autocompact_buf), proactive
@@ -44,9 +44,9 @@ from typing import Literal
 # threshold to trip at progressively more "used" tokens).
 #
 # Default numbers are scaled from free-code's (13K autocompact buffer
-# at ~200K window) by the same ratio for our 262K qwopus default,
-# then adjusted down a bit because llama.cpp is local and cheap so
-# we can compact more aggressively.
+# at ~200K window) by the same ratio for a 262K default window, then
+# adjusted down a bit because llama.cpp is local and cheap so we can
+# compact more aggressively.
 
 ThresholdState = Literal["ok", "warning", "autocompact", "blocking"]
 

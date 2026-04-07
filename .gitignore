@@ -21,8 +21,8 @@ venv/
 env/
 .python-version
 
-# ─── Ronin runtime / state ───
-.ronin/
+# ─── Successor runtime / state ───
+.successor/
 *.session.jsonl
 recordings/
 

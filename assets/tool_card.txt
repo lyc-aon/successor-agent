@@ -1,0 +1,32 @@
+                                          successor · chat     successor-dev   normal   ☾   ◆ steel
+
+
+
+
+
+
+
+
+
+
+
+ successor ▸ I am successor. The forge is hot — local stands ready. Speak freely. Ctrl+C, /quit, or
+       help.
+
+ you ▸ show me what's in this directory
+
+ successor ▸ Here you go.
+
+ ╭── ☰ list-directory ────────────────────────────────────────────────────────────────────────────╮
+ │    path  /tmp                                                                                  │
+ │  hidden  yes                                                                                   │
+ │  format  long                                                                                  │
+ ╰── $ ls -la /tmp ───────────────────────────────────────────────────────────────────────────────╯
+    total 738664
+    drwxrwxrwt  576 root     295020  Apr  7 14:39  ▸ .
+    drwxr-xr-x  20 root       4096  Mar 26 19:37  ▸ ..
+    -rw-rw-r--   1 lycaon        0  Apr  2 10:15  · .5dfaf75f6e0f67b6-00000000.hm
+    ⋯ +105 more lines ⋯
+      ↳ ✓ exit 0 in 51ms  · output truncated
+▍
+ ctx      36/ 262144  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0.01%  local
