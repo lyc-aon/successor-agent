@@ -52,6 +52,13 @@ from .exec import (  # noqa: E402
     resolve_bash_config,
 )
 
+# Verb classification (after the cards module)
+from .verbclass import (  # noqa: E402
+    VerbClass,
+    glyph_for_class,
+    verb_class_for,
+)
+
 # Renderer (kept inside the bash package so paint.py stays generic)
 from .render import (  # noqa: E402
     DEFAULT_MAX_OUTPUT_LINES,
@@ -70,10 +77,12 @@ __all__ = [
     "RefusedCommand",
     "Risk",
     "ToolCard",
+    "VerbClass",
     "bash_parser",
     "classify_risk",
     "dispatch_bash",
     "get_parser",
+    "glyph_for_class",
     "has_parser",
     "measure_tool_card_height",
     "paint_tool_card",
@@ -81,4 +90,5 @@ __all__ = [
     "preview_bash",
     "registered_commands",
     "resolve_bash_config",
+    "verb_class_for",
 ]

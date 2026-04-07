@@ -50,6 +50,7 @@ from ..render.paint import (
 )
 from ..render.theme import ThemeVariant
 from .cards import Risk, ToolCard
+from .verbclass import VerbClass, glyph_for_class, verb_class_for
 
 
 # ─── Constants ───
@@ -79,13 +80,17 @@ def _border_color(risk: Risk, theme: ThemeVariant) -> int:
     return theme.accent
 
 
-def _verb_glyph(risk: Risk) -> str:
-    """Glyph that prefixes the verb in the card header."""
-    if risk == "dangerous":
-        return "⚠ "
-    if risk == "mutating":
-        return "✎ "
-    return "▸ "
+def _verb_glyph_for_card(card: ToolCard) -> str:
+    """Glyph that prefixes the verb in the card header.
+
+    Verb-class-aware: READ cards show ◲, SEARCH cards ⌕, LIST cards ☰,
+    MUTATE cards ✎, etc. DANGER (risk-escalated) always gets the ⚠
+    glyph regardless of verb. This is the user's primary peripheral-
+    vision cue — scrolling through a long chat, the glyphs alone
+    make the card kind recognizable without reading verb text.
+    """
+    cls = verb_class_for(card.verb, card.risk)
+    return glyph_for_class(cls) + " "
 
 
 # ─── Height computation ───
@@ -162,9 +167,9 @@ def paint_tool_card(
         chars=BOX_ROUND,
     )
 
-    # ─── Header pill — verb + risk glyph + confidence badge ───
+    # ─── Header pill — verb + class glyph + confidence badge ───
     verb_text = card.verb
-    glyph = _verb_glyph(card.risk)
+    glyph = _verb_glyph_for_card(card)
     confidence_badge = " ?" if card.confidence < 0.7 else ""
     header_text = f" {glyph}{verb_text}{confidence_badge} "
     # Truncate if it would overflow the top border

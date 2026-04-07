@@ -60,25 +60,56 @@ def test_paint_preview_card_no_output_section() -> None:
     assert "exit" not in plain
 
 
-# ─── Risk-tinted glyphs ───
+# ─── Verb-class glyphs ───
 
 
-def test_safe_card_uses_safe_glyph() -> None:
+def test_list_card_uses_list_glyph() -> None:
+    """LIST class (ls) uses the ☰ glyph."""
     card = preview_bash("ls")
     _, plain, _ = _paint(card)
-    assert "▸" in plain  # safe glyph
+    assert "☰" in plain
 
 
-def test_mutating_card_uses_mutating_glyph() -> None:
+def test_read_card_uses_read_glyph() -> None:
+    """READ class (cat / head / tail) uses the ◲ glyph."""
+    card = preview_bash("cat README.md")
+    _, plain, _ = _paint(card)
+    assert "◲" in plain
+
+
+def test_search_card_uses_search_glyph() -> None:
+    """SEARCH class (grep / find) uses the ⌕ glyph."""
+    card = preview_bash("grep -rn TODO src/")
+    _, plain, _ = _paint(card)
+    assert "⌕" in plain
+
+
+def test_mutate_card_uses_mutate_glyph() -> None:
+    """MUTATE class (mkdir / touch / rm / cp / mv) uses ✎."""
     card = preview_bash("mkdir foo")
     _, plain, _ = _paint(card)
-    assert "✎" in plain  # mutating glyph
+    assert "✎" in plain
 
 
-def test_dangerous_card_uses_dangerous_glyph() -> None:
+def test_dangerous_card_uses_danger_glyph() -> None:
+    """Any dangerous-risk card overrides its verb class and uses ⚠."""
     card = preview_bash("rm -rf /")
     _, plain, _ = _paint(card)
-    assert "⚠" in plain  # dangerous glyph
+    assert "⚠" in plain
+
+
+def test_inspect_card_uses_inspect_glyph() -> None:
+    """INSPECT class (pwd / git-status / git-log) uses ⊙."""
+    card = preview_bash("pwd")
+    _, plain, _ = _paint(card)
+    assert "⊙" in plain
+
+
+def test_exec_card_uses_exec_glyph() -> None:
+    """EXEC class (python / echo) uses ▶."""
+    card = preview_bash("python -c 'print(42)'")
+    _, plain, _ = _paint(card)
+    assert "▶" in plain
 
 
 def test_low_confidence_shows_question_badge() -> None:
