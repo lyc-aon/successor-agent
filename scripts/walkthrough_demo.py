@@ -1,53 +1,80 @@
 #!/usr/bin/env python3
-"""Scripted walkthrough of the Successor harness for video recording.
+"""Scripted first-time setup walkthrough for video recording.
 
-Drives a real `successor chat` subprocess via a pseudoterminal,
+Drives a real `successor setup` subprocess via a pseudoterminal,
 injects keystrokes at human pace, lets animations breathe between
-sections, and writes a timestamped milestone log to a file so you
-know exactly where to cut your video afterward.
+sections, and writes a timestamped milestone log so you know
+exactly where to cut your video afterward.
+
+The walkthrough simulates a brand-new user running `successor setup`
+for the first time: SUCCESSOR intro animation → 9-step wizard
+(name, theme, mode, density, intro, provider, tools, review,
+save) → wizard drops into the chat → empty-state hero panel
+renders → /quit. The complete first-run arc.
+
+## What gets demoed
+
+  - The SUCCESSOR emergence animation playing on `successor setup`
+  - The welcome screen with its typewriter
+  - Typing a profile name at human pace
+  - Cycling between themes (forge ↔ steel) with smooth blend
+  - Toggling dark/light mode with smooth blend
+  - Cycling layout density
+  - The intro animation step (already on "successor" by default)
+  - The provider picker — cycling through llama.cpp / openai /
+    openrouter so the viewer sees all three options
+  - The tools step (bash enabled by default)
+  - The review screen with the full profile summary
+  - Hitting Enter to save → wizard drops into the chat
+  - The chat's empty-state hero panel (SUCCESSOR portrait + info
+    panel) painted against the just-saved profile
+  - Clean /quit exit
+
+Total runtime: about 90 seconds. No model required — the chat
+tail just shows the empty state, no streaming.
 
 ## Prerequisites
 
-  1. successor installed in editable mode (you should be able to run
-     `successor chat` from anywhere)
-  2. A working chat profile pointed at a reachable model. The script
-     uses whatever profile is currently active in your config — it
-     does NOT touch your settings. The fastest path is a local
-     llama.cpp server on http://localhost:8080.
-  3. A terminal at least 120 cols × 32 rows so the empty-state hero
-     panel renders in its two-column layout. The script verifies
-     this at startup.
+  1. successor installed (you should be able to run `successor` from
+     anywhere — the install via `pip install -e .` registers
+     ~/.local/bin/successor and the sx alias)
+  2. A terminal at least 120 cols × 36 rows. The wizard sidebar +
+     content + live preview need horizontal room, and the chat tail
+     needs vertical room for the empty-state hero panel to fit
+     comfortably. The script checks this at startup.
+
+## What the script touches
+
+  - Creates a TEMP config dir under /tmp/successor-walkthrough-<ts>/
+    so the wizard saves its profile there, not in your real
+    ~/.config/successor/. Your existing profiles stay untouched.
+  - Writes a timestamped milestone log to /tmp/successor-walkthrough-
+    <ts>.log with one line per section start.
+  - Does NOT modify your shell, your real config, or any file
+    outside /tmp.
 
 ## Usage
 
   python scripts/walkthrough_demo.py
 
-The script:
+The script will:
 
-  1. Sanity-checks your terminal size and the active profile's
-     provider connectivity.
-  2. Tells you the timestamp log file path.
-  3. Waits for you to press Enter — START YOUR SCREEN RECORDING NOW.
-  4. Spawns `successor chat` and runs the scripted walkthrough
-     end-to-end (~80-100 seconds total runtime).
-  5. Exits cleanly. Your terminal returns to normal.
-  6. Tells you the log file path again so you can find your cut points.
-
-The log file is plain text, one milestone per line, with elapsed
-time in seconds since the recording started:
-
-    [  0.00s] section 1: empty state hero panel
-    [  4.50s] section 2: typing first user message
-    [ 10.20s] section 3: response streaming
-    ...
+  1. Sanity-check your terminal size
+  2. Print the planned timeline so you know what's coming
+  3. Wait for you to press Enter — START YOUR SCREEN RECORDING NOW
+  4. Spawn `successor setup` with SUCCESSOR_CONFIG_DIR pointed at
+     the temp dir, and run the scripted walkthrough end-to-end
+  5. Exit cleanly when the demo finishes
+  6. Tell you the log file path again so you can find cut points
 
 ## Tweaking the script
 
-The walkthrough is the `WALKTHROUGH` constant near the bottom of
-this file. Each entry is a (label, action, post_delay) tuple. To
-add a section, add an entry. To change pacing, change the
-post_delay values. To send custom keystrokes, see the `send_*`
-helpers — they handle Ctrl/Alt modifiers and named keys correctly.
+The walkthrough is `run_walkthrough()` near the bottom. Each
+section is a `driver.section(N, "name")` line followed by some
+combination of `driver.send(...)`, `type_string(...)`, and
+`driver.pump_for(seconds)` calls. The planned-timeline preview is
+computed by static-analyzing that function, so if you tweak a
+duration or add a section the preview updates automatically.
 """
 
 from __future__ import annotations
@@ -62,17 +89,15 @@ import termios
 import time
 from datetime import datetime
 from pathlib import Path
-from urllib.error import URLError
-from urllib.request import urlopen
+import shutil
+import tempfile
 
 
 # ─── Configuration ───
 
 LOG_DIR = Path("/tmp")
 MIN_COLS = 120
-MIN_ROWS = 32
-PROBE_URL = "http://localhost:8080/health"
-PROBE_TIMEOUT_S = 1.0
+MIN_ROWS = 36
 
 # Typing speed for the helper that sends a string char-by-char.
 # 60ms/char ≈ 16 cps which reads as a fast but human typist.
@@ -189,6 +214,28 @@ def press_space(driver: Driver) -> None:
     driver.send(b" ")
 
 
+def press_up(driver: Driver) -> None:
+    """Up arrow — CSI A. Decoded by KeyDecoder as Key.UP."""
+    driver.send(b"\x1b[A")
+
+
+def press_down(driver: Driver) -> None:
+    """Down arrow — CSI B. Decoded by KeyDecoder as Key.DOWN."""
+    driver.send(b"\x1b[B")
+
+
+def press_right(driver: Driver) -> None:
+    """Right arrow — CSI C. Decoded by KeyDecoder as Key.RIGHT.
+    The wizard uses this to advance to the next step."""
+    driver.send(b"\x1b[C")
+
+
+def press_left(driver: Driver) -> None:
+    """Left arrow — CSI D. Decoded by KeyDecoder as Key.LEFT.
+    The wizard uses this to retreat to the previous step."""
+    driver.send(b"\x1b[D")
+
+
 def press_ctrl(driver: Driver, letter: str) -> None:
     """Send a Ctrl+letter combination. letter must be a-z."""
     code = ord(letter.lower()) - ord("a") + 1
@@ -234,39 +281,29 @@ def set_winsize(fd: int, cols: int, rows: int) -> None:
         pass
 
 
-def probe_server(url: str = PROBE_URL, timeout: float = PROBE_TIMEOUT_S) -> bool:
-    """Quick reachability probe. Returns True iff the URL responds
-    with any HTTP status — we just want to know the socket opens."""
-    try:
-        with urlopen(url, timeout=timeout) as resp:
-            return resp.status >= 200
-    except (URLError, OSError):
-        return False
-
-
 def preflight() -> bool:
     """Run the sanity checks. Returns True iff everything looks ready."""
     cols, rows = get_terminal_size()
     print(f"terminal size: {cols} cols × {rows} rows")
     if cols < MIN_COLS or rows < MIN_ROWS:
         print(
-            f"  ⚠ need at least {MIN_COLS} × {MIN_ROWS} for the empty-state",
-            "hero panel to render in two-column layout. Resize first."
+            f"  ⚠ need at least {MIN_COLS} cols × {MIN_ROWS} rows for the"
         )
-        return False
-    print(f"  ✓ wide enough for the empty-state hero panel")
-
-    print(f"\nllama.cpp probe: {PROBE_URL}")
-    if probe_server():
-        print(f"  ✓ reachable")
-    else:
         print(
-            "  ⚠ no response. The walkthrough's `/bash`, `/budget`, and",
-            "model-reply sections need a working provider on the active",
-            "profile. If you're using a non-llama.cpp profile, this is",
-            "fine — the probe is just a heuristic for the default setup.",
+            f"    wizard sidebar + content + live preview to fit. Resize"
         )
-        # Don't bail; the user might be on OpenAI/OpenRouter
+        print(f"    your terminal first.")
+        return False
+    print(f"  ✓ wide enough for the wizard layout")
+
+    # Confirm the successor binary is on PATH
+    binary = shutil.which("successor")
+    if binary is None:
+        print()
+        print("  ⚠ `successor` not found in PATH.")
+        print("    Install with: pip install -e . from the repo root.")
+        return False
+    print(f"\n  ✓ successor binary: {binary}")
     return True
 
 
@@ -274,117 +311,175 @@ def preflight() -> bool:
 
 
 def run_walkthrough(driver: Driver) -> None:
-    """The actual scripted demo. Edit this to add/remove sections
-    or change pacing. Each section logs its start to the milestone
-    file so you can find cut points in your recording afterward."""
+    """First-time setup walkthrough.
 
-    # Section 1: empty-state hero panel
-    # The chat just opened. Let the SUCCESSOR portrait + info panel
-    # sit on screen for a moment so the viewer can read the panel
-    # contents (profile name, provider, model, context window, tools).
-    driver.section(1, "empty-state hero panel")
-    driver.pump_for(5.0)
+    Drives `successor setup` from cold-boot through the 9-step
+    profile creation wizard, into the chat with the freshly-saved
+    profile, pauses on the empty-state hero panel, and quits
+    cleanly. Edit pump durations or add/remove sections as needed —
+    the planned-timeline preview at startup auto-updates from this
+    function's source.
 
-    # Section 2: type the first user message
-    driver.section(2, "first user message — typing")
-    type_string(driver, "Hello! Tell me about yourself in one short paragraph.")
-    driver.pump_for(0.4)
+    The wizard is driven entirely with arrow keys + Enter. The only
+    text input is the profile name in the NAME step. The provider
+    step cycles through all three options (llama.cpp / openai /
+    openrouter) with Space so the viewer sees them all, then leaves
+    llama.cpp selected to advance without needing to type fake
+    api keys on camera.
+    """
 
-    driver.section(3, "first user message — submit")
-    press_enter(driver)
-    driver.pump_for(0.3)
+    # Section 1: SUCCESSOR emergence animation + welcome screen
+    # cmd_setup() plays the bundled intro before the wizard opens,
+    # so we let the full animation play through. The animation is
+    # ~5 seconds; add a buffer for boot.
+    driver.section(1, "SUCCESSOR emergence animation")
+    driver.pump_for(6.0)
 
-    # Section 4: model streams its reply
-    driver.section(4, "streaming reply")
-    driver.pump_for(12.0)
-
-    # Section 5: open the slash command palette
-    driver.section(5, "slash command palette")
-    driver.send(b"/")
-    driver.pump_for(2.5)
-
-    driver.section(6, "dismiss the palette")
-    press_esc(driver)
-    driver.pump_for(0.5)
-    # Clear the leading slash from the input buffer
-    driver.send(b"\x7f")  # backspace
-    driver.pump_for(0.5)
-
-    # Section 7: bash tool execution
-    driver.section(7, "bash tool — type the command")
-    type_string(driver, "/bash ls -la /tmp")
-    driver.pump_for(0.4)
-
-    driver.section(8, "bash tool — submit and watch the card")
-    press_enter(driver)
+    # Section 2: welcome screen — typewriter intro
+    # The wizard's first frame is the welcome panel with a
+    # left-to-right typewriter. Let it complete fully so the viewer
+    # sees the brand portrait + tagline.
+    driver.section(2, "welcome screen — typewriter")
     driver.pump_for(4.0)
 
-    # Section 9: theme cycling — show the smooth blend transition
-    driver.section(9, "theme cycle — Ctrl+T")
-    press_ctrl(driver, "t")
-    driver.pump_for(2.5)
+    # Section 3: advance to NAME step
+    driver.section(3, "advance to NAME step")
+    press_right(driver)
+    driver.pump_for(1.5)
 
-    driver.section(10, "theme cycle — Ctrl+T again")
-    press_ctrl(driver, "t")
-    driver.pump_for(2.5)
+    # Section 4: type the profile name
+    # "demo" is short, easy to read, and clearly a placeholder.
+    driver.section(4, "type profile name")
+    type_string(driver, "demo")
+    driver.pump_for(0.8)
 
-    # Section 11: dark / light toggle
-    driver.section(11, "dark/light toggle — Alt+D")
-    press_alt(driver, "d")
-    driver.pump_for(2.5)
-
-    driver.section(12, "dark/light toggle back — Alt+D")
-    press_alt(driver, "d")
+    # Section 5: submit name → THEME step
+    driver.section(5, "submit name → THEME step")
+    press_enter(driver)
     driver.pump_for(2.0)
 
-    # Section 13: help overlay
-    driver.section(13, "help overlay — press ?")
-    press_question(driver)
-    driver.pump_for(5.0)
+    # Section 6: cycle to forge theme — show the live preview blend
+    # The theme step has a live preview pane that smoothly blends
+    # between palettes via lerp_rgb. This is one of the showpiece
+    # moments — make sure the viewer has time to see it.
+    driver.section(6, "theme cycle — Down to forge")
+    press_down(driver)
+    driver.pump_for(2.5)
 
-    driver.section(14, "dismiss help overlay")
+    # Section 7: cycle back to steel
+    driver.section(7, "theme cycle — Up to steel")
+    press_up(driver)
+    driver.pump_for(2.0)
+
+    # Section 8: advance to MODE step
+    driver.section(8, "advance to MODE step")
+    press_right(driver)
+    driver.pump_for(1.5)
+
+    # Section 9: toggle to light mode — another smooth blend
+    driver.section(9, "mode — Down to light")
+    press_down(driver)
+    driver.pump_for(2.5)
+
+    # Section 10: toggle back to dark
+    driver.section(10, "mode — Up to dark")
+    press_up(driver)
+    driver.pump_for(2.0)
+
+    # Section 11: advance to DENSITY step
+    driver.section(11, "advance to DENSITY step")
+    press_right(driver)
+    driver.pump_for(1.5)
+
+    # Section 12: cycle density — compact, normal, spacious
+    # Default cursor is at "normal" (index 1). Down → spacious,
+    # Up Up → compact, Down → normal. Each move triggers the
+    # density layout transition in the live preview.
+    driver.section(12, "density — Down to spacious")
+    press_down(driver)
+    driver.pump_for(2.0)
+
+    driver.section(13, "density — Up Up to compact")
+    press_up(driver)
+    driver.pump_for(0.5)
+    press_up(driver)
+    driver.pump_for(2.0)
+
+    driver.section(14, "density — Down to normal")
+    press_down(driver)
+    driver.pump_for(1.5)
+
+    # Section 15: advance to INTRO step
+    driver.section(15, "advance to INTRO step")
+    press_right(driver)
+    driver.pump_for(2.0)
+
+    # Section 16: INTRO is already on "successor" by default — no
+    # change needed, just advance. The viewer sees the option list
+    # with successor highlighted.
+    driver.section(16, "INTRO step — successor preselected, advance")
+    press_right(driver)
+    driver.pump_for(1.5)
+
+    # Section 17: PROVIDER step — cycle through all three options
+    # so the viewer sees the matrix of choices. Space cycles
+    # llamacpp → openai → openrouter → llamacpp.
+    driver.section(17, "PROVIDER step — llamacpp default")
+    driver.pump_for(2.5)
+
+    driver.section(18, "PROVIDER — Space to openai")
     press_space(driver)
-    driver.pump_for(1.0)
+    driver.pump_for(2.5)
 
-    # Section 15: budget command — show the live token count
-    driver.section(15, "/budget — type")
-    type_string(driver, "/budget")
-    driver.pump_for(0.3)
+    driver.section(19, "PROVIDER — Space to openrouter")
+    press_space(driver)
+    driver.pump_for(2.5)
 
-    driver.section(16, "/budget — submit")
+    driver.section(20, "PROVIDER — Space back to llamacpp")
+    press_space(driver)
+    driver.pump_for(1.5)
+
+    # Section 21: advance to TOOLS step
+    driver.section(21, "advance to TOOLS step")
+    press_right(driver)
+    driver.pump_for(2.0)
+
+    # Section 22: TOOLS step — bash is enabled by default, so we
+    # just let the viewer see the checkbox state and advance.
+    driver.section(22, "TOOLS step — bash preselected, advance")
+    press_right(driver)
+    driver.pump_for(1.5)
+
+    # Section 23: REVIEW step — show the full profile summary
+    driver.section(23, "REVIEW step — summary visible")
+    driver.pump_for(4.0)
+
+    # Section 24: save the profile — Enter triggers the SAVED
+    # screen which shows a "profile saved" toast and auto-advances
+    # into the chat after a brief pause.
+    driver.section(24, "save profile — Enter")
     press_enter(driver)
     driver.pump_for(2.5)
 
-    # Section 17: burn synthetic tokens to set up compaction
-    driver.section(17, "/burn 5000 — type")
-    type_string(driver, "/burn 5000")
-    driver.pump_for(0.3)
+    # Section 25: chat opens with the new profile active
+    # The chat constructor builds the empty-state hero panel
+    # because the wizard-saved profile has chat_intro_art="successor"
+    # by default. The panel renders immediately on the first frame.
+    driver.section(25, "chat opens — empty-state hero panel")
+    driver.pump_for(6.0)
 
-    driver.section(18, "/burn 5000 — submit")
+    # Section 26: clean /quit exit
+    # /quit doesn't go through autocomplete here because we want
+    # the keystrokes to be visible — type it slowly.
+    driver.section(26, "type /quit")
+    type_string(driver, "/quit")
+    driver.pump_for(0.4)
+
+    driver.section(27, "submit /quit → exit")
     press_enter(driver)
     driver.pump_for(1.5)
 
-    # Section 18b: trigger compaction — the harness's signature
-    # visible animation. Long pump because the model has to
-    # summarize the burned content.
-    driver.section(19, "/compact — type")
-    type_string(driver, "/compact")
-    driver.pump_for(0.3)
-
-    driver.section(20, "/compact — submit + animation + summary")
-    press_enter(driver)
-    driver.pump_for(20.0)  # animation + LLM summary
-
-    driver.section(21, "settled boundary — pulse + summary visible")
-    driver.pump_for(3.0)
-
-    # Section 22: clean exit
-    driver.section(22, "/quit — type and submit")
-    type_string(driver, "/quit")
-    press_enter(driver)
-    driver.pump_for(1.0)
-
-    driver.section(23, "walkthrough complete")
+    driver.section(28, "walkthrough complete")
 
 
 # ─── Timeline preview ───
@@ -397,18 +492,18 @@ def compute_planned_timeline() -> list[tuple[float, str]]:
     the cut points without having to run the demo first.
 
     Parses the function's source line-by-line for `driver.section(...)`,
-    `driver.pump_for(...)`, and `type_string(driver, "...")` calls.
-    Adds 6.5s of boot+intro head start and TYPE_CHAR_DELAY_S per
-    char for typing sections. Stays in sync with the actual script
-    because it's reading the actual function source.
+    `driver.pump_for(...)`, `press_*(driver)`, and
+    `type_string(driver, "...")` calls. Each typed string adds
+    TYPE_CHAR_DELAY_S per char. Each press_* call adds zero time
+    (sends a single keystroke instantly). Stays in sync with the
+    actual script because it's reading the actual function source.
     """
     import inspect
     import re
 
     src = inspect.getsource(run_walkthrough)
     timeline: list[tuple[float, str]] = []
-    t = 6.5  # boot + intro animation, matches the section 0 pump
-    timeline.append((t, "section 0: boot + intro animation"))
+    t = 0.0
 
     for line in src.splitlines():
         m = re.search(r"driver\.section\((\d+),\s*\"([^\"]+)\"\)", line)
@@ -439,6 +534,12 @@ def main() -> int:
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     log_path = LOG_DIR / f"successor-walkthrough-{timestamp}.log"
+    # Temp config dir so the wizard saves its profile here, NOT in
+    # the user's real ~/.config/successor/. Cleaned up at exit.
+    temp_config = Path(tempfile.mkdtemp(
+        prefix=f"successor-walkthrough-{timestamp}-",
+        dir="/tmp",
+    ))
     print()
 
     # Preview the planned timeline so the user knows what's coming
@@ -453,10 +554,11 @@ def main() -> int:
     print(f"\nTotal runtime: ~{total:.0f} seconds (~{total/60:.1f} min)")
     print()
     print(f"timestamp log: {log_path}")
+    print(f"temp config:   {temp_config}  (cleaned up at exit)")
     print()
     print("When you press Enter, the script will:")
-    print("  1. Spawn `successor chat` as a child")
-    print("  2. Run the scripted walkthrough above")
+    print("  1. Spawn `successor setup` against the temp config dir")
+    print("  2. Run the scripted first-time setup walkthrough")
     print("  3. Exit cleanly")
     print()
     print("START YOUR SCREEN RECORDING NOW, then press Enter to begin.")
@@ -464,6 +566,7 @@ def main() -> int:
         input()
     except (EOFError, KeyboardInterrupt):
         print("aborted")
+        shutil.rmtree(temp_config, ignore_errors=True)
         return 0
 
     # Save terminal mode so we can restore it on exit
@@ -476,13 +579,17 @@ def main() -> int:
     cols, rows = get_terminal_size()
     driver = Driver(log_path)
 
+    pid = -1
     try:
-        # Fork into the chat
+        # Fork into the setup wizard
         pid, fd = pty.fork()
         if pid == 0:
-            # Child: exec successor
+            # Child: scrub interfering env vars, point at temp config,
+            # then exec successor setup. The temp config dir keeps the
+            # user's real ~/.config/successor/ untouched.
+            os.environ["SUCCESSOR_CONFIG_DIR"] = str(temp_config)
             try:
-                os.execvp("successor", ["successor", "chat"])
+                os.execvp("successor", ["successor", "setup"])
             except FileNotFoundError:
                 os.write(2, b"successor binary not found in PATH\n")
                 os._exit(1)
@@ -494,13 +601,11 @@ def main() -> int:
         driver.start(t0, fd, pid)
         driver.log(f"walkthrough started — log: {log_path}")
         driver.log(f"terminal: {cols} cols × {rows} rows")
+        driver.log(f"temp config: {temp_config}")
 
-        # Let the chat fully boot (alt-screen, intro animation, etc.)
-        # The intro plays for ~5s, plus boot overhead.
-        driver.section(0, "boot + intro animation")
-        driver.pump_for(6.5)
-
-        # Run the scripted demo
+        # Run the scripted demo. Section 1 is the SUCCESSOR animation
+        # — there's no separate "boot" section because the animation
+        # IS the boot.
         run_walkthrough(driver)
 
         # Drain any remaining output from the child
@@ -525,10 +630,13 @@ def main() -> int:
             except Exception:
                 pass
         # Reap the child if still around
-        try:
-            os.waitpid(pid, os.WNOHANG)
-        except Exception:
-            pass
+        if pid > 0:
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except Exception:
+                pass
+        # Clean up the temp config dir
+        shutil.rmtree(temp_config, ignore_errors=True)
 
     print()
     print("=" * 64)
