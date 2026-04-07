@@ -2613,6 +2613,215 @@ menu, and system prompt auto-discover it.
 
 ---
 
+## Phase 5.8 — bash safety flags + verb classes + prepared output (2026-04-07)
+
+Three commits that together unlock the harness for "go public" status:
+
+1. **Bash safety flags** — yolo mode, read-only mode, per-profile
+   tuning knobs plumbed through profile.tool_config["bash"].
+2. **Verb classification** — per-class icons in tool card headers
+   so cards are recognizable at a glance by their glyph.
+3. **PreparedToolOutput** — Pretext-shaped per-class output pipeline
+   that parses grep/ls/git-status output ONCE, caches wrapped lines
+   per width, and surfaces structural spans (match highlighting,
+   file type markers, status flags) the renderer paints as styled
+   ranges.
+
+### 1. Safety flags (bash/exec.py + wizard/config.py)
+
+Three flags live under `profile.tool_config["bash"]`:
+
+```python
+{
+    "allow_dangerous": False,  # yolo: sudo/rm-rf/eval/curl|sh all run
+    "allow_mutating": True,    # flip off for read-only mode
+    "timeout_s": 30.0,
+    "max_output_bytes": 8192,
+}
+```
+
+`resolve_bash_config(profile)` folds the dict over `BashConfig`
+defaults and returns a frozen dataclass. Both dispatch sites
+(`/bash` slash command and streaming bash detection) call it once
+per batch. Flipping any flag in the config menu takes effect on
+the next run with zero plumbing.
+
+Config menu: new `bash safety` section with four rows (yolo, allow
+mutating, timeout, max output). The rows are hidden via
+`_field_visible_for_profile()` when bash isn't in `profile.tools`
+— no bash, no noise. Toggling bash off snaps the cursor off any
+now-hidden bash_* row. The yolo toggle displays "⚠ YOLO" vs
+"off (safe)" so the state is unambiguous.
+
+`RefusedCommand` is a new base class for both
+`DangerousCommandRefused` and `MutatingCommandRefused` so dispatch
+sites can catch one exception and branch on the subclass for hint
+text pointing at the config path.
+
+### 2. Verb classes (bash/verbclass.py)
+
+Pure lookup module: every parsed verb maps to one of 8 `VerbClass`
+values, each with a distinct single-cell glyph:
+
+| Class   | Glyph | Example verbs                                     |
+|---------|-------|---------------------------------------------------|
+| READ    | ◲     | read-file, concatenate-files, read-file-head/tail |
+| SEARCH  | ⌕     | search-content, find-files, locate-binary         |
+| LIST    | ☰     | list-directory                                    |
+| INSPECT | ⊙     | working-directory, git-status/log/diff/show/blame |
+| MUTATE  | ✎     | create-file, delete-file, cp/mv, git-add/commit   |
+| EXEC    | ▶     | run-python-*, print-text                          |
+| DANGER  | ⚠     | anything risk-classified as dangerous             |
+| UNKNOWN | ?     | generic fallback, no parser match                 |
+
+Risk escalation is preserved: if `card.risk == "dangerous"` the
+class is ALWAYS DANGER regardless of the parser verb. Sudo ls,
+git push --force, rm -rf / all render with the warn glyph even
+though their native classes would be LIST / MUTATE / MUTATE.
+
+The renderer uses this in `_verb_glyph_for_card()` — the old
+risk-only glyph lookup (▸/✎/⚠) is replaced with a verb-class
+lookup. Scrolling through a long chat, the glyphs alone make card
+kinds recognizable in peripheral vision without reading verb text.
+
+### 3. Pretext-shaped output pipeline (bash/prepared_output.py)
+
+This is the killer feature — the architectural pattern finally
+paying off where it matters most.
+
+The old `_wrap_output(card, width)` did a fresh string split +
+hard-wrap pass every frame. Worse, it had no way to carry span-
+level metadata, so highlighting grep matches or marking ls entries
+as dir/file/link would've required a second parse pass at paint
+time.
+
+`PreparedToolOutput` mirrors `PreparedText` / `BrailleArt`:
+
+```python
+class PreparedToolOutput:
+    def __init__(self, card: ToolCard) -> None:
+        self._prepared = _prepare_for_card(card)  # verb-class dispatch
+        self._cache_w = -1
+        self._cache_lines = []
+
+    def layout(self, width: int, *, max_lines: int = 12) -> list[OutputLine]:
+        if width == self._cache_w and max_lines == self._cache_max:
+            return self._cache_lines
+        # ... wrap + cache ...
+```
+
+`__init__` parses the output ONCE into a list of `_PreparedLine`
+objects with semantic spans. Verb-class dispatch picks the parser:
+
+- **SEARCH (grep)** — `_parse_grep_line()` matches `file:line:content`
+  and splits content into alternating plain + match spans at each
+  query hit (case-insensitive substring). The painter renders match
+  spans with a warm-accent background — grep hits literally pop
+  off the screen.
+- **LIST (ls -l)** — `_parse_ls_line()` matches the long-format
+  regex and splits into dim chrome (perms + size + date) + marker
+  + name span. Directories get `▸`, symlinks `↗`, executables `★`,
+  regular files `·`. The "total N" header is passed through as a
+  dim header row.
+- **INSPECT (git-status)** — `_parse_git_status_line()` matches the
+  short-format flags and tints `M`/`A` chrome, `?` dim, `D`/`R` warn.
+- **default** — plain stdout + stderr pass-through, matching the
+  old `_wrap_output` behavior.
+
+`layout(width)` hard-wraps each prepared line to the target width,
+preserving span kinds across wraps (a long match span that straddles
+a wrap boundary retains `match` on both halves). Width-keyed
+single-entry cache: re-paints at the same width are zero-cost.
+
+### 4. Renderer span painter
+
+`_paint_output_line()` walks an `OutputLine`'s spans and paints
+each with a style resolved from `_span_style(span_kind, row_kind,
+theme)`. Five span kinds cover every highlight the current cards
+need: `plain`, `match`, `chrome`, `dim`, `warn`. Five row kinds
+tint the base: `stdout`, `stderr`, `match`, `truncated`, `header`.
+
+Single source of truth for the (span_kind, row_kind) → Style
+mapping. Adding a new kind means teaching this one function and
+nothing else. The painter itself is 10 lines.
+
+### 5. Two-level cache on _Message
+
+Tool-card _Message instances gained two cache slots:
+
+- `_prepared_tool_output: PreparedToolOutput | None` — built on
+  first paint, reused forever (the card is frozen so the output
+  never changes)
+- `_card_rows_cache` + `_card_rows_cache_key` — the final
+  pre-painted `list[_RenderedRow]`, keyed by `(body_width,
+  id(theme_variant))`. Hit = zero-cost re-paint (the chat's
+  existing cell-copy fast path takes over).
+
+Resize or theme swap invalidates both. The PreparedToolOutput
+stays valid; only the pre-painted row snapshot gets rebuilt at
+the new width. Measured cost of a steady-state paint at 30fps
+with 10 tool cards on screen: effectively zero after the first
+frame.
+
+### Live smoke test
+
+Ran every verb class through dispatch_bash + paint_tool_card and
+eyeballed the headers. Every glyph renders in its expected
+position, every class-specific body layout works:
+
+```
+╭── ☰ list-directory ──────────── ...   ls -la src/
+╭── ◲ read-file ───────────────── ...   cat README.md
+╭── ⌕ search-content ──────────── ...   grep -rn def foo.py
+╭── ⌕ find-files ──────────────── ...   find src -name '*.py'
+╭── ⊙ working-directory ───────── ...   pwd
+╭── ⌕ locate-binary ───────────── ...   which python
+╭── ▶ print-text ──────────────── ...   echo hello
+╭── ▶ run-python-inline ───────── ...   python -c 'print(42)'
+╭── ✎ create-directory ────────── ...   mkdir /tmp/foo
+╭── ✎ delete-file ─────────────── ...   rm /tmp/foo/x
+╭── ⊙ git-status ──────────────── ...   git status --short
+```
+
+### Tests: 756 passing (up from 667)
+
+- **test_bash_exec.py**: 15 new tests for `BashConfig` +
+  `resolve_bash_config` + `allow_dangerous` / `allow_mutating` /
+  `max_output_bytes` dispatch paths
+- **test_chat_bash.py**: 3 new tests for yolo mode / read-only
+  mode plumbing through the streaming path
+- **test_config_menu.py**: 7 new tests for the bash flag rows,
+  visibility toggling, cursor snap-back, persistence
+- **test_bash_verbclass.py** (NEW): 37 tests covering every parser
+  verb + risk-override rule + glyph uniqueness + real command
+  classification (parametrized)
+- **test_bash_render.py**: 6 tests updated to assert the new verb
+  glyphs
+- **test_bash_prepared_output.py** (NEW): 26 tests covering each
+  parser (grep/ls/git-status), span split logic, cache behaviour,
+  truncation, and chat-level two-level cache
+
+### What this buys us architecturally
+
+1. The renderer's cache pattern finally pays off where it's worth
+   paying for — expensive structural parses done once, wrap passes
+   cached, and the whole pre-painted row list cached on top of
+   that.
+2. Span-based output rendering means grep highlighting, ls
+   classification, and git-status flag tinting are now structural
+   properties of the prepared output, not paint-time guesses. A
+   new verb class or span kind is one entry in a lookup table.
+3. Yolo mode unlocks the harness for the user's real use case
+   (mid-grade model, local box, trust the operator) without
+   sacrificing the safety rails that the risk classifier provides
+   by default. The classifier still tags commands — users just
+   get to choose whether the tag refuses or not.
+4. Every layer is independently testable. The verb-class lookup
+   is pure. The prepared-output parsers are pure. The span painter
+   is pure. The cache invalidation is deterministic.
+
+---
+
 ## What's next
 
 - **Additional tools** — `read_file`, `web_search`, `git_diff` as
@@ -2658,10 +2867,13 @@ menu, and system prompt auto-discover it.
 | 5.5 (chat stays interactive during compaction wait) | 0 | 652 |
 | 5.6 (summary at the bottom + integrated boundary divider) | 0 | 652 |
 | 5.7 (tools architecture: registry + wizard + config + streaming) | 15 | 667 |
+| 5.8a (bash safety flags: yolo + read-only + tuning) | 22 | 689 |
+| 5.8b (verb classification: per-class icons in card headers) | 41 | 730 |
+| 5.8c (PreparedToolOutput: Pretext-shaped verb-aware output pipeline) | 26 | 756 |
 
 (Counts above are approximate by phase boundary; actual test
 collection may include additional small additions in subsequent
 commits.)
 
-Final: **667 tests, all passing, hermetic via `SUCCESSOR_CONFIG_DIR`,
+Final: **756 tests, all passing, hermetic via `SUCCESSOR_CONFIG_DIR`,
 no fake mocks, no `.skip()` or `.todo()`.**

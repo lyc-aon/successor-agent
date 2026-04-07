@@ -115,6 +115,7 @@ from .bash import (
     preview_bash,
     resolve_bash_config,
 )
+from .bash.prepared_output import PreparedToolOutput
 from .tools_registry import (
     AVAILABLE_TOOLS,
     build_system_prompt_tools_section,
@@ -645,6 +646,8 @@ class _Message:
         "role", "raw_text", "body", "created_at", "synthetic", "tool_card",
         "is_boundary", "is_summary", "boundary_meta",
         "_token_count",
+        "_prepared_tool_output",
+        "_card_rows_cache_key", "_card_rows_cache",
     )
 
     def __init__(
@@ -678,6 +681,16 @@ class _Message:
         # message's lifetime because raw_text is set at construction
         # and never mutated. None = not yet computed.
         self._token_count: int | None = None
+        # Pretext-shaped PreparedToolOutput, built once per tool-card
+        # message on first paint and reused across frames. The output
+        # is immutable (card is frozen) so this cache never invalidates.
+        self._prepared_tool_output = None  # PreparedToolOutput | None
+        # Cache of the pre-painted card row list, keyed by
+        # (body_width, theme_name, display_mode). On cache hit, the
+        # renderer skips the entire sub-grid paint. Changing width
+        # (resize) or switching theme/mode invalidates the cache.
+        self._card_rows_cache_key: tuple | None = None
+        self._card_rows_cache: list | None = None
 
 
 # Prefix strings shown at the start of every message.
@@ -3945,7 +3958,7 @@ class SuccessorChat(App):
             # ─── Tool card message ───
             if msg.tool_card is not None:
                 card_rows = self._render_tool_card_rows(
-                    msg.tool_card, body_width, theme,
+                    msg, body_width, theme,
                 )
                 # Apply global_fade_alpha to tool card rows by tinting
                 # their pre-painted cells (a no-op when 1.0)
@@ -4045,7 +4058,7 @@ class SuccessorChat(App):
 
     def _render_tool_card_rows(
         self,
-        card: ToolCard,
+        msg: "_Message",
         body_width: int,
         theme: ThemeVariant,
     ) -> list[_RenderedRow]:
@@ -4057,10 +4070,40 @@ class SuccessorChat(App):
         directly into a Grid, so we render it into a temporary sub-grid
         of (height x body_width), then walk row-by-row, snapshotting
         each row's cells into a tuple that the painter copies verbatim.
+
+        Pretext-shaped caching: the PreparedToolOutput is built ONCE per
+        _Message on first paint and cached on the message (the card is
+        frozen so the output never changes). The final list of pre-
+        painted rows is cached keyed by (body_width, theme_name,
+        display_mode) — as long as the user doesn't resize or swap
+        theme/mode, re-paints are a list lookup, zero work.
         """
+        card = msg.tool_card
+        if card is None:
+            return []
+
+        # Build the PreparedToolOutput once per message. Immutable
+        # (card is frozen dataclass), so it never needs to invalidate.
+        if msg._prepared_tool_output is None:
+            msg._prepared_tool_output = PreparedToolOutput(card)
+        prepared = msg._prepared_tool_output
+
+        # Second-level cache: the final pre-painted row list. Key is
+        # (width, id(theme_variant)) — the variant is resolved freshly
+        # every frame but the object identity stays stable between
+        # theme swaps, so `id()` is a precise cache key. A theme swap
+        # builds a new ThemeVariant and the cache auto-invalidates.
+        cache_key = (body_width, id(theme))
+        if (
+            msg._card_rows_cache_key == cache_key
+            and msg._card_rows_cache is not None
+        ):
+            return msg._card_rows_cache
+
         # Compute the height the card will need at this width.
         height = measure_tool_card_height(
             card, width=body_width, show_output=card.executed,
+            prepared=prepared,
         )
         if height <= 0:
             return []
@@ -4070,6 +4113,7 @@ class SuccessorChat(App):
         sub = Grid(height, body_width)
         paint_tool_card(
             sub, card, x=0, y=0, w=body_width, theme=theme,
+            prepared=prepared,
         )
 
         # Snapshot each row of the sub-grid as an immutable tuple of
@@ -4091,6 +4135,9 @@ class SuccessorChat(App):
                     prepainted_cells=tuple(cells),
                 )
             )
+
+        msg._card_rows_cache_key = cache_key
+        msg._card_rows_cache = rows
         return rows
 
     def _render_md_lines_with_search(

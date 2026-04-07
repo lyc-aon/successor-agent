@@ -50,6 +50,7 @@ from ..render.paint import (
 )
 from ..render.theme import ThemeVariant
 from .cards import Risk, ToolCard
+from .prepared_output import OutputLine, OutputSpan, PreparedToolOutput
 from .verbclass import VerbClass, glyph_for_class, verb_class_for
 
 
@@ -80,6 +81,85 @@ def _border_color(risk: Risk, theme: ThemeVariant) -> int:
     return theme.accent
 
 
+def _span_style(
+    span_kind: str, row_kind: str, theme: ThemeVariant,
+) -> Style:
+    """Resolve a Style for a (span_kind, row_kind) pair.
+
+    Span kinds are per-substring: plain / match / chrome / dim / warn.
+    Row kinds are per-line: stdout / stderr / match / truncated /
+    header. Row kind informs the base bg/fg tint; span kind overlays
+    a more specific treatment (the match highlighter painting a cell
+    bg different from its neighbors).
+
+    The mapping below is the single source of truth for how verb-
+    class-aware output surfaces translate to renderer styles. When a
+    new span/row kind is added, teach this function how to paint it.
+    """
+    base_bg = theme.bg_input
+
+    # Row-level base: stderr lines get a warn-tinted base fg; header
+    # lines (ls "total N") get the subtle treatment; the rest default
+    # to the theme's normal fg. Truncated rows mimic the old dim italic.
+    if row_kind == "stderr":
+        base_fg = theme.accent_warn
+        base_attrs = ATTR_DIM
+    elif row_kind == "truncated":
+        base_fg = theme.fg_subtle
+        base_attrs = ATTR_DIM | ATTR_ITALIC
+    elif row_kind == "header":
+        base_fg = theme.fg_subtle
+        base_attrs = ATTR_DIM
+    else:
+        base_fg = theme.fg
+        base_attrs = 0
+
+    # Span-level overlay
+    if span_kind == "match":
+        # Match spans get a warm-accent background so grep hits pop
+        return Style(
+            fg=theme.bg, bg=theme.accent_warm,
+            attrs=ATTR_BOLD,
+        )
+    if span_kind == "chrome":
+        return Style(
+            fg=theme.accent, bg=base_bg, attrs=ATTR_BOLD,
+        )
+    if span_kind == "dim":
+        return Style(
+            fg=theme.fg_dim, bg=base_bg, attrs=ATTR_DIM,
+        )
+    if span_kind == "warn":
+        return Style(
+            fg=theme.accent_warn, bg=base_bg, attrs=ATTR_BOLD,
+        )
+
+    # Plain span inherits the row's base treatment
+    return Style(fg=base_fg, bg=base_bg, attrs=base_attrs)
+
+
+def _paint_output_line(
+    grid: Grid,
+    line: OutputLine,
+    x: int,
+    y: int,
+    theme: ThemeVariant,
+) -> None:
+    """Paint one OutputLine to the grid at (x, y).
+
+    Walks the line's spans left-to-right, painting each with the
+    style resolved from (span_kind, row_kind). The grid's fill has
+    already been applied to the background by the caller.
+    """
+    cursor = x
+    for span in line.spans:
+        if not span.text:
+            continue
+        style = _span_style(span.kind, line.kind, theme)
+        paint_text(grid, span.text, cursor, y, style=style)
+        cursor += len(span.text)
+
+
 def _verb_glyph_for_card(card: ToolCard) -> str:
     """Glyph that prefixes the verb in the card header.
 
@@ -102,12 +182,17 @@ def measure_tool_card_height(
     width: int,
     show_output: bool = True,
     max_output_lines: int = DEFAULT_MAX_OUTPUT_LINES,
+    prepared: PreparedToolOutput | None = None,
 ) -> int:
     """Compute the total height a ToolCard would consume at this width.
 
     Used by callers that need to lay out the card *before* painting
     (e.g., the chat painter computing scroll geometry). Pure function
     of the card data + width.
+
+    Pass `prepared` if you already have a PreparedToolOutput for this
+    card (e.g. cached on the wrapping chat message); otherwise one is
+    constructed inline and thrown away after this call.
     """
     if width < 20:
         return 0
@@ -116,11 +201,13 @@ def measure_tool_card_height(
     n_params = max(1, len(card.params)) if card.params else 1
     box_h = 2 + n_params  # top + params + bottom
 
-    if not show_output:
+    if not show_output or not card.executed:
         return box_h
 
     # Output rows + status line
-    out_lines = _wrap_output(card, width=width, max_lines=max_output_lines)
+    prep = prepared if prepared is not None else PreparedToolOutput(card)
+    avail = max(20, width - OUTPUT_INDENT - 2)
+    out_lines = prep.layout(avail, max_lines=max_output_lines)
     return box_h + len(out_lines) + 1  # +1 for the trailing status line
 
 
@@ -137,6 +224,7 @@ def paint_tool_card(
     theme: ThemeVariant,
     show_output: bool = True,
     max_output_lines: int = DEFAULT_MAX_OUTPUT_LINES,
+    prepared: PreparedToolOutput | None = None,
 ) -> int:
     """Paint `card` at (x, y) with width `w`. Returns rows consumed.
 
@@ -146,6 +234,11 @@ def paint_tool_card(
 
     All painting goes through render/paint.py primitives — no direct
     grid.set() calls outside the box header overlay.
+
+    `prepared` is an optional PreparedToolOutput cached on the calling
+    side (chat messages hold one per tool card). Passing a cached
+    instance skips re-parsing the output every frame. If omitted a
+    fresh instance is built for this paint and discarded.
     """
     if w < 20 or y >= grid.rows:
         return 0
@@ -248,9 +341,11 @@ def paint_tool_card(
     if not card.executed:
         return cur_y - y
 
-    out_lines = _wrap_output(card, width=w, max_lines=max_output_lines)
+    prep = prepared if prepared is not None else PreparedToolOutput(card)
+    avail = max(20, w - OUTPUT_INDENT - 2)
+    out_lines = prep.layout(avail, max_lines=max_output_lines)
     out_x = x + OUTPUT_INDENT
-    for line_text, line_style_kind in out_lines:
+    for line in out_lines:
         if cur_y >= grid.rows:
             break
         # Tinted background bar across the output region
@@ -258,18 +353,9 @@ def paint_tool_card(
             grid, x + 1, cur_y, w - 2, 1,
             style=Style(bg=theme.bg_input),
         )
-        if line_style_kind == "stderr":
-            line_style = Style(
-                fg=theme.accent_warn, bg=theme.bg_input, attrs=ATTR_DIM,
-            )
-        elif line_style_kind == "truncated":
-            line_style = Style(
-                fg=theme.fg_subtle, bg=theme.bg_input,
-                attrs=ATTR_DIM | ATTR_ITALIC,
-            )
-        else:
-            line_style = Style(fg=theme.fg, bg=theme.bg_input)
-        paint_text(grid, line_text, out_x, cur_y, style=line_style)
+        _paint_output_line(
+            grid, line, out_x, cur_y, theme,
+        )
         cur_y += 1
 
     # ─── Status footer — exit code + duration ───
@@ -295,51 +381,4 @@ def paint_tool_card(
     return cur_y - y
 
 
-# ─── Output wrapping ───
-
-
-def _wrap_output(
-    card: ToolCard,
-    *,
-    width: int,
-    max_lines: int,
-) -> list[tuple[str, str]]:
-    """Convert card.output and card.stderr into a list of (text, kind) rows.
-
-    kind is one of "stdout", "stderr", "truncated". Hard-wraps at the
-    available width, drops empty trailing lines, and truncates the
-    list at max_lines, leaving a "(N more lines)" trailer.
-    """
-    avail = max(20, width - OUTPUT_INDENT - 2)
-    rows: list[tuple[str, str]] = []
-
-    def _push_text(text: str, kind: str) -> None:
-        for line in text.split("\n"):
-            line = line.rstrip("\r")
-            if not line:
-                rows.append(("", kind))
-                continue
-            # Hard-wrap long lines
-            while len(line) > avail:
-                rows.append((line[:avail], kind))
-                line = line[avail:]
-            rows.append((line, kind))
-
-    if card.output:
-        _push_text(card.output, "stdout")
-    if card.stderr:
-        _push_text(card.stderr, "stderr")
-
-    # Drop trailing blanks
-    while rows and rows[-1][0] == "":
-        rows.pop()
-
-    if not rows:
-        return [("(no output)", "truncated")]
-
-    if len(rows) > max_lines:
-        hidden = len(rows) - max_lines + 1
-        rows = rows[: max_lines - 1]
-        rows.append((f"⋯ {hidden} more line{'s' if hidden != 1 else ''} ⋯", "truncated"))
-
-    return rows
+# Output wrapping moved to prepared_output.PreparedToolOutput.layout
