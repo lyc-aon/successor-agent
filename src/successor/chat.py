@@ -421,6 +421,61 @@ _BASH_TOOL_SCHEMA: dict = {
 }
 
 
+def _infer_tool_preview(
+    command_text: str,
+) -> tuple[str, str, str] | None:
+    """Parse a (partial) bash command via `preview_bash` and return a
+    (glyph, verb_name, hint) triple for the streaming preview header.
+
+    Returns None when the command is too short, too malformed, or
+    the parser falls back to the generic "bash ?" card with
+    confidence < 0.7. The threshold is deliberately strict so the
+    preview verb only resolves once the parser is reasonably sure
+    — before that the user sees the generic "receiving arguments"
+    header, avoiding flicker on partial input.
+
+    The beauty of this function: it calls the SAME preview_bash that
+    the final card uses, so the inferred verb+params EXACTLY match
+    what the settled card will display. As the command streams in,
+    the preview resolves in stages:
+
+      "cat"                → generic (conf 0.60, too low)
+      "cat > ab"           → write-file, path=ab   (conf 0.90)
+      "cat > about.html"   → write-file, path=about.html
+
+    Risk escalation is preserved: `rm -rf /` shows as DANGER (⚠)
+    even mid-stream because the risk classifier runs on each
+    parse. This is useful — the user sees the danger class
+    resolve immediately, not after the dispatch gate fires.
+    """
+    if not command_text or len(command_text.strip()) < 3:
+        return None
+    try:
+        from .bash import preview_bash
+        from .bash.verbclass import glyph_for_class, verb_class_for
+        card = preview_bash(command_text)
+    except Exception:
+        return None
+    if card.confidence < 0.7:
+        return None
+    cls = verb_class_for(card.verb, card.risk)
+    glyph = glyph_for_class(cls)
+    # Pull the most informative parameter for the hint — usually
+    # the first one (parsers put `path`, `script`, `pattern` first).
+    hint = ""
+    for key, value in card.params:
+        if not value or value == "(missing)":
+            continue
+        # Clip the hint so multi-line heredoc content or very long
+        # paths don't blow out the preview row width.
+        text = str(value).replace("\n", " ").strip()
+        if len(text) > 50:
+            text = text[:47] + "…"
+        hint = f"{key}: {text}"
+        break
+    return (glyph, card.verb, hint)
+
+
 def _extract_command_tail(raw_args: str) -> str:
     """Extract the progressively-streaming `command` field from a
     partial tool_call arguments JSON blob, returning the unescaped
@@ -1501,6 +1556,14 @@ class SuccessorChat(App):
         # StreamEnded handler whenever runners are spawned, cleared
         # in _pump_running_tools when continuation fires.
         self._pending_continuation: bool = False
+        # Sticky cache of inferred verb previews for in-flight tool
+        # calls, keyed by (stream_id, call_index). Once preview_bash
+        # returns a high-confidence verb for a streaming tool call,
+        # we remember it so a later partial that momentarily confuses
+        # the parser (e.g., an unclosed quote mid-stream) doesn't
+        # flicker the header back to the generic "receiving" message.
+        # Reset when a stream starts or ends.
+        self._streaming_verb_cache: dict[tuple[int, int], tuple[str, str, str]] = {}
 
         # ─── Scrollback state ───
         self.scroll_offset: int = 0
@@ -3546,6 +3609,9 @@ class SuccessorChat(App):
                 self._stream = None
                 self._stream_content = []
                 self._stream_reasoning_chars = 0
+                # Clear the sticky verb-preview cache; a new stream
+                # will populate it fresh if it spawns more tool calls.
+                self._streaming_verb_cache = {}
 
                 # Dispatch native tool calls first (they carry the
                 # model-provided ids), then any legacy bash blocks the
@@ -3585,6 +3651,9 @@ class SuccessorChat(App):
                 self._stream = None
                 self._stream_content = []
                 self._stream_reasoning_chars = 0
+                # Clear the sticky verb-preview cache; any tool-call
+                # previews for this dead stream no longer apply.
+                self._streaming_verb_cache = {}
                 # Drop the bash detector — partial bash blocks in a
                 # failed stream aren't safe to execute
                 self._stream_bash_detector = None
@@ -5112,6 +5181,7 @@ class SuccessorChat(App):
                 out.extend(self._streaming_tool_call_preview_rows(
                     name=tc.get("name") or "bash",
                     raw_arguments=raw_args,
+                    call_index=tc.get("index", 0),
                     body_width=body_width,
                     theme=theme,
                     spinner=spinner,
@@ -5173,6 +5243,7 @@ class SuccessorChat(App):
             out.extend(self._streaming_tool_call_preview_rows(
                 name=tc.get("name") or "bash",
                 raw_arguments=raw_args,
+                call_index=tc.get("index", 0),
                 body_width=body_width,
                 theme=theme,
                 spinner=spinner,
@@ -5184,6 +5255,7 @@ class SuccessorChat(App):
         *,
         name: str,
         raw_arguments: str,
+        call_index: int,
         body_width: int,
         theme: ThemeVariant,
         spinner: str,
@@ -5191,8 +5263,12 @@ class SuccessorChat(App):
         """Build the rows for a "tool call arriving" live preview.
 
         Design:
-          Row 1:  ⟡ bash — receiving arguments…  (header, dim accent)
-          Row 2+: scrolling tail of raw_arguments, last N wrapped
+          Row 1:  ✎ write-file  path: about.html   (header, inferred
+                  verb + glyph + param hint when parse_bash resolves
+                  the partial command; falls back to a generic
+                  "⟡ bash — receiving arguments…" header when the
+                  command is too short or too malformed to classify)
+          Row 2+: scrolling tail of the command body, last N wrapped
                   lines, dim italic with a typewriter cursor on the
                   final line. Mirrors the reasoning-preview aesthetic
                   so the user immediately recognizes "this is content
@@ -5229,8 +5305,32 @@ class SuccessorChat(App):
         tail_lines[-1] = tail_lines[-1] + "▌"
 
         rows: list[_RenderedRow] = []
-        # Header row
-        header_text = f"{spinner} ⟡ {name} — receiving arguments…"
+        # Header row — try to infer the verb from the partial command
+        # so the header mirrors the final card instead of saying
+        # "receiving arguments…" forever.
+        #
+        # Stickiness: once a high-confidence inference resolves for a
+        # given call, cache it keyed by (stream_id, call_index) so
+        # subsequent frames where the parser momentarily loses
+        # confidence (mid-stream unclosed quotes, etc.) don't flicker
+        # the header back to the generic message. We only REPLACE a
+        # cached inference with a NEW successful inference — never
+        # with a fallback.
+        inferred = _infer_tool_preview(display_text)
+        cache_key = (id(self._stream), call_index)
+        if inferred is not None:
+            self._streaming_verb_cache[cache_key] = inferred
+        else:
+            inferred = self._streaming_verb_cache.get(cache_key)
+
+        if inferred is not None:
+            glyph, verb_name, hint = inferred
+            if hint:
+                header_text = f"{spinner} {glyph} {verb_name}  {hint}"
+            else:
+                header_text = f"{spinner} {glyph} {verb_name}"
+        else:
+            header_text = f"{spinner} ⟡ {name} — receiving arguments…"
         rows.append(
             _RenderedRow(
                 leading_text=" " * _PREFIX_W + "  ↳ ",
