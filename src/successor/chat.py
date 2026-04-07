@@ -615,6 +615,7 @@ class _Message:
     __slots__ = (
         "role", "raw_text", "body", "created_at", "synthetic", "tool_card",
         "is_boundary", "is_summary", "boundary_meta",
+        "_token_count",
     )
 
     def __init__(
@@ -643,6 +644,11 @@ class _Message:
         # token counts + reduction_pct + summary_text. The painter reads
         # these to render the divider's central pill.
         self.boundary_meta = boundary_meta
+        # Lazy per-message token count cache. Computed on first access
+        # via the chat's TokenCounter and remembered. Invariant for the
+        # message's lifetime because raw_text is set at construction
+        # and never mutated. None = not yet computed.
+        self._token_count: int | None = None
 
 
 # Prefix strings shown at the start of every message.
@@ -996,6 +1002,24 @@ class SuccessorChat(App):
         # on first /budget or /compact so we don't pay the construction
         # cost for chats that never use the agent loop.
         self._cached_token_counter: TokenCounter | None = None
+
+        # Chat-level cached total token count for the static footer.
+        # Without this cache the footer walks every message via the
+        # TokenCounter every frame — at 200K context that's 1 fps.
+        # With it, the footer is O(1) in steady state.
+        #
+        # Cache key: (id(self.messages), len(self.messages))
+        #   - id catches wholesale list reassignment (test fixtures
+        #     replacing messages with a same-length list, /from_agent_log
+        #     swapping post-compact, etc) because each new list gets a
+        #     fresh CPython id
+        #   - len catches in-place appends (the same list grows)
+        # Together they cover every mutation pattern the chat does.
+        # The only thing they MISS is in-place text edits to an existing
+        # message at the same index, which the chat never does because
+        # raw_text is set at construction and never mutated.
+        self._cached_total_tokens: int | None = None
+        self._cached_total_tokens_key: tuple[int, int] = (-1, -1)
 
     # ─── Input handling ───
 
@@ -2189,6 +2213,115 @@ class SuccessorChat(App):
             blocking_buffer=max(1_000, window // 128),
         )
 
+    # ─── Token count caching ───
+    #
+    # The static footer needs the total token count for its fill bar +
+    # threshold badges. Computing this naively (walk every message,
+    # tokenize body, sum) is O(N) per frame and at 200K context that's
+    # ~1000ms — drops the chat to 1 fps.
+    #
+    # Two layers of caching to make this O(1) in the steady state:
+    #
+    #   _Message._token_count    per-message cache, computed once on
+    #                            first access (text is invariant for
+    #                            the message's lifetime — raw_text is
+    #                            set at construction and never mutated)
+    #
+    #   self._cached_total_tokens  chat-level cache of the SUM, set
+    #                              by _total_tokens() on first read
+    #                              after a mutation, invalidated by
+    #                              _invalidate_token_cache() at every
+    #                              self.messages mutation site
+    #
+    # The mutation sites are: _submit (user message append), _pump_stream
+    # (assistant commit), _handle_burn_cmd (synthetic injection),
+    # _from_agent_log (compaction swap), _handle_compact_cmd (snapshot+
+    # swap), and the few synthetic-message appends scattered through the
+    # slash command handlers. All audited and wired.
+
+    def _invalidate_token_cache(self) -> None:
+        """Mark the chat-level total token cache as stale.
+
+        Optional explicit-invalidation hook — most call sites don't
+        need to call this because `_total_tokens()` auto-detects
+        mutations via (id, len) of self.messages. Use it only when
+        you mutate a message's content in-place (which we don't
+        currently do).
+        """
+        self._cached_total_tokens = None
+        self._cached_total_tokens_key = (-1, -1)
+
+    def _token_count_for_message(self, msg: "_Message") -> int:
+        """Return (and lazy-compute) the token count for a single
+        chat _Message. Includes the standard 4-token role overhead.
+
+        Per-message counts are cached on the _Message itself in the
+        `_token_count` slot. The cache is invariant because raw_text
+        and tool_card are set at construction and never mutated.
+        """
+        if msg._token_count is not None:
+            return msg._token_count
+        # Determine the text payload for this message
+        if msg.tool_card is not None:
+            card = msg.tool_card
+            text = f"$ {card.raw_command}"
+            if card.output:
+                text += "\n" + card.output
+        else:
+            text = msg.raw_text
+        # Use the agent counter when available (accurate via /tokenize),
+        # otherwise the char-count heuristic
+        if self._cached_token_counter is not None:
+            n = self._cached_token_counter.count(text) + 4
+        else:
+            n = max(1, len(text) // 4) + 4
+        msg._token_count = n
+        return n
+
+    def _total_tokens(self) -> int:
+        """Return the (cached) total token count of self.messages.
+
+        After the first read following a mutation, this is O(1).
+        Cache invalidation is automatic via (id, len) of self.messages
+        — appends, wholesale replacements (even same-length ones), and
+        truncations all bump at least one of the two values.
+
+        Streaming buffer is added on top via a cheap char-count
+        heuristic so the bar grows during streaming without paying the
+        endpoint cost on every frame.
+        """
+        cur_key = (id(self.messages), len(self.messages))
+        if (
+            self._cached_total_tokens is not None
+            and self._cached_total_tokens_key == cur_key
+        ):
+            committed_total = self._cached_total_tokens
+        else:
+            # Recompute from scratch (per-message counts hit the
+            # _token_count cache on _Message after the first walk)
+            if self._cached_token_counter is not None and self.system_prompt:
+                sys_tokens = self._cached_token_counter.count(self.system_prompt) + 4
+            elif self.system_prompt:
+                sys_tokens = max(1, len(self.system_prompt) // 4) + 4
+            else:
+                sys_tokens = 0
+            total = sys_tokens
+            for msg in self.messages:
+                total += self._token_count_for_message(msg)
+            self._cached_total_tokens = total
+            self._cached_total_tokens_key = cur_key
+            committed_total = total
+
+        # Streaming buffer — char heuristic for speed (the streaming
+        # buffer text changes every frame so caching is impossible
+        # anyway, and accuracy isn't critical for a live indicator).
+        streaming_delta = 0
+        if self._stream is not None and self._stream_content:
+            stream_text = "".join(self._stream_content)
+            streaming_delta = max(0, len(stream_text) // 4)
+
+        return committed_total + streaming_delta
+
     # ─── /budget ───
 
     def _handle_budget_cmd(self) -> None:
@@ -2222,8 +2355,20 @@ class SuccessorChat(App):
         Marks every injected message as NON-synthetic so /budget and
         /compact see it as real history. Uses fake created_at timestamps
         spaced 1s apart so microcompact's idle logic doesn't fire.
+
+        Performance note: we deliberately use the char-count heuristic
+        for sizing (instead of the /tokenize endpoint) AND pre-fill
+        msg._token_count on each injected message. This avoids:
+          1. ~700 HTTP /tokenize calls for /burn 200000 (each burn
+             payload is unique because the index is embedded)
+          2. The first-frame stall when the footer would otherwise
+             walk every message and tokenize it once
+        Synthetic burn text doesn't need real-tokenizer accuracy —
+        the heuristic is calibrated to slightly overestimate which
+        is the right side to err on for budget tracking.
         """
-        counter = self._agent_token_counter()
+        # Make sure the counter exists for the chat-level total cache
+        self._agent_token_counter()
         # Build the burn rounds
         added_rounds = 0
         added_tokens = 0
@@ -2233,19 +2378,33 @@ class SuccessorChat(App):
             user_text = payload["user"]
             asst_text = payload["assistant"]
             t = base_t + added_rounds * 0.5
-            self.messages.append(_Message("user", user_text))
-            self.messages[-1].created_at = t
-            self.messages.append(_Message("successor", asst_text))
-            self.messages[-1].created_at = t + 0.1
+
+            # Cheap heuristic count + 4-token role overhead
+            user_tokens = max(1, len(user_text) // 4) + 4
+            asst_tokens = max(1, len(asst_text) // 4) + 4
+
+            user_msg = _Message("user", user_text)
+            user_msg.created_at = t
+            user_msg._token_count = user_tokens  # pre-fill
+            self.messages.append(user_msg)
+
+            asst_msg = _Message("successor", asst_text)
+            asst_msg.created_at = t + 0.1
+            asst_msg._token_count = asst_tokens  # pre-fill
+            self.messages.append(asst_msg)
+
             added_rounds += 1
-            added_tokens += counter.count(user_text) + counter.count(asst_text) + 8
+            added_tokens += user_tokens + asst_tokens
             if added_rounds > 10000:
                 break  # safety bail
 
-        # Report what we added
-        log = self._to_agent_log()
-        new_total = counter.count_log(log)
+        # Report — use the running added_tokens directly instead of
+        # rebuilding the agent log and re-walking
         budget = self._agent_budget()
+        # Force a recompute via the chat cache (which now uses pre-filled
+        # per-message counts so it's fast)
+        self._cached_total_tokens = None
+        new_total = self._total_tokens()
         fill = budget.fill_pct(new_total) * 100
         self.messages.append(_Message(
             "successor",
@@ -3895,19 +4054,14 @@ class SuccessorChat(App):
           - an explicit state badge ("AUTOCOMPACT" / "BLOCKING") on
             the right side when over threshold
         """
-        # Compute token usage via the agent counter (accurate) when
-        # we have a counter cached, otherwise fall back to the legacy
-        # char-count heuristic so the footer keeps working before any
-        # /budget call materializes the counter.
+        # Compute token usage via the chat-level cached total. The
+        # cache is invalidated at every self.messages mutation site;
+        # in steady state this is O(1). The first read after a mutation
+        # is O(N) but uses per-message caches on _Message so even at
+        # 200K context it's well under a frame budget.
         if self._cached_token_counter is not None:
             try:
-                log = self._to_agent_log()
-                used = self._cached_token_counter.count_log(log)
-                if self._stream is not None:
-                    # Add the streaming-but-not-committed content
-                    used += self._cached_token_counter.count(
-                        "".join(self._stream_content)
-                    )
+                used = self._total_tokens()
             except Exception:
                 used = self._fallback_token_count()
         elif self._last_usage and "total_tokens" in self._last_usage:

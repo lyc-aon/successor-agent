@@ -49,7 +49,11 @@ from .log import ApiRound, LogMessage, MessageLog
 HEURISTIC_CHARS_PER_TOKEN: float = 3.5
 
 # LRU cache size — number of distinct strings to remember.
-DEFAULT_CACHE_SIZE: int = 1024
+# Tuned to comfortably hold a 200K-token conversation (~5000 distinct
+# message bodies) without thrashing the eviction. Each entry is a
+# small int + ref to the source string, so even at 16K entries the
+# total memory is well under 1MB.
+DEFAULT_CACHE_SIZE: int = 16_384
 
 # Per-call timeout for the /tokenize endpoint. Should be short — if
 # the server is hanging, fall back to the heuristic.
