@@ -205,6 +205,10 @@ class BashRunner:
     def is_done(self) -> bool:
         return self._done.is_set()
 
+    def wait(self, timeout: float | None = None) -> bool:
+        """Block until the runner finishes or timeout elapses."""
+        return self._done.wait(timeout)
+
     def cancel(self) -> None:
         """Signal the worker to terminate the subprocess. Returns
         immediately; the worker fires the SIGTERM/SIGKILL sequence
@@ -234,6 +238,11 @@ class BashRunner:
     @property
     def error(self) -> str:
         return self._error
+
+    @property
+    def pid(self) -> int | None:
+        proc = self._proc
+        return None if proc is None else proc.pid
 
     @property
     def started_at(self) -> float:

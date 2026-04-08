@@ -57,6 +57,17 @@ def test_empty_input_returns_empty_card() -> None:
     assert card2.verb == "(empty)"
 
 
+def test_leading_comment_lines_do_not_hide_real_command() -> None:
+    card = parse_bash("# Get config from a Plan A ONT\ncat README.md")
+    assert card.verb == "read-file"
+    assert dict(card.params)["path"] == "README.md"
+
+
+def test_comment_only_command_parses_as_empty() -> None:
+    card = parse_bash("# just a note")
+    assert card.verb == "(empty)"
+
+
 def test_unbalanced_quotes_returns_low_confidence_generic() -> None:
     """shlex raises ValueError on bad quoting; we shouldn't crash."""
     card = parse_bash('echo "unterminated')

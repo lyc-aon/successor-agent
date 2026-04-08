@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "successor"
-version = "0.1.11"
+version = "0.1.12"
 description = "Terminal chat harness for local LLMs and OpenAI-compatible endpoints (llama.cpp, OpenAI, OpenRouter). Five-layer cell-based renderer, async bash dispatch, configurable autocompactor, and a setup wizard with live preview pane. Pure Python 3.11 stdlib, zero runtime deps."
 readme = "README.md"
 license = { text = "Apache-2.0" }

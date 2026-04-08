@@ -3,6 +3,35 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
+## v0.1.12 — 2026-04-08
+
+Runtime trace logging plus a fix for misleading comment-prefixed bash cards.
+
+### What changed
+
+- normal `successor chat` sessions now write bounded JSONL traces under
+  `~/.config/successor/logs/` so hangs can be debugged after exit
+- traces record user submissions, agent-turn boundaries, stream
+  completion/errors, bash tool spawns, runner start/finish, and shutdown
+  cancellation
+- comment-prefixed multi-line bash blocks now parse from the first
+  executable line instead of falling through to a generic `bash ?` card
+- the raw-command preview line now skips leading comment banners when a
+  real executable line follows, so blocked runners show the actual
+  command instead of the comment text
+- chat shutdown now actively cancels in-flight bash runners and waits
+  briefly for finalization, reducing the chance of orphaned subprocesses
+
+### Verification
+
+- focused regressions: `130 passed`
+- broader chat/bash slice: `172 passed`
+- full local suite: `1079 passed`
+- direct headless runtime drill confirmed:
+  - preview card showed `$ sleep 5` instead of the comment banner
+  - forced shutdown cancelled the live runner
+  - trace captured `bash_spawn → bash_runner_started → shutdown_cancel_running_tools → bash_runner_finished`
+
 ## v0.1.11 — 2026-04-08
 
 Corrective follow-up for mouse ownership semantics.

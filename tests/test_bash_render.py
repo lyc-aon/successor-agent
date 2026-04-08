@@ -162,6 +162,13 @@ def test_raw_command_on_bottom_border() -> None:
     assert "$ ls -la /etc" in plain
 
 
+def test_raw_command_preview_skips_leading_comment_banner() -> None:
+    card = preview_bash("# Get config from a Plan A ONT\ncat README.md")
+    _, plain, _ = _paint(card)
+    assert "$ cat README.md" in plain
+    assert "Get config from a Plan A ONT" not in plain
+
+
 def test_raw_command_long_truncates() -> None:
     """A super-long raw command gets ellipsized."""
     long_cmd = "echo " + "x" * 200

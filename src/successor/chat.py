@@ -50,8 +50,9 @@ import os
 import random
 import time
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable
 
+from . import __version__
 from .config import load_chat_config, save_chat_config
 from .graphemes import delete_prev_grapheme
 from .input.keys import (
@@ -153,6 +154,7 @@ from .subagents.render import (
     measure_subagent_card_height,
     paint_subagent_card,
 )
+from .session_trace import SessionTrace, clip_text as _trace_clip_text
 from .render.markdown import (
     LaidOutLine,
     LaidOutSpan,
@@ -850,6 +852,41 @@ def _tool_arguments_for_card(card: ToolArtifact) -> dict[str, str]:
     return {"command": card.raw_command}
 
 
+def _find_last_user_excerpt(api_messages: list[dict[str, Any]]) -> str:
+    for msg in reversed(api_messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str) and content.strip():
+            return _trace_clip_text(content, limit=320)
+    return ""
+
+
+def _trace_tool_call_summary(tc: dict[str, Any]) -> dict[str, object]:
+    name = str(tc.get("name") or "")
+    args = tc.get("arguments") or {}
+    entry: dict[str, object] = {
+        "id": str(tc.get("id") or ""),
+        "name": name,
+    }
+    if name == "bash" and isinstance(args, dict):
+        entry["command_excerpt"] = _trace_clip_text(
+            str(args.get("command") or ""),
+            limit=320,
+        )
+    elif name == "subagent" and isinstance(args, dict):
+        entry["prompt_excerpt"] = _trace_clip_text(
+            str(args.get("prompt") or ""),
+            limit=320,
+        )
+        label = str(args.get("name") or "")
+        if label:
+            entry["task_name"] = label
+    elif args:
+        entry["arguments_excerpt"] = _trace_clip_text(str(args), limit=320)
+    return entry
+
+
 # ─── Autocomplete state machine ───
 #
 # The dropdown has three reachable states (plus None for hidden):
@@ -1529,6 +1566,22 @@ class SuccessorChat(App):
         # "default" without changing any code.
         self.system_prompt: str = profile.system_prompt
 
+        # ─── Session trace ───
+        # Normal chat sessions write a small JSONL trace to the user's
+        # config dir so hangs/tool loops can be inspected after the app
+        # exits. Local-only; bounded retention lives in session_trace.py.
+        self._trace = SessionTrace()
+        provider_cfg = profile.provider or {}
+        self._trace.emit(
+            "session_start",
+            version=__version__,
+            cwd=os.getcwd(),
+            profile=self.profile.name,
+            provider_type=str(provider_cfg.get("type") or ""),
+            base_url=str(provider_cfg.get("base_url") or ""),
+            model=str(provider_cfg.get("model") or ""),
+        )
+
         # ─── Theme state ───
         # Resolution per setting: explicit constructor arg → saved
         # config → profile field → fallback. Saved config wins over
@@ -1815,6 +1868,74 @@ class SuccessorChat(App):
         # raw_text is set at construction and never mutated.
         self._cached_total_tokens: int | None = None
         self._cached_total_tokens_key: tuple[int, int] = (-1, -1)
+
+    def run(self) -> None:
+        try:
+            super().run()
+        finally:
+            self._shutdown_runtime_for_exit()
+            self._trace.close(
+                trace_path=str(self._trace.path),
+                active_stream=self._stream is not None,
+                active_runner_count=sum(
+                    1 for msg in self._running_tools if msg.running_tool is not None
+                ),
+                active_subagent_count=self._subagent_counts().active,
+            )
+
+    def _trace_event(self, event_type: str, **payload: Any) -> None:
+        self._trace.emit(event_type, **payload)
+
+    def _shutdown_runtime_for_exit(self) -> None:
+        active = [
+            msg for msg in self._running_tools
+            if msg.running_tool is not None
+        ]
+        if active:
+            self._trace_event(
+                "shutdown_cancel_running_tools",
+                count=len(active),
+                tool_call_ids=[
+                    msg.running_tool.tool_call_id
+                    for msg in active
+                    if msg.running_tool is not None
+                ],
+            )
+            self._cancel_running_tools()
+            deadline = time.monotonic() + 1.5
+            while (
+                any(msg.running_tool is not None for msg in self._running_tools)
+                and time.monotonic() < deadline
+            ):
+                self._pump_running_tools()
+                time.sleep(0.02)
+            remaining = sum(
+                1 for msg in self._running_tools if msg.running_tool is not None
+            )
+            if remaining:
+                self._trace_event(
+                    "shutdown_runners_still_active",
+                    count=remaining,
+                )
+        if self._stream is not None:
+            self._trace_event("shutdown_close_stream")
+            try:
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = None
+        if self._compaction_worker is not None:
+            try:
+                self._compaction_worker.close()
+            except Exception:
+                pass
+            self._compaction_worker = None
+        if self._cache_warmer is not None:
+            try:
+                self._cache_warmer.close()
+            except Exception:
+                pass
+            self._cache_warmer = None
 
     # ─── Input handling ───
 
@@ -2975,6 +3096,12 @@ class SuccessorChat(App):
 
     def _submit(self) -> None:
         text = self.input_buffer.strip()
+        if text:
+            self._trace_event(
+                "user_submit",
+                text=text,
+                excerpt=_trace_clip_text(text, limit=320),
+            )
         # Add the submitted text to the input history ring buffer
         # BEFORE clearing the buffer. _history_add dedupes consecutive
         # duplicates and skips empty strings, so /profile cycle spam
@@ -3463,13 +3590,34 @@ class SuccessorChat(App):
         # Only pass tools= when non-None so older client implementations
         # (test mocks, providers without tool support) keep working.
         native_tool_schemas = build_native_tool_schemas(enabled_tools)
-        if native_tool_schemas:
-            self._stream = self.client.stream_chat(
-                messages=api_messages,
-                tools=native_tool_schemas,
+        self._trace_event(
+            "agent_turn_begin",
+            turn=self._agent_turn,
+            continuation=(self._agent_turn > 1),
+            enabled_tools=enabled_tools,
+            api_message_count=len(api_messages),
+            last_user_excerpt=_find_last_user_excerpt(api_messages),
+        )
+        try:
+            if native_tool_schemas:
+                self._stream = self.client.stream_chat(
+                    messages=api_messages,
+                    tools=native_tool_schemas,
+                )
+            else:
+                self._stream = self.client.stream_chat(messages=api_messages)
+        except Exception as exc:
+            self._trace_event(
+                "stream_open_failed",
+                turn=self._agent_turn,
+                error=f"{type(exc).__name__}: {exc}",
             )
-        else:
-            self._stream = self.client.stream_chat(messages=api_messages)
+            raise
+        self._trace_event(
+            "stream_opened",
+            turn=self._agent_turn,
+            tool_schema_names=enabled_tools if native_tool_schemas else [],
+        )
         self._stream_content = []
         self._stream_reasoning_chars = 0
         # The bash detector stays active as a LEGACY fallback for
@@ -4313,7 +4461,7 @@ class SuccessorChat(App):
         events = self._stream.drain()
         for ev in events:
             if isinstance(ev, StreamStarted):
-                pass
+                self._trace_event("stream_started", turn=self._agent_turn)
             elif isinstance(ev, ReasoningChunk):
                 self._stream_reasoning_chars += len(ev.text)
             elif isinstance(ev, ContentChunk):
@@ -4352,6 +4500,16 @@ class SuccessorChat(App):
                     display_content = raw_content
                     legacy_blocks = []
                 native_calls = list(getattr(ev, "tool_calls", ()) or ())
+                self._trace_event(
+                    "stream_end",
+                    turn=self._agent_turn,
+                    assistant_excerpt=_trace_clip_text(raw_content, limit=400),
+                    reasoning_chars=self._stream_reasoning_chars,
+                    native_tool_calls=[
+                        _trace_tool_call_summary(tc) for tc in native_calls
+                    ],
+                    legacy_block_count=len(legacy_blocks),
+                )
 
                 # Commit an assistant message for this stream UNCONDITIONALLY
                 # when there's prose text OR when there are tool calls
@@ -4401,6 +4559,14 @@ class SuccessorChat(App):
                     any_ran |= self._dispatch_native_tool_calls(native_calls)
                 if legacy_blocks:
                     any_ran |= self._dispatch_streamed_bash_blocks(legacy_blocks)
+                self._trace_event(
+                    "tool_dispatch_batch",
+                    turn=self._agent_turn,
+                    native_tool_count=len(native_calls),
+                    legacy_block_count=len(legacy_blocks),
+                    any_ran=any_ran,
+                    runner_count=len(self._running_tools),
+                )
 
                 # The `_agent_turn > 0` guard is important: tests drive
                 # `_pump_stream` directly with a pre-installed fake
@@ -4413,18 +4579,38 @@ class SuccessorChat(App):
                     # subagent spawn path) have no runner to wait on,
                     # so continue immediately.
                     if self._running_tools:
+                        self._trace_event(
+                            "continuation_pending",
+                            turn=self._agent_turn,
+                            runner_count=len(self._running_tools),
+                        )
                         self._pending_continuation = True
                     else:
                         self._pending_continuation = False
+                        self._trace_event(
+                            "continuation_immediate",
+                            turn=self._agent_turn,
+                        )
                         self._begin_agent_turn()
                     return
 
                 # No tool calls OR nothing successfully ran — turn
                 # ends here. Reset the agent-turn counter so the next
                 # user submission starts fresh.
+                self._trace_event(
+                    "agent_turn_complete",
+                    turn=self._agent_turn,
+                    reason="plain_text_or_no_runnable_tools",
+                )
                 self._agent_turn = 0
             elif isinstance(ev, StreamError):
                 partial = "".join(self._stream_content)
+                self._trace_event(
+                    "stream_error",
+                    turn=self._agent_turn,
+                    message=ev.message,
+                    partial_excerpt=_trace_clip_text(partial, limit=400),
+                )
                 if partial:
                     msg = f"{partial}\n\n[stream interrupted: {ev.message}]"
                 else:
@@ -4570,6 +4756,13 @@ class SuccessorChat(App):
                 preview,
                 classifier_reason or "command pattern flagged as dangerous",
             )
+            self._trace_event(
+                "bash_refused",
+                tool_call_id=resolved_call_id,
+                risk=final_risk,
+                reason=refused.reason,
+                command=command,
+            )
             self.messages.append(_Message("tool", "", tool_card=refused.card))
             hint = self._refusal_hint(refused, bash_cfg)
             self.messages.append(_Message(
@@ -4582,6 +4775,13 @@ class SuccessorChat(App):
             refused = MutatingCommandRefused(
                 preview,
                 classifier_reason or "mutating command refused in read-only mode",
+            )
+            self._trace_event(
+                "bash_refused",
+                tool_call_id=resolved_call_id,
+                risk=final_risk,
+                reason=refused.reason,
+                command=command,
             )
             self.messages.append(_Message("tool", "", tool_card=refused.card))
             hint = self._refusal_hint(refused, bash_cfg)
@@ -4613,6 +4813,16 @@ class SuccessorChat(App):
         )
         self.messages.append(msg)
         self._running_tools.append(msg)
+        self._trace_event(
+            "bash_spawn",
+            tool_call_id=resolved_call_id,
+            verb=preview.verb,
+            risk=preview.risk,
+            parser=preview.parser_name,
+            cwd=bash_cfg.working_directory or os.getcwd(),
+            timeout_s=bash_cfg.timeout_s,
+            command=command,
+        )
         runner.start()
         self._scroll_to_bottom()
         return True
@@ -4763,7 +4973,19 @@ class SuccessorChat(App):
             # the source of truth — but draining keeps the queue
             # bounded and lets future code react to specific events
             # (e.g., per-line fade-in animations).
-            runner.drain()
+            for ev in runner.drain():
+                if isinstance(ev, RunnerStarted):
+                    self._trace_event(
+                        "bash_runner_started",
+                        tool_call_id=runner.tool_call_id,
+                        pid=runner.pid,
+                    )
+                elif isinstance(ev, RunnerErrored):
+                    self._trace_event(
+                        "bash_runner_errored",
+                        tool_call_id=runner.tool_call_id,
+                        message=ev.message,
+                    )
             # Force a fresh paint each frame while running so the
             # spinner/border pulse and live output stream visibly.
             msg._card_rows_cache_key = None
@@ -4829,6 +5051,16 @@ class SuccessorChat(App):
         msg.running_tool = None
         msg._card_rows_cache_key = None
         msg._card_rows_cache = None
+        self._trace_event(
+            "bash_runner_finished",
+            tool_call_id=runner.tool_call_id,
+            exit_code=exit_code,
+            error=runner.error,
+            duration_ms=round(runner.elapsed() * 1000.0, 3),
+            stdout_excerpt=_trace_clip_text(stdout, limit=320),
+            stderr_excerpt=_trace_clip_text(stderr, limit=320),
+            truncated=runner.truncated,
+        )
 
     def _cancel_running_tools(self) -> None:
         """Signal every in-flight runner to terminate. Used by Ctrl+G

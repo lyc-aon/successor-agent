@@ -84,11 +84,12 @@ src/successor/builtin/       package-shipped data files loaded by the registries
 
 src/successor/chat.py        SuccessorChat — chat interface (profile-aware, real llama.cpp streaming)
 src/successor/snapshot.py    headless render via *_demo_snapshot()
-src/successor/recorder.py    record/replay session traces
+src/successor/recorder.py    input-byte record/replay sessions
+src/successor/session_trace.py normal chat runtime JSONL traces for postmortem debugging
 src/successor/cli.py         argparse subcommand dispatch (`successor` binary)
 src/successor/__main__.py    `python -m successor` entry point
 
-tests/                       pytest suite  1074+ tests, hermetic via SUCCESSOR_CONFIG_DIR
+tests/                       pytest suite  1079+ tests, hermetic via SUCCESSOR_CONFIG_DIR
 
 scripts/                     manual-run scripts (no auto-execution)
   e2e_chat_driver.py     scripted scenarios that drive a real chat against

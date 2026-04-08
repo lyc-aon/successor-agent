@@ -71,6 +71,32 @@ _HEREDOC_OPENER_RE = re.compile(
 )
 
 
+def _strip_leading_comment_lines(command: str) -> str:
+    """Drop leading blank/comment lines before tokenization.
+
+    Models sometimes emit a short shell comment above the real command:
+
+        # Get config from a Plan A ONT
+        ssh ...
+
+    `shlex.split()` does not treat `#` as a shell comment, so without
+    this pass the parser sees `#` as the command name and falls back to
+    the low-confidence generic card. Parsing should key off the first
+    executable line, not the comment banner.
+    """
+    lines = command.splitlines()
+    idx = 0
+    while idx < len(lines):
+        stripped = lines[idx].lstrip()
+        if not stripped or stripped.startswith("#"):
+            idx += 1
+            continue
+        break
+    if idx >= len(lines):
+        return ""
+    return "\n".join(lines[idx:])
+
+
 def _strip_heredoc_bodies(command: str) -> str:
     """Remove heredoc bodies from a multi-line command so shlex can
     tokenize the rest without tripping on the body's quoting.
@@ -230,7 +256,7 @@ def parse_bash(command: str) -> ToolCard:
     # Strip heredoc bodies so the shlex tokenizer sees a command
     # with only the opener line's metacharacters. The original raw
     # text is still carried on the returned card below.
-    tokenizable = _strip_heredoc_bodies(raw)
+    tokenizable = _strip_heredoc_bodies(_strip_leading_comment_lines(raw))
 
     try:
         tokens = shlex.split(tokenizable, posix=True)

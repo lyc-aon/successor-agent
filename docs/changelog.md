@@ -11,6 +11,74 @@ unit on top of phase 0.
 
 ---
 
+## v0.1.12, session traces + comment-prefixed bash fix (2026-04-08)
+
+The user hit a real debugging blind spot: a live bash runner hung, the
+chat was closed, and normal `successor chat` had not left behind enough
+runtime state to explain what the model actually tried to run. The same
+incident also exposed a smaller UI problem: if the model prefixed a
+multi-line bash tool call with a shell comment, the parser and the
+bottom-border raw-command preview both focused on the comment instead of
+the first executable line, making a blocked runner look like gibberish.
+
+### What landed
+
+- New `src/successor/session_trace.py`:
+  - normal `successor chat` now writes a bounded JSONL trace to
+    `~/.config/successor/logs/`
+  - retention is capped in the trace dir so the files do not grow
+    without bound
+- `src/successor/chat.py` now emits runtime events for:
+  - session start/end
+  - user submits
+  - agent turn begin
+  - stream open/start/end/error
+  - tool dispatch batches
+  - bash spawn / refuse / runner start / runner finish
+  - shutdown-triggered runner cancellation
+- `src/successor/bash/parser.py` now strips leading blank/comment lines
+  before tokenization, so a block like:
+
+  ```bash
+  # Get config from a Plan A ONT
+  ssh user@host 'show config'
+  ```
+
+  parses from `ssh ...` instead of `#`
+- `src/successor/bash/render.py` now shows the first executable line in
+  the raw-command preview when a leading comment banner is present
+- `src/successor/chat.py` now cleans up active bash runners during chat
+  shutdown, which reduces the chance of orphaned subprocesses if the app
+  is closed mid-command
+
+### Verification
+
+- Focused regressions:
+  - `tests/test_bash_parser.py`
+  - `tests/test_bash_render.py`
+  - `tests/test_bash_runner.py`
+  - `tests/test_session_trace.py`
+  - result: `130 passed in 1.33s`
+- Broader chat/bash slice:
+  - `tests/test_chat_bash.py`
+  - `tests/test_bash_parser.py`
+  - `tests/test_bash_render.py`
+  - `tests/test_bash_runner.py`
+  - `tests/test_session_trace.py`
+  - result: `172 passed in 2.88s`
+- Full local suite: `1079 passed in 11.96s`
+- Direct headless runtime drill:
+  - preview card for `# Get config from a Plan A ONT\nsleep 5` painted
+    `$ sleep 5` and not the comment banner
+  - forced shutdown cancelled the live runner
+  - trace file contained:
+    - `session_start`
+    - `bash_spawn`
+    - `bash_runner_started`
+    - `shutdown_cancel_running_tools`
+    - `bash_runner_finished`
+    - `session_end`
+
 ## v0.1.11, restore mouse-off terminal ownership (2026-04-08)
 
 Corrective follow-up to v0.1.10. The tool-card background fix was

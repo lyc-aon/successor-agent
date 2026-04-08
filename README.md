@@ -216,6 +216,11 @@ reports the resolved context window. On llama.cpp it also reports the
 visible slot count and whether the server advertises parallel tool-call
 support. Run it first when something is not working.
 
+Normal `successor chat` sessions also leave a bounded local runtime
+trace under `~/.config/successor/logs/`. These JSONL files record user
+submissions, model turn boundaries, tool spawns, runner completion, and
+shutdown cancellation so hangs can be debugged after the chat exits.
+
 ## The architectural premise
 
 `src/successor/render/diff.py` is the only module in the entire

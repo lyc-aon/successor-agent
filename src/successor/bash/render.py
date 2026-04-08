@@ -232,9 +232,15 @@ def _first_line_of_raw_command(raw: str) -> tuple[str, int]:
     if not raw:
         return ("", 0)
     lines = raw.split("\n")
-    first = lines[0].strip()
-    remaining = [ln for ln in lines[1:] if ln.strip()]
-    return (first, len(remaining))
+    nonempty = [ln.strip() for ln in lines if ln.strip()]
+    if not nonempty:
+        return ("", 0)
+    first = nonempty[0]
+    if first.startswith("#"):
+        for candidate in nonempty[1:]:
+            if not candidate.startswith("#"):
+                return (candidate, len(nonempty) - 1)
+    return (first, len(nonempty) - 1)
 
 
 def _verb_glyph_for_card(card: ToolCard) -> str:
