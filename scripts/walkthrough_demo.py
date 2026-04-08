@@ -870,196 +870,187 @@ def run_walkthrough_config(driver: Driver) -> None:
     """Three-pane config menu walkthrough.
 
     Drives `successor config` against a temp config dir that's been
-    seeded with two demo profiles, so the menu opens with multiple
-    real options to navigate between. Walks through:
+    seeded with a "demo" profile, so the menu opens with focus on
+    SETTINGS and the cursor on the theme field — ready for edits
+    immediately. Verified end-to-end via a diagnostic probe before
+    shipping; no preamble Tab/Up arrows needed.
 
-      - Initial 3-pane layout (profiles list / settings tree / live preview)
-      - Tab navigation between panes
-      - CYCLE field editing (theme — overlay + smooth blend in preview)
-      - TOGGLE field editing (display_mode — Alt+D-style flip in preview)
-      - CYCLE field editing (density — overlay + reflow in preview)
-      - MULTILINE field — opens the full-screen system prompt editor,
-        types a few chars, exits via Esc (no save)
-      - Profile pane navigation between profiles, settings + preview
-        update to match
+    The walkthrough covers:
+
+      - Initial 3-pane layout (profiles list / settings tree / live
+        preview), no setup keystrokes
+      - CYCLE field — theme overlay, Down to forge, Enter commit
+        (live preview blends palette via the chat's smooth
+        transition machinery)
+      - TOGGLE field — display_mode flip dark→light→dark with
+        smooth blend each direction
+      - CYCLE field — density overlay, Down to spacious, Enter
+        commit (live preview reflows)
+      - MULTILINE field — opens the full-screen system prompt
+        editor, types a few chars, Esc to cancel without saving
+      - Tab to focus the profiles pane (just to show focus shift)
       - Capital D → delete profile confirmation modal
       - N to cancel the modal
-      - Lowercase s → save changes, toast notification
-      - Esc → exit menu, drops into chat with the edited profile
-      - Empty-state hero panel renders for the new profile
+      - Lowercase s → save the dirty fields, toast notification
+      - Esc → exit menu (no dirty after save = clean exit, no
+        warning toast)
+      - Chat opens with the edited demo profile
+      - Empty-state hero panel renders against the new theme
       - /quit clean exit
 
-    Setup mode created the temp profile, this mode demonstrates
-    the iterate-on-it experience.
+    CRITICAL: never press Enter while focus is on the PROFILES
+    pane — that exits the menu and drops into chat. The walkthrough
+    only Tabs to PROFILES briefly to demo the delete modal (D
+    requires PROFILES focus); after the save, Esc handles the exit.
     """
 
     # Section 1: initial state
-    # The config menu opens with three panes visible. Let the
-    # viewer take in the layout and the seeded profile list.
+    # The menu opens with three panes visible, focus already on
+    # SETTINGS (the default), settings cursor already on the theme
+    # field. No setup keystrokes needed.
     driver.section(1, "config menu — three-pane layout visible")
     driver.pump_for(5.0)
 
-    # Section 2: Tab to focus the settings pane (cursor was on
-    # SETTINGS by default but we Tab once to make the focus shift
-    # visible to the viewer — they see the highlight move).
-    driver.section(2, "Tab — focus settings pane")
-    driver.send(b"\t")
-    driver.pump_for(1.5)
-
-    # Section 3: navigate down to the theme setting
-    # Settings tree starts at "theme" so a few Downs would skip
-    # past it; instead we go Up first to land safely at theme.
-    driver.section(3, "navigate to THEME setting")
-    press_up(driver)
-    driver.pump_for(0.5)
-    press_up(driver)
-    driver.pump_for(0.5)
-    press_up(driver)
-    driver.pump_for(1.0)
-
-    # Section 4: Enter to edit the theme — opens CYCLE overlay
-    driver.section(4, "Enter — open theme CYCLE overlay")
+    # Section 2: Enter to edit theme — opens CYCLE overlay
+    # The cursor is already on theme (settings tree starts at
+    # index 0 = theme), so Enter immediately opens the cycle
+    # overlay with steel highlighted.
+    driver.section(2, "Enter — open theme CYCLE overlay")
     press_enter(driver)
     driver.pump_for(2.5)
 
-    # Section 5: Down arrow inside the overlay → cycle to forge
-    # The live preview pane on the RIGHT side blends to forge
-    # palette via the chat's smooth transition machinery. This is
-    # the visual showpiece of the config menu.
-    driver.section(5, "Down — cycle to forge, watch live preview blend")
+    # Section 3: Down arrow inside the overlay → cycle to forge
+    # Live preview pane on the right blends to the forge palette
+    # via the chat's existing transition machinery. THE moneyshot.
+    driver.section(3, "Down — cycle to forge, live preview blends")
     press_down(driver)
     driver.pump_for(3.5)
 
-    # Section 6: Enter to commit the choice
-    driver.section(6, "Enter — commit theme = forge")
+    # Section 4: Enter to commit the choice
+    driver.section(4, "Enter — commit theme = forge")
     press_enter(driver)
     driver.pump_for(1.5)
 
-    # Section 7: navigate down to display_mode (TOGGLE)
-    driver.section(7, "Down — navigate to display_mode")
+    # Section 5: navigate down to display_mode (TOGGLE field)
+    driver.section(5, "Down — navigate to display_mode")
     press_down(driver)
     driver.pump_for(1.0)
 
-    # Section 8: Enter to toggle dark↔light. The TOGGLE field
-    # type fires immediately on Enter; the live preview blends
-    # to the new mode.
-    driver.section(8, "Enter — toggle to light, watch preview blend")
+    # Section 6: Enter to toggle dark→light. TOGGLE fires
+    # immediately on Enter (no overlay); preview blends to light.
+    driver.section(6, "Enter — toggle to light, preview blends")
     press_enter(driver)
     driver.pump_for(3.5)
 
-    # Section 9: Enter again to toggle back to dark
-    driver.section(9, "Enter — toggle back to dark")
+    # Section 7: Enter again to toggle back to dark. The dirty
+    # tracker compares against the initial snapshot, so flipping
+    # back to the original CLEARS the dirty flag for this field.
+    driver.section(7, "Enter — toggle back to dark (clears dirty)")
     press_enter(driver)
     driver.pump_for(2.5)
 
-    # Section 10: navigate down to density (CYCLE)
-    driver.section(10, "Down — navigate to density")
+    # Section 8: navigate down to density (CYCLE field)
+    driver.section(8, "Down — navigate to density")
     press_down(driver)
     driver.pump_for(1.0)
 
-    # Section 11: Enter → density CYCLE overlay
-    driver.section(11, "Enter — open density CYCLE overlay")
+    # Section 9: Enter → density CYCLE overlay opens
+    driver.section(9, "Enter — open density CYCLE overlay")
     press_enter(driver)
     driver.pump_for(2.0)
 
-    # Section 12: Down to spacious — preview reflows
-    driver.section(12, "Down — cycle to spacious, watch preview reflow")
+    # Section 10: Down to spacious — preview reflows for the new
+    # content width
+    driver.section(10, "Down — cycle to spacious, preview reflows")
     press_down(driver)
     driver.pump_for(3.0)
 
-    # Section 13: Enter to commit
-    driver.section(13, "Enter — commit density = spacious")
+    # Section 11: Enter to commit
+    driver.section(11, "Enter — commit density = spacious")
     press_enter(driver)
     driver.pump_for(1.5)
 
-    # Section 14: skip down past intro_animation to system_prompt
-    # Settings tree order: theme, mode, density, intro, prompt
-    driver.section(14, "Down twice — navigate to system_prompt (MULTILINE)")
+    # Section 12: skip down past intro_animation to system_prompt
+    # Settings tree order: theme(0), mode(1), density(2),
+    # intro_animation(3), system_prompt(4)
+    driver.section(12, "Down twice — navigate past intro to system_prompt")
     press_down(driver)
     driver.pump_for(0.5)
     press_down(driver)
     driver.pump_for(1.0)
 
-    # Section 15: Enter → opens the full-screen multiline prompt editor
-    # This is the show-stopper — soft word wrap, cursor model,
-    # selection support, OSC 52 clipboard. The editor takes over
-    # the screen with a syntax-highlighted-ish view of the prompt.
-    driver.section(15, "Enter — open the multiline system prompt editor")
+    # Section 13: Enter → opens the full-screen multiline prompt
+    # editor. The editor takes over the screen with the current
+    # system prompt, soft word wrap, cursor model.
+    driver.section(13, "Enter — open the multiline system prompt editor")
     press_enter(driver)
     driver.pump_for(4.0)
 
-    # Section 16: type a few characters at the end of the prompt
-    # to show the editor accepts input
-    driver.section(16, "type a tweak — see the editor accept input")
-    type_string(driver, " (edited live!)")
+    # Section 14: type a few characters at the end of the prompt
+    # to show the editor accepts input. Without committing
+    # (Ctrl+S) or having a selection, Esc cancels cleanly.
+    driver.section(14, "type a tweak — editor accepts input")
+    type_string(driver, " (live edit demo)")
     driver.pump_for(1.5)
 
-    # Section 17: Esc to back out of the editor without saving
-    # the multiline edit. The settings tree comes back into view.
-    driver.section(17, "Esc — exit prompt editor")
+    # Section 15: Esc to cancel — no selection, so the editor
+    # closes immediately without saving the typed chars.
+    driver.section(15, "Esc — cancel prompt editor (no save)")
     press_esc(driver)
     driver.pump_for(1.5)
 
-    # Section 18: Tab to focus the profiles pane (left)
-    driver.section(18, "Tab — focus profiles pane (left)")
+    # Section 16: Tab to focus the profiles pane. Required because
+    # capital D only fires when focus is on PROFILES.
+    driver.section(16, "Tab — switch focus to PROFILES pane")
     driver.send(b"\t")
     driver.pump_for(1.5)
 
-    # Section 19: Down arrow to navigate to next profile
-    # The middle pane updates to show the new profile's settings,
-    # and the live preview pane on the right re-renders for the
-    # new profile's theme + mode + density.
-    driver.section(19, "Down — switch to next profile, see panes update")
-    press_down(driver)
-    driver.pump_for(3.0)
-
-    # Section 20: Down again to the next one
-    driver.section(20, "Down — switch to another profile")
-    press_down(driver)
-    driver.pump_for(3.0)
-
-    # Section 21: capital D → delete profile confirmation modal
-    # Centered modal with a fade-in border and a Y/N prompt.
-    driver.section(21, "capital D — delete profile confirmation modal")
+    # Section 17: capital D → delete profile confirmation modal.
+    # Centered fade-in modal with a Y/N prompt. We're on the demo
+    # profile (cursor never moved); the modal asks to delete it.
+    driver.section(17, "D (capital) — delete confirmation modal")
     driver.send(b"D")
     driver.pump_for(3.5)
 
-    # Section 22: N to cancel the modal (safer than Esc since
-    # we want to demo the cancel-on-N path)
-    driver.section(22, "N — cancel the delete modal")
+    # Section 18: N to cancel the delete modal. Safer than Esc
+    # because the modal's escape semantics are explicit cancel.
+    driver.section(18, "N — cancel the delete modal")
     driver.send(b"N")
     driver.pump_for(1.5)
 
-    # Section 23: lowercase s — save all dirty changes
-    # The dirty flags from the theme/mode/density edits earlier
-    # get persisted, the toast notification slides in.
-    driver.section(23, "s — save all dirty profiles, toast notification")
+    # Section 19: lowercase s → save all dirty profiles. The dirty
+    # fields are theme(forge) and density(spacious); mode is back
+    # to its original (dark) so it's not dirty. Toast slides in.
+    # 's' is handled at the menu top level, so it works regardless
+    # of which pane has focus.
+    driver.section(19, "s — save dirty fields, toast notification")
     driver.send(b"s")
     driver.pump_for(3.0)
 
-    # Section 24: Esc → exit the menu, drops into the chat
-    # with the active profile (whichever one we last navigated to)
-    driver.section(24, "Esc — exit menu → chat opens with edited profile")
+    # Section 20: Esc → exit the menu. After the save, _any_dirty
+    # is False, so the Esc handler skips the warning toast and
+    # exits directly. Drops into chat with the demo profile.
+    driver.section(20, "Esc — exit menu, drops into chat")
     press_esc(driver)
-    driver.pump_for(2.0)
+    driver.pump_for(2.5)
 
-    # Section 25: chat empty state hero panel for the edited profile
-    # The wizard's chat_intro_art="successor" + the edits we just
-    # made show up in the info panel + the live theme is whatever
-    # we set during the edit session.
-    driver.section(25, "chat empty state — edited profile takes effect")
+    # Section 21: chat empty state hero panel for the edited demo
+    # profile. The wizard set chat_intro_art="successor" so the
+    # SUCCESSOR portrait + info panel renders against the now-
+    # forge palette + spacious density.
+    driver.section(21, "chat empty state — edited profile in effect")
     driver.pump_for(5.0)
 
-    # Section 26: clean exit
-    driver.section(26, "type /quit")
+    # Section 22: clean exit
+    driver.section(22, "type /quit")
     type_string(driver, "/quit")
     driver.pump_for(0.4)
 
-    driver.section(27, "submit /quit → exit")
+    driver.section(23, "submit /quit → exit")
     press_enter(driver)
     driver.pump_for(1.0)
 
-    driver.section(28, "walkthrough complete")
+    driver.section(24, "walkthrough complete")
 
 
 # ─── Timeline preview ───
