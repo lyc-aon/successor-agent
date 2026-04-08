@@ -8,32 +8,7 @@ users through provider configuration with a live preview pane, and
 the autocompactor keeps your context window healthy with
 percentage-based thresholds you can tune per profile.
 
-```
-                                          successor · chat     successor-dev   normal   ☾   ◆ steel
-
-
-
-
- successor ▸ I am successor. Speak freely. Ctrl+C, /quit, or ? for help.
-
- you ▸ show me what's in this directory
-
- successor ▸ Here you go.
-
- ╭── ☰ list-directory ────────────────────────────────────────────────────────────────────────────╮
- │    path  /tmp                                                                                  │
- │  hidden  yes                                                                                   │
- │  format  long                                                                                  │
- ╰── $ ls -la /tmp ───────────────────────────────────────────────────────────────────────────────╯
-    total 738664
-    drwxrwxrwt  574 root     294980  Apr  7 14:38  ▸ .
-    drwxr-xr-x  20 root       4096  Mar 26 19:37  ▸ ..
-    -rw-rw-r--   1 user          0  Apr  2 10:15  · .session-cache
-    ⋯ +105 more lines ⋯
-      ↳ ✓ exit 0 in 53ms  · output truncated
-▍
- ctx      36/ 262144  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0.01%  local
-```
+![Successor running multi-tool dispatch in agentic mode](https://github.com/lyc-aon/successor-agent/releases/download/v0.1.3/tool_dispatch.gif)
 
 ## Quick start
 
@@ -75,6 +50,34 @@ reports `[no server at http://localhost:8080]`, the local server
 is not running yet. The hint message lists three concrete remediation
 paths: start a local server, run `successor setup` to switch
 providers, or open `/config` to edit the profile inline.
+
+## Visuals
+
+The braille intro animation that plays before the chat opens, and
+the SUCCESSOR emergence in the chat itself once the wizard saves a
+profile:
+
+| Custom braille intro | SUCCESSOR emergence (forge theme) |
+|---|---|
+| ![intro animation](https://github.com/lyc-aon/successor-agent/releases/download/v0.1.3/intro_braille.gif) | ![SUCCESSOR braille in the forge theme](https://github.com/lyc-aon/successor-agent/releases/download/v0.1.3/braille_red.gif) |
+
+The 10-step setup wizard, with live theme cycling between steel and
+forge red, and the chat in agentic mode running multi-tool dispatch:
+
+| Wizard theme cycling | Multi-tool dispatch |
+|---|---|
+| ![wizard theme step](https://github.com/lyc-aon/successor-agent/releases/download/v0.1.3/wizard_theme.gif) | ![heredoc moneyshot](https://github.com/lyc-aon/successor-agent/releases/download/v0.1.3/tool_dispatch.gif) |
+
+Conversation search with highlighted matches, and the streaming
+chat surface with the live thinking indicator + a `read-file` tool
+dispatch:
+
+| Conversation search | Streaming + tool dispatch |
+|---|---|
+| ![search demo](https://github.com/lyc-aon/successor-agent/releases/download/v0.1.3/search_demo.gif) | ![streaming chat](https://github.com/lyc-aon/successor-agent/releases/download/v0.1.3/chat_streaming.gif) |
+
+All seven GIFs are attached to the [v0.1.3 release](https://github.com/lyc-aon/successor-agent/releases/tag/v0.1.3)
+as downloadable assets.
 
 ## Inside the chat
 
