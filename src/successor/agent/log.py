@@ -41,6 +41,9 @@ from dataclasses import dataclass, field
 from typing import Any, Iterator, Literal, Optional
 
 from ..bash.cards import ToolCard
+from ..subagents.cards import SubagentToolCard
+
+RenderedToolCard = ToolCard | SubagentToolCard
 
 
 # ─── Roles ───
@@ -74,7 +77,7 @@ class LogMessage:
 
     role: Role
     content: str
-    tool_card: ToolCard | None = None
+    tool_card: RenderedToolCard | None = None
     created_at: float = 0.0
     is_summary: bool = False
     is_boundary: bool = False
@@ -113,6 +116,14 @@ class LogMessage:
             }
         if self.tool_card is not None:
             card = self.tool_card
+            if isinstance(card, SubagentToolCard):
+                return {
+                    "role": "assistant",
+                    "content": (
+                        f"[subagent {card.task_id}] {card.directive}\n"
+                        f"{card.spawn_result}"
+                    ),
+                }
             body_lines = [f"$ {card.raw_command}"]
             if card.output:
                 body_lines.append(card.output.rstrip())
@@ -131,6 +142,8 @@ class LogMessage:
         navigable. Returns self if there's no tool card.
         """
         if self.tool_card is None:
+            return self
+        if not isinstance(self.tool_card, ToolCard):
             return self
         from dataclasses import replace
         new_card = replace(
@@ -303,7 +316,7 @@ class MessageLog:
             self.begin_round()
         self.rounds[-1].append(msg)
         # Note attachments from tool cards
-        if msg.tool_card is not None:
+        if isinstance(msg.tool_card, ToolCard):
             for k, v in msg.tool_card.params:
                 if k in ("path", "source", "destination") and v and v != "(missing)":
                     self.attachments.note(v)

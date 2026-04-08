@@ -17,16 +17,15 @@ This is the SOURCE OF TRUTH for "what tools exist". Three consumers:
          call
 
 The registry is intentionally a small constant `dict` (not a dynamic
-@tool decorator scan) because v0 ships exactly one tool. When we add
-more tools, we add entries here. When we eventually want user-installed
-tools (the @tool decorator path), we merge them into a copy of the dict
-at chat startup.
+@tool decorator scan) because the built-in tool surface is still small.
+When we add more tools, we add entries here. When we eventually want
+user-installed tools (the @tool decorator path), we merge them into a
+copy of the dict at chat startup.
 
 A "tool" in this context is BIGGER than a single bash command parser.
-It's an entire capability the model can invoke — currently just
-"bash" which encompasses every command pattern in `bash/patterns/`.
-Later we might add "web_search", "read_file", "git_diff", etc as
-separate tools.
+It's an entire capability the model can invoke — today `bash` plus
+the background-worker `subagent` tool. Later we might add
+"web_search", "read_file", "git_diff", etc as separate tools.
 
 Per-tool configuration (timeout, max output, allow_dangerous, etc.)
 lives in `Profile.tool_config` keyed by tool name. The registry just
@@ -37,7 +36,7 @@ configuration is the merger of registry defaults + profile overrides.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Any, Mapping
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,11 +51,17 @@ class ToolDescriptor:
       default_enabled   whether new profiles default to having this
                         tool enabled (the setup wizard pre-checks the
                         toggle if True)
+      schema            OpenAI-style native tool schema, or None when
+                        the tool is not exposed through `tools=`
       system_prompt_doc longer markdown that explains how the model
                         should USE this tool. Gets injected into the
                         system prompt's "## Available Tools" section.
                         Should include a one-line description, an
                         example invocation, and any safety notes.
+      model_guidance    extra behavioral guidance appended to the
+                        active system prompt when the tool is enabled.
+                        Use this for semantic rules that the generic
+                        schema description cannot teach by itself.
     """
 
     name: str
@@ -64,6 +69,8 @@ class ToolDescriptor:
     description: str
     default_enabled: bool
     system_prompt_doc: str
+    schema: dict[str, Any] | None = None
+    model_guidance: str = ""
 
 
 # ─── The registry ───
@@ -154,6 +161,133 @@ think briefly about whether the user actually wants the change
 before invoking.
 """
 
+_BASH_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "bash",
+        "description": (
+            "Execute a shell command (or multi-line script / heredoc) "
+            "in the user's working directory and return its stdout, "
+            "stderr, and exit code. Successful commands may produce "
+            "no stdout — that is normal for writes, redirects, mkdir, "
+            "touch, chmod, and most mutating commands."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": (
+                        "The bash command to execute. Pipes, redirects, "
+                        "substitutions, heredocs, and multi-step scripts "
+                        "all work because the harness runs the string with "
+                        "shell=True."
+                    ),
+                },
+            },
+            "required": ["command"],
+        },
+    },
+}
+
+SUBAGENT_DOC = """\
+### subagent — fork a background worker
+
+Launch a background worker that inherits the current conversation
+context, uses the same profile and provider, and runs autonomously
+until it produces a final report. The parent chat keeps running while
+the worker works; completion arrives later as a background-task
+notification.
+
+### How to invoke
+
+Call the `subagent` tool with a short `prompt` directive and, when
+helpful, a short `name` so the task badge and `/tasks` list are easy
+to scan.
+
+Example — fork a repo audit:
+
+    {"prompt": "Audit the repo for version mismatches between pyproject.toml and src/successor/__init__.py. Report what is actually true.", "name": "version-audit"}
+
+### Critical rules
+
+- The worker inherits the current context, so the prompt should be a
+  directive, not a full re-explanation of the task.
+- Use subagents when intermediate tool noise would clutter the main
+  context or when background work can proceed independently.
+- Do not assume results before the completion notification arrives.
+- Do not read the worker transcript while it is still running unless
+  the user explicitly asks for a progress check.
+"""
+
+SUBAGENT_MODEL_GUIDANCE = """\
+## Using background subagents
+
+The `subagent` tool forks a background worker that inherits your current
+conversation context. Use it when the intermediate tool output is not
+worth keeping in your own context or when background work can proceed
+independently.
+
+### When to fork
+
+- Research or repo-audit tasks where you want the answer, not the raw grep,
+  cat, or git output.
+- Multi-step implementation or verification work that can proceed in the
+  background while you keep the foreground turn clean.
+- Narrow, self-contained tasks where a concise final report is more useful
+  than watching every intermediate tool call.
+
+### Writing the prompt
+
+Because the fork inherits the current context, write a directive, not a full
+briefing. Be specific about scope, what to check, and what a good final
+report should contain. Do not restate background the worker already has.
+
+### Critical rules
+
+- Do not re-run the same research in the foreground after you fork it.
+- Do not predict or fabricate what the worker will find.
+- The worker result arrives later as a background-task notification injected
+  into the conversation as a user-role event. That notification is not
+  something you write yourself.
+- Do not inspect a running worker's transcript unless the user explicitly
+  asks for progress. Wait for the completion notification.
+"""
+
+_SUBAGENT_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "subagent",
+        "description": (
+            "Launch a background worker that inherits the current "
+            "conversation context, uses the same profile and provider, "
+            "and later reports back through a background-task "
+            "notification."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": (
+                        "The worker directive. Since the child inherits the "
+                        "current conversation context, write this as a scoped "
+                        "instruction describing what to do."
+                    ),
+                },
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Optional short task label, ideally one or two words, "
+                        "used in the task badge and completion notice."
+                    ),
+                },
+            },
+            "required": ["prompt"],
+        },
+    },
+}
+
 
 AVAILABLE_TOOLS: Mapping[str, ToolDescriptor] = {
     "bash": ToolDescriptor(
@@ -161,7 +295,17 @@ AVAILABLE_TOOLS: Mapping[str, ToolDescriptor] = {
         label="bash",
         description="Run shell commands. Dangerous commands refused automatically.",
         default_enabled=True,
+        schema=_BASH_TOOL_SCHEMA,
         system_prompt_doc=BASH_DOC,
+    ),
+    "subagent": ToolDescriptor(
+        name="subagent",
+        label="subagent",
+        description="Launch a background worker that inherits the current context.",
+        default_enabled=False,
+        schema=_SUBAGENT_TOOL_SCHEMA,
+        system_prompt_doc=SUBAGENT_DOC,
+        model_guidance=SUBAGENT_MODEL_GUIDANCE,
     ),
 }
 
@@ -190,6 +334,36 @@ def default_enabled_tools() -> tuple[str, ...]:
     return tuple(
         d.name for d in AVAILABLE_TOOLS.values() if d.default_enabled
     )
+
+
+def build_native_tool_schemas(
+    enabled_tools: list[str] | tuple[str, ...],
+) -> list[dict[str, Any]]:
+    """Return the native tool schemas for enabled tools.
+
+    Tools without a native schema are skipped. The order matches the
+    enabled-tool list so provider requests stay stable.
+    """
+    schemas: list[dict[str, Any]] = []
+    for name in enabled_tools:
+        descriptor = AVAILABLE_TOOLS.get(name)
+        if descriptor is None or descriptor.schema is None:
+            continue
+        schemas.append(descriptor.schema)
+    return schemas
+
+
+def build_model_tool_guidance(
+    enabled_tools: list[str] | tuple[str, ...],
+) -> str:
+    """Concatenate extra system-prompt guidance for enabled tools."""
+    sections: list[str] = []
+    for name in enabled_tools:
+        descriptor = AVAILABLE_TOOLS.get(name)
+        if descriptor is None or not descriptor.model_guidance:
+            continue
+        sections.append(descriptor.model_guidance.strip())
+    return "\n\n".join(section for section in sections if section)
 
 
 def build_system_prompt_tools_section(

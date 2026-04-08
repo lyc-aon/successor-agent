@@ -3,9 +3,49 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
+## v0.1.6 — 2026-04-08
+
+Subagent tool pass: the background-worker foundation from v0.1.5 is
+now a real model-visible capability, with scheduler hardening and live
+llama.cpp verification.
+
+### Model-visible subagents
+
+The `subagent` tool is now part of the native tool surface. When a
+profile enables that tool, the model can fork a background worker that
+inherits the current conversation context, runs in a headless child
+chat, and later reports back through a structured completion
+notification.
+
+The runtime keeps the contract tight:
+
+- child chats strip the `subagent` tool to prevent recursive forks
+- completion notifications are injected back as user-role API events
+- the tool is hidden from the model when `notify_on_finish` is off,
+  because that configuration would otherwise create workers the parent
+  could never hear back from
+- queue-width changes made while tasks are active now defer cleanly
+  until the manager goes idle, then apply safely
+
+### Verification
+
+Local verification for v0.1.6:
+
+- full pytest suite: 1051 passing
+- live llama.cpp/Qwopus E2E: manual `/fork` path passed
+- live llama.cpp/Qwopus E2E: model-visible `subagent` path passed
+- CLI surfaces: `successor -V` reports `0.1.6`
+
 ## v0.1.5 — 2026-04-08
 
 Unicode input audit + grapheme-aware editing pass.
+
+Late in the same release line, v0.1.5 also picked up the first
+shipping subagent foundation: manual `/fork`, `/tasks`, and
+`/task-cancel`, per-profile subagent settings in the config menu,
+background task transcripts, and a title-bar task badge. The runtime
+uses isolated headless child chats so the background path reuses the
+real tool-calling + continuation loop instead of a toy executor.
 
 ### Grapheme-aware deletion
 

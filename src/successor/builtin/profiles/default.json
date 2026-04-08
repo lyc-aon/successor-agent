@@ -32,5 +32,11 @@
     "enabled": true,
     "keep_recent_rounds": 6,
     "summary_max_tokens": 16000
+  },
+  "subagents": {
+    "enabled": true,
+    "max_model_tasks": 1,
+    "notify_on_finish": true,
+    "timeout_s": 900.0
   }
 }

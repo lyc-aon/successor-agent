@@ -1414,6 +1414,7 @@ def test_snapshot_tools_overlay_renders(temp_config_dir: Path) -> None:
     menu.on_tick(g)
     plain = render_grid_to_plain(g)
     assert "bash" in plain
+    assert "subagent" in plain
     # Checkbox glyph should appear
     assert ("[✓]" in plain) or ("[ ]" in plain)
     # Header of the overlay

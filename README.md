@@ -101,6 +101,19 @@ editing            scroll                 look & feel        commands
   Ctrl+G interrupt  Ctrl+F search history   Ctrl+] density     /config
 ```
 
+`/fork <directive>` spawns a background subagent against the current
+chat context. `/tasks` lists queued/running/completed background
+tasks, and `/task-cancel <id|all>` requests cancellation. Queue width,
+timeout, and notifications live in `/config`, under the `subagents`
+section.
+
+If the current profile also has the `subagent` tool enabled in its
+tool list, the model can fork background workers on its own. That path
+depends on `notify_on_finish=on`, because the result comes back later
+as a background-task notification. The bundled `successor-dev` profile
+ships with the model-visible tool on; the plain `default` profile keeps
+manual `/fork` available but leaves model delegation off by default.
+
 `/budget` shows the live token fill, the warning / autocompact /
 blocking thresholds derived from the active profile, and the round
 count. `/burn N` injects synthetic context for stress-testing the
@@ -123,6 +136,19 @@ continuation turn. The card's verb and parameters are inferred from
 the partial command as the arguments stream in, so the header
 resolves to `write-file path: about.html` while the body is still
 arriving.
+
+Subagents reuse the same runtime shape through isolated headless child
+chats. Manual `/fork` and the model-visible `subagent` tool both
+create background tasks with transcript files, a title-bar task badge,
+an inline spawn card, and a later completion notification injected back
+into the parent chat.
+
+The current scheduler keeps background subagents serial by default even
+on llama.cpp servers that expose multiple slots. That is intentional:
+local multi-slot generation can improve responsiveness and isolation,
+but on a saturated local box it can also reduce total throughput. The
+next optimization phase is slot-aware scheduling with a serial fallback,
+not blind fan-out.
 
 Compaction runs as a visible animation when the context budget
 tightens. The chat stays responsive throughout. Once the summary is

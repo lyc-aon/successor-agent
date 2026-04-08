@@ -311,6 +311,25 @@ _SETTINGS_TREE: tuple[_SettingField, ...] = (
         name="compaction_summary_max_tokens", label="summary max tokens", section="",
         kind=FieldKind.NUMBER, number_kind="int",
     ),
+    # ── Background subagents (/fork + model-visible subagent tool) ─
+    _SettingField(
+        name="subagents_enabled", label="enabled", section="subagents",
+        kind=FieldKind.TOGGLE,
+        options_getter=lambda: [True, False],
+    ),
+    _SettingField(
+        name="subagents_max_model_tasks", label="max model tasks", section="",
+        kind=FieldKind.NUMBER, number_kind="int",
+    ),
+    _SettingField(
+        name="subagents_timeout_s", label="timeout (s)", section="",
+        kind=FieldKind.NUMBER, number_kind="float",
+    ),
+    _SettingField(
+        name="subagents_notify_on_finish", label="notify on finish", section="",
+        kind=FieldKind.TOGGLE,
+        options_getter=lambda: [True, False],
+    ),
 )
 
 # Indices into _SETTINGS_TREE that ARE editable (used for cursor jumps)
@@ -673,6 +692,16 @@ class SuccessorConfig(App):
                 return str(raw)
             return "(default)"
 
+        if field.name.startswith("subagents_"):
+            raw = self._profile_value_for_field_raw(profile, field)
+            if field.name == "subagents_enabled":
+                return "on" if raw else "off"
+            if field.name == "subagents_notify_on_finish":
+                return "on" if raw else "off"
+            if isinstance(raw, (int, float)):
+                return str(raw)
+            return "(default)"
+
         raw = self._profile_value_for_field_raw(profile, field)
 
         # SECRET masks the value for display
@@ -742,6 +771,18 @@ class SuccessorConfig(App):
                 )
                 return
             new_profile = replace(old_profile, compaction=new_compaction)
+        elif field.name.startswith("subagents_"):
+            key = field.name.removeprefix("subagents_")
+            try:
+                new_subagents = replace(old_profile.subagents, **{key: new_value})
+            except ValueError as exc:
+                self._toast = _Toast(
+                    f"invalid subagent value: {exc}",
+                    self.elapsed,
+                    kind="warn",
+                )
+                return
+            new_profile = replace(old_profile, subagents=new_subagents)
         else:
             return  # not editable
 
@@ -811,6 +852,10 @@ class SuccessorConfig(App):
         if field.name.startswith("compaction_"):
             key = field.name.removeprefix("compaction_")
             cfg = profile.compaction
+            return getattr(cfg, key, None)
+        if field.name.startswith("subagents_"):
+            key = field.name.removeprefix("subagents_")
+            cfg = profile.subagents
             return getattr(cfg, key, None)
         return None
 
@@ -2507,6 +2552,7 @@ def _profile_to_json_dict(profile: Profile) -> dict:
         "intro_animation": profile.intro_animation,
         "chat_intro_art": profile.chat_intro_art,
         "compaction": profile.compaction.to_dict(),
+        "subagents": profile.subagents.to_dict(),
     }
 
 

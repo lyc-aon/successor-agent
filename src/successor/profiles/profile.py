@@ -28,6 +28,7 @@ from typing import Any
 
 from ..config import load_chat_config, save_chat_config
 from ..loader import Registry
+from ..subagents.config import SubagentConfig
 
 
 # ─── CompactionConfig ───
@@ -282,8 +283,9 @@ class Profile:
       skills            ordered tuple of skill names (loaded and
                         listed, but not yet injected into prompts)
       tools             ordered tuple of enabled tool names. Currently
-                        this controls built-in bash availability and
-                        the tool docs injected into the system prompt
+                        this controls model-visible native tools
+                        (`bash`, `subagent`) plus the tool docs
+                        injected into the system prompt
       tool_config       per-tool configuration dict. `bash` reads this
                         live today; future tools can do the same
       intro_animation   name of an intro animation to play before chat,
@@ -303,6 +305,10 @@ class Profile:
                         existing profiles upgrade transparently. Edit
                         via the wizard's compaction step or the config
                         menu's compaction section.
+      subagents         background-task settings shared by manual
+                        `/fork` and the model-visible `subagent`
+                        tool: enable/disable, queue width, completion
+                        notifications, and timeout.
     """
 
     name: str
@@ -318,6 +324,7 @@ class Profile:
     intro_animation: str | None = None
     chat_intro_art: str | None = None
     compaction: CompactionConfig = field(default_factory=CompactionConfig)
+    subagents: SubagentConfig = field(default_factory=SubagentConfig)
 
 
 def parse_profile_file(path: Path) -> Profile | None:
@@ -398,6 +405,10 @@ def parse_profile_file(path: Path) -> Profile | None:
         kwargs["compaction"] = CompactionConfig.from_dict(compaction_val)
     # If compaction is missing or wrong type, the dataclass default
     # factory provides a fresh CompactionConfig() — no kwarg needed.
+
+    subagents_val = data.get("subagents")
+    if isinstance(subagents_val, dict):
+        kwargs["subagents"] = SubagentConfig.from_dict(subagents_val)
 
     return Profile(**kwargs)
 

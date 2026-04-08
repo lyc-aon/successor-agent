@@ -44,7 +44,7 @@ import sys
 import tempfile
 import time
 import traceback
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 
@@ -54,6 +54,8 @@ if str(_REPO_SRC) not in sys.path:
     sys.path.insert(0, str(_REPO_SRC))
 
 from successor.chat import SuccessorChat  # noqa: E402
+from successor import __version__ as SUCCESSOR_VERSION  # noqa: E402
+from successor.subagents.cards import SubagentToolCard  # noqa: E402
 from successor.profiles import Profile  # noqa: E402
 from successor.providers import make_provider  # noqa: E402
 from successor.render.cells import Grid  # noqa: E402
@@ -110,6 +112,7 @@ class Scenario:
     assert_max_agent_turns_per_prompt: int | None = None
     assert_no_refused_cards: bool = True
     assert_each_settles: bool = True
+    allow_synthetic_final: bool = False
     pre_setup: Callable[["SuccessorChat"], None] | None = None
     profile_overrides: dict | None = None  # merged into tool_config["bash"]
 
@@ -219,12 +222,20 @@ def settle_chat_with_capture(
     frames = 0
 
     while True:
+        has_active_subagents = False
+        if hasattr(chat, "_has_active_subagent_tasks"):
+            try:
+                has_active_subagents = bool(chat._has_active_subagent_tasks())
+            except Exception:
+                has_active_subagents = False
+
         # Fully settled: stream done + no continuation queued + no
         # runners still executing.
         if (
             chat._stream is None
             and chat._agent_turn == 0
             and not chat._running_tools
+            and not has_active_subagents
         ):
             return True, time.monotonic() - start, frames
 
@@ -238,6 +249,11 @@ def settle_chat_with_capture(
 
         chat._pump_stream()
         chat._pump_running_tools()
+        if hasattr(chat, "_pump_subagent_notifications"):
+            try:
+                chat._pump_subagent_notifications()
+            except Exception:
+                pass
 
         if time.monotonic() - start > timeout_s:
             # Timeout — clean up so the next prompt can still start.
@@ -256,6 +272,11 @@ def settle_chat_with_capture(
                 while chat._running_tools and time.monotonic() < deadline:
                     chat._pump_running_tools()
                     time.sleep(TICK_SLEEP_S)
+            if hasattr(chat, "_subagent_manager"):
+                try:
+                    chat._subagent_manager.cancel("all")
+                except Exception:
+                    pass
             chat._agent_turn = 0
             chat._pending_continuation = False
             return False, time.monotonic() - start, frames
@@ -307,10 +328,20 @@ def run_user_prompt(
     )
 
     new_msgs = chat.messages[messages_before:]
-    new_cards = [m.tool_card for m in new_msgs if m.tool_card is not None]
+    new_cards = [
+        (m.tool_card or getattr(m, "subagent_card", None))
+        for m in new_msgs
+        if (m.tool_card is not None or getattr(m, "subagent_card", None) is not None)
+    ]
     cards_new = len(new_cards)
-    executed = sum(1 for c in new_cards if c.executed)
-    refused = sum(1 for c in new_cards if not c.executed)
+    executed = sum(
+        1 for c in new_cards
+        if isinstance(c, SubagentToolCard) or getattr(c, "executed", False)
+    )
+    refused = sum(
+        1 for c in new_cards
+        if not isinstance(c, SubagentToolCard) and not getattr(c, "executed", False)
+    )
 
     agent_turns = chat.client._driver_call_count - pre_count
 
@@ -395,6 +426,16 @@ def dump_snapshots(
                 "raw_command_preview": (card.raw_command or "")[:200],
                 "params": list(card.params),
             }
+        elif getattr(m, "subagent_card", None) is not None:
+            card = m.subagent_card
+            entry["subagent_card"] = {
+                "task_id": card.task_id,
+                "name": card.name,
+                "directive_preview": (card.directive or "")[:200],
+                "tool_call_id": card.tool_call_id,
+                "spawn_result_preview": (card.spawn_result or "")[:300],
+            }
+            entry["api_role_override"] = getattr(m, "api_role_override", None)
         messages_payload.append(entry)
     (out_dir / f"{prefix}_messages.json").write_text(
         json.dumps(messages_payload, indent=2)
@@ -492,14 +533,21 @@ def evaluate_assertions(
     if scenario.assert_min_text_in_final:
         final_assistant = None
         for m in reversed(chat.messages):
-            if m.role == "successor" and not m.synthetic:
-                final_assistant = m.raw_text or ""
-                break
+            if m.role != "successor":
+                continue
+            if m.synthetic and not scenario.allow_synthetic_final:
+                continue
+            final_assistant = m.raw_text or ""
+            break
         if final_assistant is None:
             results.append(AssertionResult(
                 name="final_assistant_text",
                 passed=False,
-                detail="no non-synthetic assistant message found",
+                detail=(
+                    "no assistant message found"
+                    if scenario.allow_synthetic_final
+                    else "no non-synthetic assistant message found"
+                ),
             ))
         else:
             haystack = final_assistant.lower()
@@ -840,6 +888,14 @@ Create about.html in this directory with this exact content using a heredoc:
 """
 
 
+def _enable_subagent_tool(chat: SuccessorChat) -> None:
+    """Turn on the model-visible subagent tool for a live scenario."""
+    profile = replace(chat.profile, tools=("bash", "subagent"))
+    chat.profile = profile
+    chat.system_prompt = profile.system_prompt
+    chat.client = make_provider(profile.provider)
+
+
 SCENARIOS: dict[str, Scenario] = {
     "write_html": Scenario(
         name="write_html",
@@ -1017,6 +1073,35 @@ SCENARIOS: dict[str, Scenario] = {
         # free to batch the create+ls in prompt 4 into one shell call.
         assert_min_total_cards=3,
         assert_max_agent_turns_per_prompt=6,
+    ),
+    "subagent_summary": Scenario(
+        name="subagent_summary",
+        description="Spawn a background subagent and wait for the completion notice",
+        prompts=[
+            f"/fork Read {(Path(__file__).resolve().parent.parent / 'pyproject.toml')} and {(Path(__file__).resolve().parent.parent / 'src' / 'successor' / '__init__.py')}, then reply with only the current version string they agree on.",
+        ],
+        assert_min_text_in_final=[SUCCESSOR_VERSION],
+        assert_each_settles=True,
+        allow_synthetic_final=True,
+    ),
+    "model_subagent_version_audit": Scenario(
+        name="model_subagent_version_audit",
+        description="Model uses the subagent tool, then answers from the completion notification",
+        pre_setup=_enable_subagent_tool,
+        prompts=[
+            (
+                f"Use the subagent tool, not bash, to audit the shared version in "
+                f"{(Path(__file__).resolve().parent.parent / 'pyproject.toml')} and "
+                f"{(Path(__file__).resolve().parent.parent / 'src' / 'successor' / '__init__.py')}. "
+                "Name the task version-audit. After you start it, tell me a background subagent is running and stop."
+            ),
+            "What did the background subagent report? Answer from the notification only and do not inspect the files yourself.",
+        ],
+        assert_min_text_in_final=[SUCCESSOR_VERSION],
+        assert_max_total_cards=1,
+        assert_min_total_cards=1,
+        assert_max_agent_turns_per_prompt=4,
+        assert_each_settles=True,
     ),
 }
 

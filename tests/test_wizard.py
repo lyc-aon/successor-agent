@@ -438,6 +438,7 @@ def test_snapshot_tools_step_shows_checkboxes(temp_config_dir: Path) -> None:
     plain = render_grid_to_plain(g)
     assert "enable tools" in plain
     assert "bash" in plain
+    assert "subagent" in plain
     assert "[✓]" in plain  # default: bash checked
     assert "1 tool enabled" in plain
 
@@ -450,6 +451,7 @@ def test_snapshot_tools_step_chat_only_mode(temp_config_dir: Path) -> None:
     )
     plain = render_grid_to_plain(g)
     assert "bash" in plain
+    assert "subagent" in plain
     assert "[ ]" in plain
     assert "chat-only mode" in plain
 

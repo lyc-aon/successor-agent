@@ -132,9 +132,26 @@ from .bash.runner import (
 )
 from .tools_registry import (
     AVAILABLE_TOOLS,
-    build_system_prompt_tools_section,
+    build_model_tool_guidance,
+    build_native_tool_schemas,
     default_enabled_tools,
     filter_known,
+)
+from .subagents.cards import SubagentToolCard
+from .subagents.manager import (
+    SubagentManager,
+    SubagentTaskCounts,
+    SubagentTaskSnapshot,
+)
+from .subagents.prompt import (
+    build_notification_display,
+    build_notification_payload,
+    build_spawn_result_display,
+    build_spawn_result_payload,
+)
+from .subagents.render import (
+    measure_subagent_card_height,
+    paint_subagent_card,
 )
 from .render.markdown import (
     LaidOutLine,
@@ -412,40 +429,7 @@ INPUT_HISTORY_MAX = 100
 # (e.g. file paths) supply a custom callable.
 
 
-# OpenAI-style tool schema for the bash tool. Sent as the `tools`
-# parameter in stream_chat() requests so Qwen 3.5's chat template
-# fires its `if tools` branch — that branch injects the canonical
-# "use <tool_call>" instructions into the system message and puts
-# the model in its trained tool-calling mode. The schema is plain
-# JSON so it round-trips cleanly through the chat completions API.
-_BASH_TOOL_SCHEMA: dict = {
-    "type": "function",
-    "function": {
-        "name": "bash",
-        "description": (
-            "Execute a shell command (or multi-line script / heredoc) "
-            "in the user's working directory and return its stdout, "
-            "stderr, and exit code. Successful commands may produce "
-            "no stdout — that is normal for writes, redirects, mkdir, "
-            "touch, chmod, and most mutating commands."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": (
-                        "The bash command to execute. Pipes, "
-                        "redirects, substitutions, heredocs, and "
-                        "multi-step scripts all work because the "
-                        "harness runs the string with shell=True."
-                    ),
-                },
-            },
-            "required": ["command"],
-        },
-    },
-}
+ToolArtifact = ToolCard | SubagentToolCard
 
 
 def _infer_tool_preview(
@@ -562,15 +546,14 @@ def _extract_command_tail(raw_args: str) -> str:
     return raw_args
 
 
-def _assistant_with_tool_calls(content: str, cards: list[ToolCard]) -> dict:
+def _assistant_with_tool_calls(content: str, cards: list[ToolArtifact]) -> dict:
     """Build the assistant-message dict for an assistant turn that
     issued one or more tool calls.
 
     Each card becomes one entry in the `tool_calls` list with its
-    `tool_call_id` as the call id, `bash` as the function name, and
-    the raw command serialized as a JSON `{"command": ...}` string
-    in `arguments`. This matches the OpenAI tool-call shape that
-    Qwen's chat template renders into native `<tool_call>` blocks.
+    call id, native tool name, and JSON arguments. This matches the
+    OpenAI tool-call shape that Qwen's chat template renders into
+    native `<tool_call>` blocks.
     """
     return {
         "role": "assistant",
@@ -580,8 +563,8 @@ def _assistant_with_tool_calls(content: str, cards: list[ToolCard]) -> dict:
                 "id": card.tool_call_id,
                 "type": "function",
                 "function": {
-                    "name": "bash",
-                    "arguments": json.dumps({"command": card.raw_command}),
+                    "name": _tool_name_for_card(card),
+                    "arguments": json.dumps(_tool_arguments_for_card(card)),
                 },
             }
             for card in cards
@@ -589,7 +572,7 @@ def _assistant_with_tool_calls(content: str, cards: list[ToolCard]) -> dict:
     }
 
 
-def _tool_card_content_for_api(card: ToolCard) -> str:
+def _tool_card_content_for_api(card: ToolArtifact) -> str:
     """Build the message content for a ToolCard going back to the model.
 
     Sent as a `role: "tool"` message. Qwen 3.5's chat template renders
@@ -613,6 +596,9 @@ def _tool_card_content_for_api(card: ToolCard) -> str:
     No exit-code prefix for success. The empty-content / role=tool
     pairing is the success signal — adding prose dilutes it.
     """
+    if isinstance(card, SubagentToolCard):
+        return card.spawn_result
+
     parts: list[str] = []
     if card.output:
         parts.append(card.output.rstrip())
@@ -715,6 +701,21 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
         description="open the profile config menu",
     ),
     SlashCommand(
+        name="fork",
+        description="run a background subagent against the current chat context",
+        args_hint="<directive>",
+    ),
+    SlashCommand(
+        name="tasks",
+        description="list background subagent tasks for this session",
+    ),
+    SlashCommand(
+        name="task-cancel",
+        description="cancel a queued or running subagent task",
+        args_hint="[<task-id>|all]",
+        complete_args=static_args("all"),
+    ),
+    SlashCommand(
         name="profile",
         description="switch active profile (theme + prompt + provider)",
         args_hint="[<profile>|cycle]",
@@ -775,6 +776,78 @@ def find_slash_command(name: str) -> SlashCommand | None:
         if n in cmd.aliases:
             return cmd
     return None
+
+
+def _extract_json_string_field(raw_args: str, field: str) -> str:
+    """Best-effort extraction of one JSON string field from a partial blob."""
+    if not raw_args:
+        return ""
+    markers = (f'"{field}":"', f'"{field}": "')
+    for key_marker in markers:
+        idx = raw_args.find(key_marker)
+        if idx == -1:
+            continue
+        body = raw_args[idx + len(key_marker):]
+        out: list[str] = []
+        i = 0
+        while i < len(body):
+            ch = body[i]
+            if ch == '"':
+                break
+            if ch == "\\" and i + 1 < len(body):
+                nxt = body[i + 1]
+                if nxt == "n":
+                    out.append("\n"); i += 2; continue
+                if nxt == "t":
+                    out.append("\t"); i += 2; continue
+                if nxt == "r":
+                    out.append("\r"); i += 2; continue
+                if nxt in ('"', "\\", "/"):
+                    out.append(nxt); i += 2; continue
+                out.append("\\"); i += 1; continue
+            out.append(ch)
+            i += 1
+        return "".join(out)
+    return raw_args
+
+
+def _tool_preview_text(name: str, raw_args: str) -> str:
+    if name == "bash":
+        return _extract_command_tail(raw_args)
+    if name == "subagent":
+        return _extract_json_string_field(raw_args, "prompt")
+    return raw_args
+
+
+def _message_has_tool_artifact(msg: "_Message") -> bool:
+    return msg.tool_card is not None or msg.subagent_card is not None
+
+
+def _message_tool_artifact(msg: "_Message") -> ToolArtifact | None:
+    if msg.tool_card is not None:
+        return msg.tool_card
+    return msg.subagent_card
+
+
+def _api_role_for_message(msg: "_Message") -> str:
+    if msg.api_role_override:
+        return msg.api_role_override
+    if msg.role == "successor":
+        return "assistant"
+    return msg.role
+
+
+def _tool_name_for_card(card: ToolArtifact) -> str:
+    return "subagent" if isinstance(card, SubagentToolCard) else "bash"
+
+
+def _tool_arguments_for_card(card: ToolArtifact) -> dict[str, str]:
+    if isinstance(card, SubagentToolCard):
+        payload = {"prompt": card.directive}
+        if card.name:
+            payload["name"] = card.name
+        return payload
+    return {"command": card.raw_command}
 
 
 # ─── Autocomplete state machine ───
@@ -870,11 +943,12 @@ class _Message:
     raw_text is the original content (without prefix) — what we send
     to the model in the conversation history.
 
-    tool_card, when non-None, marks this message as a structured bash
-    action card instead of a markdown body. The chat painter detects
-    this and renders the message via paint_tool_card instead of the
-    normal span flow. Tool messages are NEVER sent to the model in
-    the conversation history (synthetic-by-construction).
+    tool_card / subagent_card, when non-None, mark this message as a
+    structured native-tool artifact instead of markdown body text. The
+    chat painter detects these and renders the appropriate card path
+    instead of the normal span flow. Tool messages are synthetic for
+    display, but the API serializer reconstructs the assistant/tool
+    turns from them.
 
     is_boundary, when True, marks this as a compaction boundary. The
     chat painter renders a horizontal divider with a central pill
@@ -888,8 +962,9 @@ class _Message:
 
     __slots__ = (
         "role", "raw_text", "_display_text", "body", "created_at",
-        "synthetic", "tool_card", "running_tool",
+        "synthetic", "tool_card", "subagent_card", "running_tool",
         "is_boundary", "is_summary", "boundary_meta",
+        "api_role_override",
         "_token_count",
         "_prepared_tool_output",
         "_card_rows_cache_key", "_card_rows_cache",
@@ -902,10 +977,12 @@ class _Message:
         *,
         synthetic: bool = False,
         tool_card: ToolCard | None = None,
+        subagent_card: SubagentToolCard | None = None,
         running_tool: object | None = None,
         is_boundary: bool = False,
         is_summary: bool = False,
         boundary_meta: object | None = None,
+        api_role_override: str | None = None,
         display_text: str | None = None,
     ) -> None:
         self.role = role  # "user" | "successor" | "tool"
@@ -926,8 +1003,15 @@ class _Message:
         # Synthetic messages (the greeting, error notices) are NOT sent
         # to the model in the conversation history. Tool cards, boundary
         # markers, and summary messages are all forced synthetic.
-        self.synthetic = synthetic or (tool_card is not None) or is_boundary or is_summary
+        self.synthetic = (
+            synthetic
+            or (tool_card is not None)
+            or (subagent_card is not None)
+            or is_boundary
+            or is_summary
+        )
         self.tool_card = tool_card
+        self.subagent_card = subagent_card
         # In-flight BashRunner companion. While set, the chat's
         # _pump_running_tools() polls the runner's queue each tick
         # and the renderer paints `tool_card` as the LIVE preview
@@ -943,6 +1027,10 @@ class _Message:
         # token counts + reduction_pct + summary_text. The painter reads
         # these to render the divider's central pill.
         self.boundary_meta = boundary_meta
+        # Some display messages need to serialize as a different role
+        # in api_messages. Background-task notifications render as
+        # successor notices but enter model context as user-role events.
+        self.api_role_override = api_role_override
         # Lazy per-message token count cache. Computed on first access
         # via the chat's TokenCounter and remembered. Invariant for the
         # message's lifetime because raw_text is set at construction
@@ -1700,6 +1788,15 @@ class SuccessorChat(App):
         # cost for chats that never use the agent loop.
         self._cached_token_counter: TokenCounter | None = None
 
+        # Background subagents — manual `/fork` and the model-visible
+        # `subagent` tool both spawn isolated, headless child chats
+        # through this manager. Queue width is a profile-level knob;
+        # enable/disable, timeout, and notification policy are checked
+        # from `profile.subagents`.
+        self._subagent_manager = SubagentManager(
+            max_model_tasks=self.profile.subagents.max_model_tasks,
+        )
+
         # Chat-level cached total token count for the static footer.
         # Without this cache the footer walks every message via the
         # TokenCounter every frame — at 200K context that's 1 fps.
@@ -1778,6 +1875,8 @@ class SuccessorChat(App):
                     self._cycle_density()
                 elif hb.action == "profile":
                     self._cycle_profile()
+                elif hb.action == "tasks":
+                    self._handle_tasks_cmd()
                 elif hb.action == "scroll_to_bottom":
                     self._scroll_to_bottom()
                 elif hb.action.startswith("slash:"):
@@ -1975,6 +2074,13 @@ class SuccessorChat(App):
         # "open settings"). Sets the pending action flag so the cli
         # main loop knows to open the config menu after the chat exits.
         if event.is_ctrl and event.char == ",":
+            if self._has_active_subagent_tasks():
+                self.messages.append(_Message(
+                    "successor",
+                    "wait for background subagent tasks to finish before opening /config.",
+                    synthetic=True,
+                ))
+                return
             self._pending_action = "config"
             self.stop()
             return
@@ -2326,6 +2432,13 @@ class SuccessorChat(App):
         else:
             self.client = LlamaCppClient()
 
+        # Queue-width changes apply once the manager is idle. If
+        # background tasks are active, keep the old scheduler shape
+        # until they finish; future profile switches can retry.
+        self._subagent_manager.reconfigure(
+            max_model_tasks=new_profile.subagents.max_model_tasks,
+        )
+
         # Persist the new active profile name to chat.json so the next
         # `successor chat` startup uses it. Failures are silent — chat.json
         # writes are best-effort.
@@ -2633,6 +2746,157 @@ class SuccessorChat(App):
         self._autocomplete_dismissed = True
         self._autocomplete_selected = 0
 
+    # ─── Background subagents ───
+
+    def _subagent_counts(self) -> SubagentTaskCounts:
+        return self._subagent_manager.counts()
+
+    def _has_active_subagent_tasks(self) -> bool:
+        return self._subagent_manager.has_active_tasks()
+
+    def _subagent_context_snapshot(self) -> list[dict[str, object]]:
+        """Snapshot the current chat context for a child task.
+
+        Mirrors the API-facing history rules: real user/assistant
+        turns, summaries, and tool cards survive; synthetic glue
+        messages do not.
+        """
+        out: list[dict[str, object]] = []
+        for msg in self._api_ordered_messages():
+            if msg.is_boundary:
+                continue
+            if msg.running_tool is not None:
+                continue
+            if msg.synthetic and not _message_has_tool_artifact(msg) and not msg.is_summary:
+                continue
+            out.append({
+                "role": msg.role,
+                "content": msg.raw_text,
+                "display_text": msg.display_text,
+                "synthetic": msg.synthetic,
+                "tool_card": msg.tool_card,
+                "subagent_card": msg.subagent_card,
+                "is_summary": msg.is_summary,
+                "api_role_override": msg.api_role_override,
+            })
+        return out
+
+    def _handle_fork_cmd(self, directive: str) -> None:
+        cfg = self.profile.subagents
+        if not cfg.enabled:
+            self.messages.append(_Message(
+                "successor",
+                "subagents are disabled for this profile. Enable them in /config, under the subagents section.",
+                synthetic=True,
+            ))
+            return
+        if self._stream is not None or self._running_tools or self._compaction_worker is not None:
+            self.messages.append(_Message(
+                "successor",
+                "wait for the current turn to settle before forking a subagent.",
+                synthetic=True,
+            ))
+            return
+        task = self._subagent_manager.spawn_fork(
+            directive=directive,
+            name="",
+            context_snapshot=self._subagent_context_snapshot(),
+            profile=self.profile,
+            config=cfg,
+        )
+        note = "Use /tasks to inspect progress."
+        if not cfg.notify_on_finish:
+            note = (
+                "Notifications are off for this profile, so use /tasks "
+                "to inspect progress."
+            )
+        self.messages.append(_Message(
+            "successor",
+            f"forked {task.task_id}, queued. {note}",
+            synthetic=True,
+        ))
+
+    def _format_task_snapshot(self, task: SubagentTaskSnapshot) -> list[str]:
+        elapsed_s = int(task.elapsed_s)
+        mm, ss = divmod(elapsed_s, 60)
+        directive = " ".join(task.directive.split())
+        if len(directive) > 72:
+            directive = directive[:71].rstrip() + "…"
+        label = f" {task.name}" if task.name else ""
+        header = (
+            f"{task.task_id}{label}  {task.status:<9} {mm:02d}:{ss:02d}  "
+            f"{directive}"
+        )
+        lines = [header]
+        if task.result_excerpt:
+            lines.append(f"result: {task.result_excerpt}")
+        if task.error:
+            lines.append(f"error: {task.error}")
+        lines.append(f"transcript: {task.transcript_path}")
+        return lines
+
+    def _handle_tasks_cmd(self) -> None:
+        tasks = self._subagent_manager.snapshots()
+        if not tasks:
+            self.messages.append(_Message(
+                "successor",
+                "no background subagent tasks yet. Use /fork <directive> to spawn one.",
+                synthetic=True,
+            ))
+            return
+        counts = self._subagent_counts()
+        lines = [
+            f"subagent tasks: {counts.active} active, {counts.total} total",
+            "",
+        ]
+        for idx, task in enumerate(tasks):
+            if idx > 0:
+                lines.append("")
+            lines.extend(self._format_task_snapshot(task))
+        self.messages.append(_Message(
+            "successor",
+            "\n".join(lines),
+            synthetic=True,
+        ))
+
+    def _handle_task_cancel_cmd(self, arg: str) -> None:
+        target = arg.strip()
+        if not target:
+            self.messages.append(_Message(
+                "successor",
+                "usage: /task-cancel <task-id|all>",
+                synthetic=True,
+            ))
+            return
+        cancelled = self._subagent_manager.cancel(target)
+        if cancelled == 0:
+            self.messages.append(_Message(
+                "successor",
+                f"no queued or running task matched '{target}'.",
+                synthetic=True,
+            ))
+            return
+        noun = "task" if cancelled == 1 else "tasks"
+        self.messages.append(_Message(
+            "successor",
+            f"cancel requested for {cancelled} {noun}.",
+            synthetic=True,
+        ))
+
+    def _pump_subagent_notifications(self) -> None:
+        notes = self._subagent_manager.drain_notifications()
+        if not notes:
+            return
+        for note in notes:
+            self.messages.append(_Message(
+                "successor",
+                build_notification_payload(note.task),
+                api_role_override="user",
+                display_text=build_notification_display(note.task),
+            ))
+        if self._auto_scroll:
+            self._scroll_to_bottom()
+
     def _current_variant(self) -> ThemeVariant:
         """The ThemeVariant to use for THIS frame's render.
 
@@ -2716,8 +2980,47 @@ class SuccessorChat(App):
         # The chat stops with _pending_action = "config" so the cli
         # main loop opens the config menu, then resumes the chat.
         if text == "/config":
+            if self._has_active_subagent_tasks():
+                self.messages.append(_Message(
+                    "successor",
+                    "wait for background subagent tasks to finish before opening /config.",
+                    synthetic=True,
+                ))
+                return
             self._pending_action = "config"
             self.stop()
+            return
+
+        # /fork <directive> — spawn a background subagent with the
+        # current chat context snapshot and a new directive.
+        if text.startswith("/fork"):
+            parts = text.split(maxsplit=1)
+            if len(parts) < 2 or not parts[1].strip():
+                self.messages.append(_Message(
+                    "successor",
+                    "usage: /fork <directive>. Spawns a background subagent that inherits the current chat context.",
+                    synthetic=True,
+                ))
+                return
+            self._handle_fork_cmd(parts[1].strip())
+            return
+
+        # /tasks — list queued/running/completed background tasks
+        if text == "/tasks":
+            self._handle_tasks_cmd()
+            return
+
+        # /task-cancel <id|all> — request cancellation
+        if text.startswith("/task-cancel"):
+            parts = text.split(maxsplit=1)
+            if len(parts) < 2:
+                self.messages.append(_Message(
+                    "successor",
+                    "usage: /task-cancel <task-id|all>",
+                    synthetic=True,
+                ))
+                return
+            self._handle_task_cancel_cmd(parts[1].strip())
             return
 
         # /bash <command> — run a bash command client-side and render
@@ -3025,7 +3328,12 @@ class SuccessorChat(App):
         # Resolve which tools are enabled for THIS turn from the active
         # profile. filter_known() drops any unrecognized names so a
         # stale profile referencing a future tool doesn't crash us.
-        enabled_tools = filter_known(self.profile.tools or ())
+        enabled_tools = list(filter_known(self.profile.tools or ()))
+        if (
+            not self.profile.subagents.enabled
+            or not self.profile.subagents.notify_on_finish
+        ):
+            enabled_tools = [name for name in enabled_tools if name != "subagent"]
 
         # Build the system prompt for THIS turn. When `tools=` is sent
         # to the model, Qwen's chat template auto-injects its OWN
@@ -3078,6 +3386,10 @@ class SuccessorChat(App):
                 f"return control to the user."
             )
 
+        tool_guidance = build_model_tool_guidance(enabled_tools)
+        if tool_guidance:
+            sys_prompt = f"{sys_prompt}\n\n{tool_guidance}"
+
         # Build the conversation history for the model in NATIVE Qwen
         # tool-call shape. Each pass through the message list pairs an
         # assistant message with any immediately-following tool cards
@@ -3098,10 +3410,11 @@ class SuccessorChat(App):
         # message, putting the model in its trained tool-calling mode.
         # Only pass tools= when non-None so older client implementations
         # (test mocks, providers without tool support) keep working.
-        if "bash" in enabled_tools:
+        native_tool_schemas = build_native_tool_schemas(enabled_tools)
+        if native_tool_schemas:
             self._stream = self.client.stream_chat(
                 messages=api_messages,
-                tools=[_BASH_TOOL_SCHEMA],
+                tools=native_tool_schemas,
             )
         else:
             self._stream = self.client.stream_chat(messages=api_messages)
@@ -3178,7 +3491,7 @@ class SuccessorChat(App):
                 continue
 
             # Plain user message
-            if m.role == "user" and m.tool_card is None:
+            if _api_role_for_message(m) == "user" and not _message_has_tool_artifact(m):
                 if m.synthetic:
                     i += 1
                     continue
@@ -3187,14 +3500,16 @@ class SuccessorChat(App):
                 continue
 
             # Assistant message → look ahead for following tool cards
-            if m.role == "successor" and m.tool_card is None:
+            if _api_role_for_message(m) == "assistant" and not _message_has_tool_artifact(m):
                 if m.synthetic:
                     i += 1
                     continue
-                tool_cards: list[ToolCard] = []
+                tool_cards: list[ToolArtifact] = []
                 j = i + 1
-                while j < n and ordered[j].tool_card is not None:
-                    tool_cards.append(ordered[j].tool_card)
+                while j < n and _message_has_tool_artifact(ordered[j]):
+                    card = _message_tool_artifact(ordered[j])
+                    if card is not None:
+                        tool_cards.append(card)
                     j += 1
 
                 if tool_cards:
@@ -3216,11 +3531,17 @@ class SuccessorChat(App):
             # (e.g., /bash slash command). Synthesize an empty-content
             # assistant turn carrying the tool call so the tool result
             # has something to link to.
-            if m.tool_card is not None:
-                tool_cards = [m.tool_card]
+            if _message_has_tool_artifact(m):
+                card = _message_tool_artifact(m)
+                if card is None:
+                    i += 1
+                    continue
+                tool_cards = [card]
                 j = i + 1
-                while j < n and ordered[j].tool_card is not None:
-                    tool_cards.append(ordered[j].tool_card)
+                while j < n and _message_has_tool_artifact(ordered[j]):
+                    next_card = _message_tool_artifact(ordered[j])
+                    if next_card is not None:
+                        tool_cards.append(next_card)
                     j += 1
                 api_messages.append(_assistant_with_tool_calls("", tool_cards))
                 for card in tool_cards:
@@ -3273,12 +3594,12 @@ class SuccessorChat(App):
         """
         log = MessageLog(system_prompt=self.system_prompt)
         for msg in self._api_ordered_messages():
-            if msg.synthetic and msg.tool_card is None and not msg.is_summary:
+            if msg.synthetic and not _message_has_tool_artifact(msg) and not msg.is_summary:
                 # Skip non-tool, non-summary synthetic messages
                 # (greetings, error notes) — they were never the model's voice
                 continue
             # Each non-tool user message starts a new round
-            if msg.role == "user" and not msg.tool_card:
+            if _api_role_for_message(msg) == "user" and not _message_has_tool_artifact(msg):
                 log.begin_round(started_at=msg.created_at)
             elif not log.rounds:
                 log.begin_round(started_at=msg.created_at)
@@ -3291,15 +3612,11 @@ class SuccessorChat(App):
                     created_at=msg.created_at,
                 ))
                 continue
-            agent_role = (
-                "assistant" if msg.role == "successor"
-                else "tool" if msg.role == "tool"
-                else msg.role
-            )
+            agent_role = _api_role_for_message(msg)
             log.append_to_current_round(LogMessage(
                 role=agent_role,
                 content=msg.raw_text or "",
-                tool_card=msg.tool_card,
+                tool_card=_message_tool_artifact(msg),
                 created_at=msg.created_at,
             ))
         return log
@@ -3342,7 +3659,12 @@ class SuccessorChat(App):
                 continue
             if m.tool_card is not None:
                 kept_msgs.append(_Message(
-                    "tool", "", tool_card=m.tool_card,
+                    "tool",
+                    "",
+                    tool_card=m.tool_card if isinstance(m.tool_card, ToolCard) else None,
+                    subagent_card=(
+                        m.tool_card if isinstance(m.tool_card, SubagentToolCard) else None
+                    ),
                 ))
                 continue
             chat_role = "successor" if m.role == "assistant" else m.role
@@ -3467,11 +3789,14 @@ class SuccessorChat(App):
         if msg._token_count is not None:
             return msg._token_count
         # Determine the text payload for this message
-        if msg.tool_card is not None:
-            card = msg.tool_card
+        artifact = _message_tool_artifact(msg)
+        if isinstance(artifact, ToolCard):
+            card = artifact
             text = f"$ {card.raw_command}"
             if card.output:
                 text += "\n" + card.output
+        elif isinstance(artifact, SubagentToolCard):
+            text = artifact.spawn_result
         else:
             text = msg.raw_text
         # Use the agent counter when available (accurate via /tokenize),
@@ -4031,10 +4356,15 @@ class SuccessorChat(App):
                 # increment the counter. Only user-initiated submissions
                 # trigger continuation; synthetic test streams don't.
                 if any_ran and self._agent_turn > 0:
-                    # Mark this batch as needing a continuation. The
-                    # actual _begin_agent_turn call happens once all
-                    # runners in self._running_tools finish.
-                    self._pending_continuation = True
+                    # Async tools (bash runners) resume once the last
+                    # runner finishes. Synchronous tools (like the
+                    # subagent spawn path) have no runner to wait on,
+                    # so continue immediately.
+                    if self._running_tools:
+                        self._pending_continuation = True
+                    else:
+                        self._pending_continuation = False
+                        self._begin_agent_turn()
                     return
 
                 # No tool calls OR nothing successfully ran — turn
@@ -4245,6 +4575,63 @@ class SuccessorChat(App):
                 any_ran = True
         return any_ran
 
+    def _spawn_subagent_task(
+        self,
+        prompt: str,
+        *,
+        name: str = "",
+        tool_call_id: str | None = None,
+    ) -> bool:
+        """Spawn a background subagent and append a structured card."""
+        cfg = self.profile.subagents
+        if not cfg.enabled:
+            self.messages.append(_Message(
+                "successor",
+                "subagent tool is disabled for this profile. Enable subagents in /config before delegating background work.",
+                synthetic=True,
+            ))
+            return False
+        if not cfg.notify_on_finish:
+            self.messages.append(_Message(
+                "successor",
+                "subagent tool requires notify_on_finish=on so the parent chat can receive the result later.",
+                synthetic=True,
+            ))
+            return False
+        directive = prompt.strip()
+        if not directive:
+            self.messages.append(_Message(
+                "successor",
+                "subagent tool call had no prompt.",
+                synthetic=True,
+            ))
+            return False
+
+        from .bash.exec import _new_tool_call_id  # noqa: PLC0415
+
+        task = self._subagent_manager.spawn_fork(
+            directive=directive,
+            name=name,
+            context_snapshot=self._subagent_context_snapshot(),
+            profile=self.profile,
+            config=cfg,
+        )
+        card = SubagentToolCard(
+            task_id=task.task_id,
+            name=task.name,
+            directive=directive,
+            tool_call_id=tool_call_id or _new_tool_call_id(),
+            spawn_result=build_spawn_result_payload(task),
+        )
+        self.messages.append(_Message(
+            "tool",
+            "",
+            subagent_card=card,
+            display_text=build_spawn_result_display(task),
+        ))
+        self._scroll_to_bottom()
+        return True
+
     def _dispatch_native_tool_calls(self, tool_calls: list[dict]) -> bool:
         """Spawn a BashRunner for each native tool_call from the
         model's structured `delta.tool_calls` stream. Mirrors the
@@ -4263,9 +4650,19 @@ class SuccessorChat(App):
             call_id = tc.get("id") or ""
 
             if name != "bash":
+                if name == "subagent":
+                    prompt = args.get("prompt") if isinstance(args, dict) else ""
+                    label = args.get("name") if isinstance(args, dict) else ""
+                    if self._spawn_subagent_task(
+                        str(prompt or ""),
+                        name=str(label or ""),
+                        tool_call_id=call_id,
+                    ):
+                        any_ran = True
+                    continue
                 self.messages.append(_Message(
                     "successor",
-                    f"unknown tool {name!r} — only `bash` is supported",
+                    f"unknown tool {name!r} — only `bash` and `subagent` are supported",
                     synthetic=True,
                 ))
                 continue
@@ -4441,6 +4838,12 @@ class SuccessorChat(App):
         # and transition the animation from waiting → materialize.
         self._poll_compaction_worker()
 
+        # Surface completion/failure notifications from background
+        # subagent tasks. The tasks themselves keep running on their
+        # own worker threads; the foreground chat only needs to drain
+        # these lightweight terminal-state notices.
+        self._pump_subagent_notifications()
+
         # Clear the cache warmer reference once the worker thread
         # has finished. We don't need to do anything with the result —
         # the side effect (populated KV cache in llama.cpp) is what
@@ -4554,13 +4957,39 @@ class SuccessorChat(App):
             _HitBox(profile_x, 0, len(profile_label), 1, "profile")
         )
 
+        # ─── Background-task widget (left of the profile widget) ───
+        counts = self._subagent_counts()
+        active_tasks = counts.active
+        if counts.total > 0:
+            if active_tasks > 0:
+                task_label = f" tasks {active_tasks}/{counts.total} "
+                task_style = Style(
+                    fg=theme.bg,
+                    bg=theme.accent_warm,
+                    attrs=ATTR_BOLD,
+                )
+            else:
+                task_label = f" tasks {counts.total} "
+                task_style = Style(
+                    fg=theme.bg,
+                    bg=theme.fg_dim,
+                    attrs=ATTR_BOLD,
+                )
+            task_x = max(0, profile_x - len(task_label) - 1)
+            paint_text(grid, task_label, task_x, 0, style=task_style)
+            self._hit_boxes.append(
+                _HitBox(task_x, 0, len(task_label), 1, "tasks")
+            )
+        else:
+            task_x = profile_x
+
         # ─── Scroll indicator (left of the profile widget when scrolled) ───
         if self.scroll_offset > 0:
             if self._stream is not None:
                 indicator = f" ↑ {self.scroll_offset} · successor responding · Ctrl+E newest "
             else:
                 indicator = f" ↑ {self.scroll_offset}/{self._max_scroll()} · End for newest "
-            ix = max(0, profile_x - len(indicator))
+            ix = max(0, task_x - len(indicator))
             paint_text(
                 grid,
                 indicator,
@@ -4720,7 +5149,7 @@ class SuccessorChat(App):
         if self._stream is not None:
             return False
         for m in self.messages:
-            if m.tool_card is not None:
+            if _message_has_tool_artifact(m):
                 return False
             if getattr(m, "is_boundary", False):
                 return False
@@ -5438,7 +5867,7 @@ class SuccessorChat(App):
                 continue
 
             # ─── Tool card message ───
-            if msg.tool_card is not None:
+            if _message_has_tool_artifact(msg):
                 card_rows = self._render_tool_card_rows(
                     msg, body_width, theme,
                 )
@@ -5573,6 +6002,9 @@ class SuccessorChat(App):
              rendered rows by (width, theme), reuse on subsequent
              paints. Resize / theme swap invalidates.
         """
+        if msg.subagent_card is not None:
+            return self._render_subagent_card_rows(msg, body_width, theme)
+
         card = msg.tool_card
         if card is None:
             return []
@@ -5701,6 +6133,51 @@ class SuccessorChat(App):
                     prepainted_cells=tuple(cells),
                 )
             )
+        return rows
+
+    def _render_subagent_card_rows(
+        self,
+        msg: "_Message",
+        body_width: int,
+        theme: ThemeVariant,
+    ) -> list[_RenderedRow]:
+        card = msg.subagent_card
+        if card is None:
+            return []
+
+        cache_key = (body_width, id(theme))
+        if (
+            msg._card_rows_cache_key == cache_key
+            and msg._card_rows_cache is not None
+        ):
+            return msg._card_rows_cache
+
+        height = measure_subagent_card_height(card, width=body_width)
+        if height <= 0:
+            return []
+
+        sub = Grid(height, body_width)
+        paint_subagent_card(sub, card, x=0, y=0, w=body_width, theme=theme)
+
+        rows: list[_RenderedRow] = []
+        for sy in range(height):
+            cells: list[Cell] = []
+            for sx in range(body_width):
+                cells.append(sub.at(sy, sx))
+            rows.append(
+                _RenderedRow(
+                    leading_text="",
+                    leading_attrs=0,
+                    leading_color_kind="accent",
+                    body_spans=(),
+                    base_color=theme.fg,
+                    line_tag="tool_card",
+                    body_indent=0,
+                    prepainted_cells=tuple(cells),
+                )
+            )
+        msg._card_rows_cache_key = cache_key
+        msg._card_rows_cache = rows
         return rows
 
     def _render_md_lines_with_search(
@@ -6032,7 +6509,7 @@ class SuccessorChat(App):
         # Try to extract the "command" field from the partial JSON
         # so the preview shows a readable command body instead of
         # escaped JSON. Failing that, fall back to the raw text.
-        display_text = _extract_command_tail(raw_arguments)
+        display_text = _tool_preview_text(name, raw_arguments)
 
         # How many lines of tail we show. Bounded so the preview
         # doesn't take over the chat.
@@ -6071,7 +6548,7 @@ class SuccessorChat(App):
         # the header back to the generic message. We only REPLACE a
         # cached inference with a NEW successful inference — never
         # with a fallback.
-        inferred = _infer_tool_preview(display_text)
+        inferred = _infer_tool_preview(display_text) if name == "bash" else None
         cache_key = (id(self._stream), call_index)
         if inferred is not None:
             self._streaming_verb_cache[cache_key] = inferred

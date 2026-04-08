@@ -123,6 +123,9 @@ successor chat         chat interface (real llama.cpp streaming, intro plays fir
                           /budget         show context fill % + thresholds
                           /burn N         inject N synthetic tokens (test compaction)
                           /compact        manually fire compaction
+                          /fork <text>    spawn a background subagent
+                          /tasks          list background task state
+                          /task-cancel    cancel a queued/running task
                           Ctrl+G          interrupt an in-flight stream or running tool
                           Ctrl+,          open config menu
                           Ctrl+P          cycle profiles
@@ -139,6 +142,13 @@ successor record       record an input session to JSONL
 successor replay       replay a recorded session
 successor bench        renderer benchmark (no TTY needed)
 ```
+
+Background subagents now have two paths:
+- manual `/fork`, which works whenever the profile's `subagents.enabled`
+  setting is on
+- model-visible `subagent`, which requires the tool to be enabled in
+  the profile's tool list and also requires `subagents.notify_on_finish`
+  so the parent chat receives the later completion event
 
 ## The five layers
 

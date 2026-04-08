@@ -1,6 +1,6 @@
 {
   "name": "successor-dev",
-  "description": "working on the successor harness itself — bash + aggressive autocompact",
+  "description": "working on the successor harness itself — bash + subagents + aggressive autocompact",
   "theme": "steel",
   "display_mode": "dark",
   "density": "normal",
@@ -13,7 +13,7 @@
     "temperature": 0.5
   },
   "skills": [],
-  "tools": ["bash"],
+  "tools": ["bash", "subagent"],
   "tool_config": {
     "bash": {
       "allow_dangerous": false,
@@ -32,5 +32,11 @@
     "enabled": true,
     "keep_recent_rounds": 8,
     "summary_max_tokens": 16000
+  },
+  "subagents": {
+    "enabled": true,
+    "max_model_tasks": 1,
+    "notify_on_finish": true,
+    "timeout_s": 900.0
   }
 }

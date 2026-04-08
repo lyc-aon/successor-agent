@@ -11,6 +11,44 @@ unit on top of phase 0.
 
 ---
 
+## v0.1.6, model-visible subagents (2026-04-08)
+
+Follow-on pass that turns the v0.1.5 background-task foundation into a
+real model-visible delegation path.
+
+### What landed
+
+- `src/successor/tools_registry.py` now defines a native `subagent`
+  tool schema plus model guidance, based on the same notification and
+  "don't peek / don't race" interaction model used in free-code's fork
+  path.
+- `src/successor/chat.py` now accepts native `subagent` tool calls,
+  renders dedicated subagent cards, serializes spawn results back into
+  the API message stream, and injects completion notices as user-role
+  events so later turns can answer from them.
+- `src/successor/subagents/prompt.py` defines the child boilerplate,
+  spawn payload, and completion payload. The child is explicitly told to
+  stay in scope, not re-delegate, and to return one concise final
+  report.
+- `src/successor/subagents/manager.py` now defers queue-width
+  reconfiguration safely when tasks are active, then applies the new
+  semaphore once the manager goes idle.
+- `successor-dev` now enables the model-visible `subagent` tool by
+  default. The plain `default` profile keeps manual `/fork` available
+  but leaves model delegation off by default.
+- `docs/subagents-plan.md` was rewritten into an up-to-date design note
+  instead of a stale pre-implementation plan.
+
+### Verification
+
+- Hermetic local suite: `1051 passed in 11.66s`
+- Live llama.cpp/Qwopus E2E:
+  - `scripts/e2e_chat_driver.py --scenario subagent_summary`
+  - `scripts/e2e_chat_driver.py --scenario model_subagent_version_audit`
+- Artifact inspection confirmed the task badge, inline subagent card,
+  completion notification, and second-turn "answer from the
+  notification only" behavior.
+
 ## v0.1.5, unicode editing audit (2026-04-08)
 
 Audit/fix pass focused on typed-input reality vs docs. The byte
@@ -39,6 +77,24 @@ editing still deleting one codepoint at a time.
   input" item and now points at the real shipped state instead.
 - Version bumped to 0.1.5 in `pyproject.toml` and
   `src/successor/__init__.py`.
+
+### Late follow-on: subagent foundations
+
+- New `src/successor/subagents/`: `SubagentConfig` plus a
+  `SubagentManager` that runs background child tasks inside headless
+  `SuccessorChat` instances.
+- `Profile` picked up a `subagents` section with enable/disable, queue
+  width, timeout, and notification settings. Built-in profiles now ship
+  that block explicitly.
+- `src/successor/chat.py` gained manual `/fork`, `/tasks`, and
+  `/task-cancel` slash commands, completion notifications, transcript
+  paths, and a title-bar task-count badge.
+- `src/successor/wizard/config.py` gained a `subagents` section so the
+  queue width / timeout / notification knobs round-trip through the
+  config menu.
+- `scripts/e2e_chat_driver.py` now knows how to wait for background
+  subagent completion and includes a live `subagent_summary` scenario
+  for local llama.cpp verification.
 
 ### Tests
 
