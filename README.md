@@ -88,7 +88,9 @@ as downloadable assets.
 The chat interface keeps every command discoverable from the
 keyboard. Press `?` for the full help overlay (it lists every
 keybinding *and* every slash command), or type `/` to open the inline
-command palette.
+command palette. Mouse wheel scrolling is on by default; `/mouse off`
+restores native click-drag selection, and `/mouse on` re-enables
+clickable title-bar widgets plus in-chat wheel scroll.
 
 ```
 type / to see commands         press ? for the full help overlay

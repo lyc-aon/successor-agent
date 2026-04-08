@@ -24,6 +24,11 @@ V2 fields (added 2026-04-06 with the theme refactor):
   active_profile    str — registered profile name (added in phase 3,
                           slot reserved here)
 
+V3 fields (added 2026-04-08 for mouse usability):
+
+  same shape as v2; version bump only changes the default behavior
+  around mouse reporting
+
 V1 → V2 fixup (one-shot, idempotent, runs on every load):
 
   Old v1 stored a flat `theme` key whose value conflated the visual
@@ -37,6 +42,14 @@ V1 → V2 fixup (one-shot, idempotent, runs on every load):
   The fixup is idempotent because it only runs when `version` is
   missing or < 2. Once a config is saved with version=2 the fixup is
   a no-op on subsequent loads.
+
+V2 → V3 fixup (one-shot, idempotent, runs on every load):
+
+  Earlier builds defaulted `mouse` to off, which meant wheel scrolling
+  silently did nothing unless the user already knew about `/mouse on`.
+  V3 flips the default to on. Existing v2 configs are upgraded to
+  `mouse: true` once on load; users can still opt out explicitly with
+  `/mouse off`, and future saves persist that v3 choice.
 """
 
 from __future__ import annotations
@@ -51,7 +64,7 @@ CONFIG_DIR_ENV = "SUCCESSOR_CONFIG_DIR"
 DEFAULT_CONFIG_DIR = Path.home() / ".config" / "successor"
 CHAT_CONFIG_FILE = "chat.json"
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 # Legacy v1 theme names → (v2 theme name, v2 display_mode). Anything not
 # in this map is passed through unchanged with display_mode defaulting
@@ -111,8 +124,12 @@ def migrate_config(data: dict[str, Any]) -> dict[str, Any]:
         data = _migrate_v1_to_v2(data)
         data["version"] = 2
 
+    if version < 3:
+        data = _migrate_v2_to_v3(data)
+        data["version"] = 3
+
     # Future migrations would chain here:
-    # if version < 3: data = _migrate_v2_to_v3(data); data["version"] = 3
+    # if version < 4: data = _migrate_v3_to_v4(data); data["version"] = 4
 
     return data
 
@@ -151,6 +168,19 @@ def _migrate_v1_to_v2(data: dict[str, Any]) -> dict[str, Any]:
         # Pass through unchanged and default mode to dark.
         out["display_mode"] = "dark"
 
+    return out
+
+
+def _migrate_v2_to_v3(data: dict[str, Any]) -> dict[str, Any]:
+    """Flip the historical mouse default from off to on.
+
+    v2's `mouse: false` overwhelmingly meant "old default" rather than
+    an intentional preference. Upgrade to `true` once so wheel scroll
+    works out of the box on older installs. Users can still toggle it
+    back off and future v3 saves preserve that explicit choice.
+    """
+    out = dict(data)
+    out["mouse"] = True
     return out
 
 

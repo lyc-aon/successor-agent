@@ -27,3 +27,25 @@ def test_terminal_disables_alternate_scroll_for_session(monkeypatch) -> None:
         term_mod.ALT_SCROLL_SAVE + term_mod.ALT_SCROLL_OFF + term_mod.ALT_SCREEN_ON
     )
     assert writes[-1].endswith(term_mod.ALT_SCREEN_OFF + term_mod.ALT_SCROLL_RESTORE)
+
+
+def test_terminal_emits_mouse_reporting_sequences_when_enabled(monkeypatch) -> None:
+    writes: list[str] = []
+
+    monkeypatch.setattr(term_mod.atexit, "register", lambda fn: None)
+    monkeypatch.setattr(term_mod.signal, "signal", lambda *args, **kwargs: None)
+
+    term = term_mod.Terminal(
+        raw=False,
+        alt_screen=True,
+        bracketed_paste=False,
+        mouse_reporting=True,
+    )
+    monkeypatch.setattr(term, "write", writes.append)
+
+    term.__enter__()
+    term.__exit__(None, None, None)
+
+    assert writes
+    assert term_mod.MOUSE_ON in writes[0]
+    assert term_mod.MOUSE_OFF in writes[-1]

@@ -226,6 +226,28 @@ def test_long_output_shows_head_window_plus_overflow_marker() -> None:
     assert "line25" not in plain
 
 
+def test_light_theme_diff_card_fills_edge_backgrounds(tmp_path) -> None:
+    """Prepainted tool cards must not leak default black cells at the
+    left/right edges of output rows or across the status row."""
+    card = dispatch_bash(
+        "cat > note.txt <<'EOF'\nalpha\nbeta\nEOF",
+        cwd=str(tmp_path),
+    )
+    theme = find_theme_or_fallback("forge").variant("light")
+    g = Grid(12, 80)
+    paint_tool_card(g, card, x=0, y=0, w=80, theme=theme)
+
+    # Output rows start immediately below the 3-row box.
+    assert g.at(3, 0).style.bg == theme.bg
+    assert g.at(3, 1).style.bg == theme.bg_input
+    assert g.at(3, 79).style.bg == theme.bg
+
+    # Status row should also own its whole width instead of leaving a
+    # black tail behind the painted text.
+    assert g.at(7, 0).style.bg == theme.bg
+    assert g.at(7, 79).style.bg == theme.bg
+
+
 # ─── measure_tool_card_height ───
 
 

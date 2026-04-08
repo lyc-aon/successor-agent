@@ -99,7 +99,8 @@ def test_migrate_v1_dark() -> None:
     result = migrate_config({"theme": "dark"})
     assert result["theme"] == "steel"
     assert result["display_mode"] == "dark"
-    assert result["version"] == 2
+    assert result["mouse"] is True
+    assert result["version"] == 3
 
 
 def test_migrate_v1_light() -> None:
@@ -107,7 +108,8 @@ def test_migrate_v1_light() -> None:
     result = migrate_config({"theme": "light"})
     assert result["theme"] == "steel"
     assert result["display_mode"] == "light"
-    assert result["version"] == 2
+    assert result["mouse"] is True
+    assert result["version"] == 3
 
 
 def test_migrate_v1_forge() -> None:
@@ -115,7 +117,8 @@ def test_migrate_v1_forge() -> None:
     result = migrate_config({"theme": "forge"})
     assert result["theme"] == "forge"
     assert result["display_mode"] == "dark"
-    assert result["version"] == 2
+    assert result["mouse"] is True
+    assert result["version"] == 3
 
 
 def test_migrate_v1_unknown_theme_passes_through() -> None:
@@ -124,7 +127,8 @@ def test_migrate_v1_unknown_theme_passes_through() -> None:
     result = migrate_config({"theme": "my_custom_theme"})
     assert result["theme"] == "my_custom_theme"
     assert result["display_mode"] == "dark"
-    assert result["version"] == 2
+    assert result["mouse"] is True
+    assert result["version"] == 3
 
 
 def test_migrate_preserves_other_keys() -> None:
@@ -139,18 +143,19 @@ def test_migrate_preserves_other_keys() -> None:
 
 
 def test_migrate_v2_is_noop() -> None:
-    """A v2 config is returned unchanged."""
-    v2 = {
-        "version": 2,
+    """A v3 config is returned unchanged."""
+    v3 = {
+        "version": 3,
         "theme": "steel",
         "display_mode": "light",
         "density": "normal",
         "mouse": False,
     }
-    result = migrate_config(v2)
+    result = migrate_config(v3)
     assert result["theme"] == "steel"
     assert result["display_mode"] == "light"
-    assert result["version"] == 2
+    assert result["mouse"] is False
+    assert result["version"] == 3
 
 
 def test_migrate_is_idempotent() -> None:
@@ -177,7 +182,8 @@ def test_migrate_doesnt_clobber_explicit_display_mode() -> None:
 def test_migrate_empty_dict() -> None:
     """An empty dict gets the version stamp but no theme fixup."""
     result = migrate_config({})
-    assert result["version"] == 2
+    assert result["mouse"] is True
+    assert result["version"] == 3
     assert "theme" not in result
     assert "display_mode" not in result
 
@@ -202,8 +208,20 @@ def test_load_migrates_v1_file_on_disk(temp_config_dir: Path) -> None:
     assert cfg["theme"] == "steel"
     assert cfg["display_mode"] == "dark"
     assert cfg["density"] == "compact"
-    assert cfg["mouse"] is False
-    assert cfg["version"] == 2
+    assert cfg["mouse"] is True
+    assert cfg["version"] == 3
+
+
+def test_migrate_v2_mouse_false_flips_to_true() -> None:
+    """Older installs defaulted mouse off; v3 upgrades them to on."""
+    result = migrate_config({
+        "version": 2,
+        "theme": "steel",
+        "display_mode": "light",
+        "mouse": False,
+    })
+    assert result["mouse"] is True
+    assert result["version"] == 3
 
 
 def test_save_stamps_current_version(temp_config_dir: Path) -> None:

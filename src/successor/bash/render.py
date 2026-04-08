@@ -436,6 +436,10 @@ def paint_tool_card(
     for line in out_lines:
         if cur_y >= grid.rows:
             break
+        fill_region(
+            grid, x, cur_y, w, 1,
+            style=Style(bg=theme.bg),
+        )
         # Tinted background bar across the output region
         fill_region(
             grid, x + 1, cur_y, w - 2, 1,
@@ -448,6 +452,10 @@ def paint_tool_card(
 
     # ─── Status footer — exit code + duration ───
     if cur_y < grid.rows:
+        fill_region(
+            grid, x, cur_y, w, 1,
+            style=Style(bg=theme.bg),
+        )
         status_glyph = "✓" if card.succeeded else "✗"
         status_color = theme.accent if card.succeeded else theme.accent_warn
         dur_ms = card.duration_ms or 0.0
@@ -697,6 +705,10 @@ def paint_tool_card_running(
         # Reserve one empty row so the status footer doesn't sit
         # flush against the box border before any output arrives.
         fill_region(
+            grid, x, cur_y, w, 1,
+            style=Style(bg=theme.bg),
+        )
+        fill_region(
             grid, x + 1, cur_y, w - 2, 1,
             style=Style(bg=theme.bg_input),
         )
@@ -705,6 +717,10 @@ def paint_tool_card_running(
 
     # ─── Status footer — live elapsed time + line count ───
     if cur_y < grid.rows:
+        fill_region(
+            grid, x, cur_y, w, 1,
+            style=Style(bg=theme.bg),
+        )
         if elapsed_s < 1.0:
             elapsed_text = f"{elapsed_s * 1000:.0f}ms"
         else:
@@ -767,6 +783,10 @@ def _paint_running_output_lines(
     for fragment, kind in tail:
         if cur_y >= grid.rows:
             break
+        fill_region(
+            grid, x, cur_y, w, 1,
+            style=Style(bg=theme.bg),
+        )
         fill_region(
             grid, x + 1, cur_y, w - 2, 1,
             style=Style(bg=theme.bg_input),

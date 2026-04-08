@@ -3,6 +3,33 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
+## v0.1.10 — 2026-04-08
+
+Tool-card light-theme cleanup plus mouse-wheel usability fix.
+
+### What changed
+
+- `src/successor/bash/render.py` now owns the full row background for
+  settled and running tool-card output/status rows, which removes the
+  leaked default-black side rails and footer tails that were visible in
+  light themes
+- chat mouse reporting now defaults on for fresh sessions, and
+  `src/successor/config.py` upgrades older v2 configs to the new
+  `mouse: true` default on load so wheel scrolling works without
+  knowing about `/mouse on`
+- `/mouse off` still remains a real opt-out for users who want native
+  click-drag selection back without holding Shift
+
+### Verification
+
+- focused regressions: `114 passed`
+- full local suite: `1072 passed`
+- direct light-theme render probe confirmed output/status row edges now
+  carry theme backgrounds instead of default black cells
+- real local config probe confirmed the existing
+  `~/.config/successor/chat.json` now upgrades to `mouse: true` in
+  memory and enables terminal mouse reporting on startup
+
 ## v0.1.9 — 2026-04-08
 
 Semantic diff cards for file changes.

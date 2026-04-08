@@ -11,6 +11,68 @@ unit on top of phase 0.
 
 ---
 
+## v0.1.10, tool-card light-theme cleanup + mouse default flip (2026-04-08)
+
+Follow-on polish pass after the semantic diff cards landed. Two bugs
+showed up immediately in real use:
+
+1. prepainted bash tool cards leaked default black cells at the outer
+   edges of output/status rows when rendered inside light themes
+2. wheel scrolling still felt broken for existing users because the app
+   only received wheel events when mouse reporting was on, and older
+   installs still had `mouse: false` persisted from the previous
+   default
+
+### What landed
+
+- `src/successor/bash/render.py` now fills the full row background for:
+  - settled diff/stdout output rows
+  - settled status rows
+  - running output rows
+  - running status rows
+  - the running "reserve one blank output row" path
+
+  That means prepainted sub-grids no longer fall through to the Grid's
+  default `Style()` cells at the left/right gutters or after the status
+  footer text.
+
+- `src/successor/config.py` bumped to schema v3.
+  - v2 → v3 migration now upgrades `mouse` to `true` once on load
+  - rationale: v2 `mouse: false` overwhelmingly meant "historical
+    default" rather than an intentional preference, and it made wheel
+    scrolling silently non-functional
+
+- `src/successor/chat.py` now treats mouse reporting as on-by-default
+  when the config key is missing, updates the in-code comments, and
+  clarifies `/mouse` help text around the new default and the remaining
+  opt-out path.
+
+### Verification
+
+- Focused regressions:
+  - `tests/test_bash_render.py`
+  - `tests/test_config.py`
+  - `tests/test_chat_mouse.py`
+  - `tests/test_terminal.py`
+  - `tests/test_chat_bash.py`
+  - `tests/test_input_history.py`
+  - result: `114 passed in 1.72s`
+- New regressions added:
+  - `tests/test_bash_render.py` now checks a light-theme diff card for
+    theme-colored edge/status backgrounds instead of leaked black cells
+  - `tests/test_chat_mouse.py` covers:
+    - default mouse-on when config is missing
+    - v2 `mouse: false` upgrade to on
+    - wheel-up / wheel-down changing chat scroll state
+  - `tests/test_terminal.py` now asserts `MOUSE_ON`/`MOUSE_OFF`
+    sequences are emitted when terminal mouse reporting is enabled
+- Direct local probes:
+  - a light-theme write-file render confirmed output/status rows now
+    carry theme colors at the edges
+  - the real local config at `~/.config/successor/chat.json` now
+    upgrades in memory to `mouse: true`, and `SuccessorChat()` starts
+    with `term.mouse_reporting = True`
+
 ## v0.1.9, semantic diff cards (2026-04-08)
 
 Renderer/tooling pass focused on making file mutations legible inside
