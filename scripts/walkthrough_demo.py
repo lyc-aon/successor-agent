@@ -281,6 +281,80 @@ def set_winsize(fd: int, cols: int, rows: int) -> None:
         pass
 
 
+def seed_demo_profiles(config_dir: Path) -> None:
+    """Drop two user profiles into the config dir's profiles/
+    subdirectory so the config menu has multiple real options to
+    navigate between. Used by --mode config to make the demo
+    visually richer than just showing the bundled defaults.
+
+    The seeded profiles are intentionally varied (different theme,
+    mode, density, system prompt) so navigating between them in
+    the profiles pane shows the live preview pane re-render with
+    the new palette + density.
+    """
+    import json
+
+    profiles_dir = config_dir / "profiles"
+    profiles_dir.mkdir(parents=True, exist_ok=True)
+
+    (profiles_dir / "demo.json").write_text(json.dumps({
+        "name": "demo",
+        "description": "demo profile created during the walkthrough",
+        "theme": "steel",
+        "display_mode": "dark",
+        "density": "normal",
+        "system_prompt": (
+            "You are a friendly assistant in a terminal chat. "
+            "Be brief and use bash tools when they help."
+        ),
+        "provider": {
+            "type": "llamacpp",
+            "base_url": "http://localhost:8080",
+            "model": "local",
+            "max_tokens": 4096,
+            "temperature": 0.7,
+        },
+        "skills": [],
+        "tools": ["bash"],
+        "tool_config": {},
+        "intro_animation": "successor",
+        "chat_intro_art": "successor",
+    }, indent=2))
+
+    (profiles_dir / "writer.json").write_text(json.dumps({
+        "name": "writer",
+        "description": "writer's profile — warm forge palette, spacious layout",
+        "theme": "forge",
+        "display_mode": "light",
+        "density": "spacious",
+        "system_prompt": (
+            "You are a thoughtful writing assistant. Help craft "
+            "clear, expressive prose. When asked to edit, preserve "
+            "the author's voice."
+        ),
+        "provider": {
+            "type": "llamacpp",
+            "base_url": "http://localhost:8080",
+            "model": "local",
+            "max_tokens": 8192,
+            "temperature": 0.8,
+        },
+        "skills": [],
+        "tools": [],
+        "tool_config": {},
+        "intro_animation": "successor",
+        "chat_intro_art": "successor",
+    }, indent=2))
+
+    # Set the active profile so the menu opens on "demo" (its
+    # alphabetical position in the profiles list will land on
+    # the third row, after compact-test and default — fine).
+    (config_dir / "chat.json").write_text(json.dumps({
+        "version": 2,
+        "active_profile": "demo",
+    }))
+
+
 def preflight() -> bool:
     """Run the sanity checks. Returns True iff everything looks ready."""
     cols, rows = get_terminal_size()
@@ -792,6 +866,202 @@ def run_walkthrough_showcase(driver: Driver) -> None:
     driver.section(17, "walkthrough complete")
 
 
+def run_walkthrough_config(driver: Driver) -> None:
+    """Three-pane config menu walkthrough.
+
+    Drives `successor config` against a temp config dir that's been
+    seeded with two demo profiles, so the menu opens with multiple
+    real options to navigate between. Walks through:
+
+      - Initial 3-pane layout (profiles list / settings tree / live preview)
+      - Tab navigation between panes
+      - CYCLE field editing (theme — overlay + smooth blend in preview)
+      - TOGGLE field editing (display_mode — Alt+D-style flip in preview)
+      - CYCLE field editing (density — overlay + reflow in preview)
+      - MULTILINE field — opens the full-screen system prompt editor,
+        types a few chars, exits via Esc (no save)
+      - Profile pane navigation between profiles, settings + preview
+        update to match
+      - Capital D → delete profile confirmation modal
+      - N to cancel the modal
+      - Lowercase s → save changes, toast notification
+      - Esc → exit menu, drops into chat with the edited profile
+      - Empty-state hero panel renders for the new profile
+      - /quit clean exit
+
+    Setup mode created the temp profile, this mode demonstrates
+    the iterate-on-it experience.
+    """
+
+    # Section 1: initial state
+    # The config menu opens with three panes visible. Let the
+    # viewer take in the layout and the seeded profile list.
+    driver.section(1, "config menu — three-pane layout visible")
+    driver.pump_for(5.0)
+
+    # Section 2: Tab to focus the settings pane (cursor was on
+    # SETTINGS by default but we Tab once to make the focus shift
+    # visible to the viewer — they see the highlight move).
+    driver.section(2, "Tab — focus settings pane")
+    driver.send(b"\t")
+    driver.pump_for(1.5)
+
+    # Section 3: navigate down to the theme setting
+    # Settings tree starts at "theme" so a few Downs would skip
+    # past it; instead we go Up first to land safely at theme.
+    driver.section(3, "navigate to THEME setting")
+    press_up(driver)
+    driver.pump_for(0.5)
+    press_up(driver)
+    driver.pump_for(0.5)
+    press_up(driver)
+    driver.pump_for(1.0)
+
+    # Section 4: Enter to edit the theme — opens CYCLE overlay
+    driver.section(4, "Enter — open theme CYCLE overlay")
+    press_enter(driver)
+    driver.pump_for(2.5)
+
+    # Section 5: Down arrow inside the overlay → cycle to forge
+    # The live preview pane on the RIGHT side blends to forge
+    # palette via the chat's smooth transition machinery. This is
+    # the visual showpiece of the config menu.
+    driver.section(5, "Down — cycle to forge, watch live preview blend")
+    press_down(driver)
+    driver.pump_for(3.5)
+
+    # Section 6: Enter to commit the choice
+    driver.section(6, "Enter — commit theme = forge")
+    press_enter(driver)
+    driver.pump_for(1.5)
+
+    # Section 7: navigate down to display_mode (TOGGLE)
+    driver.section(7, "Down — navigate to display_mode")
+    press_down(driver)
+    driver.pump_for(1.0)
+
+    # Section 8: Enter to toggle dark↔light. The TOGGLE field
+    # type fires immediately on Enter; the live preview blends
+    # to the new mode.
+    driver.section(8, "Enter — toggle to light, watch preview blend")
+    press_enter(driver)
+    driver.pump_for(3.5)
+
+    # Section 9: Enter again to toggle back to dark
+    driver.section(9, "Enter — toggle back to dark")
+    press_enter(driver)
+    driver.pump_for(2.5)
+
+    # Section 10: navigate down to density (CYCLE)
+    driver.section(10, "Down — navigate to density")
+    press_down(driver)
+    driver.pump_for(1.0)
+
+    # Section 11: Enter → density CYCLE overlay
+    driver.section(11, "Enter — open density CYCLE overlay")
+    press_enter(driver)
+    driver.pump_for(2.0)
+
+    # Section 12: Down to spacious — preview reflows
+    driver.section(12, "Down — cycle to spacious, watch preview reflow")
+    press_down(driver)
+    driver.pump_for(3.0)
+
+    # Section 13: Enter to commit
+    driver.section(13, "Enter — commit density = spacious")
+    press_enter(driver)
+    driver.pump_for(1.5)
+
+    # Section 14: skip down past intro_animation to system_prompt
+    # Settings tree order: theme, mode, density, intro, prompt
+    driver.section(14, "Down twice — navigate to system_prompt (MULTILINE)")
+    press_down(driver)
+    driver.pump_for(0.5)
+    press_down(driver)
+    driver.pump_for(1.0)
+
+    # Section 15: Enter → opens the full-screen multiline prompt editor
+    # This is the show-stopper — soft word wrap, cursor model,
+    # selection support, OSC 52 clipboard. The editor takes over
+    # the screen with a syntax-highlighted-ish view of the prompt.
+    driver.section(15, "Enter — open the multiline system prompt editor")
+    press_enter(driver)
+    driver.pump_for(4.0)
+
+    # Section 16: type a few characters at the end of the prompt
+    # to show the editor accepts input
+    driver.section(16, "type a tweak — see the editor accept input")
+    type_string(driver, " (edited live!)")
+    driver.pump_for(1.5)
+
+    # Section 17: Esc to back out of the editor without saving
+    # the multiline edit. The settings tree comes back into view.
+    driver.section(17, "Esc — exit prompt editor")
+    press_esc(driver)
+    driver.pump_for(1.5)
+
+    # Section 18: Tab to focus the profiles pane (left)
+    driver.section(18, "Tab — focus profiles pane (left)")
+    driver.send(b"\t")
+    driver.pump_for(1.5)
+
+    # Section 19: Down arrow to navigate to next profile
+    # The middle pane updates to show the new profile's settings,
+    # and the live preview pane on the right re-renders for the
+    # new profile's theme + mode + density.
+    driver.section(19, "Down — switch to next profile, see panes update")
+    press_down(driver)
+    driver.pump_for(3.0)
+
+    # Section 20: Down again to the next one
+    driver.section(20, "Down — switch to another profile")
+    press_down(driver)
+    driver.pump_for(3.0)
+
+    # Section 21: capital D → delete profile confirmation modal
+    # Centered modal with a fade-in border and a Y/N prompt.
+    driver.section(21, "capital D — delete profile confirmation modal")
+    driver.send(b"D")
+    driver.pump_for(3.5)
+
+    # Section 22: N to cancel the modal (safer than Esc since
+    # we want to demo the cancel-on-N path)
+    driver.section(22, "N — cancel the delete modal")
+    driver.send(b"N")
+    driver.pump_for(1.5)
+
+    # Section 23: lowercase s — save all dirty changes
+    # The dirty flags from the theme/mode/density edits earlier
+    # get persisted, the toast notification slides in.
+    driver.section(23, "s — save all dirty profiles, toast notification")
+    driver.send(b"s")
+    driver.pump_for(3.0)
+
+    # Section 24: Esc → exit the menu, drops into the chat
+    # with the active profile (whichever one we last navigated to)
+    driver.section(24, "Esc — exit menu → chat opens with edited profile")
+    press_esc(driver)
+    driver.pump_for(2.0)
+
+    # Section 25: chat empty state hero panel for the edited profile
+    # The wizard's chat_intro_art="successor" + the edits we just
+    # made show up in the info panel + the live theme is whatever
+    # we set during the edit session.
+    driver.section(25, "chat empty state — edited profile takes effect")
+    driver.pump_for(5.0)
+
+    # Section 26: clean exit
+    driver.section(26, "type /quit")
+    type_string(driver, "/quit")
+    driver.pump_for(0.4)
+
+    driver.section(27, "submit /quit → exit")
+    press_enter(driver)
+    driver.pump_for(1.0)
+
+    driver.section(28, "walkthrough complete")
+
+
 # ─── Timeline preview ───
 
 
@@ -840,24 +1110,24 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         prog="walkthrough_demo",
         description=(
-            "Scripted walkthrough driver for Successor. Three modes: "
-            "`setup` (drives the wizard, no model required), `chat` "
-            "(drives the chat UI showing slash commands and theme "
-            "cycling), and `showcase` (model-driven feature demo "
-            "where qwen does the cool stuff and the script just "
-            "feeds carefully-chosen prompts)."
+            "Scripted walkthrough driver for Successor. Four modes: "
+            "`setup` (wizard, no model needed), `config` (three-pane "
+            "profile menu against seeded profiles, no model needed), "
+            "`chat` (manual UI feature drive against the live model), "
+            "and `showcase` (model-driven feature demo where qwen "
+            "does the cool stuff)."
         ),
     )
     parser.add_argument(
         "--mode",
-        choices=["setup", "chat", "showcase"],
+        choices=["setup", "config", "chat", "showcase"],
         default="setup",
         help=(
             "which walkthrough to run. setup = first-time profile "
-            "creation wizard arc (no model required). chat = live "
-            "chat with manual UI feature drives. showcase = the one "
-            "to record for a feature video — model drives every "
-            "frame, script just types prompts and waits."
+            "creation wizard arc. config = three-pane edit menu with "
+            "live preview blending. chat = manual UI drives against "
+            "the live model. showcase = model-driven feature demo "
+            "(the one to record for a feature video)."
         ),
     )
     args = parser.parse_args()
@@ -882,6 +1152,18 @@ def main() -> int:
         ))
         run_walkthrough = run_walkthrough_setup
         successor_argv = ["successor", "setup"]
+    elif args.mode == "config":
+        # Config mode: temp dir seeded with two demo profiles so the
+        # menu has multiple real options to navigate between. The
+        # post-menu chat tail uses the same temp config so it doesn't
+        # touch the user's real setup.
+        temp_config = Path(tempfile.mkdtemp(
+            prefix=f"successor-walkthrough-{timestamp}-",
+            dir="/tmp",
+        ))
+        seed_demo_profiles(temp_config)
+        run_walkthrough = run_walkthrough_config
+        successor_argv = ["successor", "config"]
     elif args.mode == "chat":
         # Chat mode: use the user's REAL active profile so the live
         # model is reachable. No temp config dir.
@@ -916,6 +1198,10 @@ def main() -> int:
     if args.mode == "setup":
         print("  1. Spawn `successor setup` against the temp config dir")
         print("  2. Run the scripted first-time setup walkthrough")
+    elif args.mode == "config":
+        print("  1. Seed two demo profiles into the temp config dir")
+        print("  2. Spawn `successor config` against the temp config dir")
+        print("  3. Walk through the three-pane edit menu")
     else:
         print("  1. Spawn `successor chat` against your active profile")
         print("  2. Run the scripted live-model walkthrough")
