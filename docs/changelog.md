@@ -11,6 +11,46 @@ unit on top of phase 0.
 
 ---
 
+## v0.1.5, unicode editing audit (2026-04-08)
+
+Audit/fix pass focused on typed-input reality vs docs. The byte
+decoder was already UTF-8 capable; the real remaining bug was text
+editing still deleting one codepoint at a time.
+
+### What landed
+
+- New `src/successor/graphemes.py`: stdlib-only grapheme helpers for
+  the editing layer. The implementation covers combining marks,
+  variation selectors, emoji modifiers, ZWJ sequences, and
+  regional-indicator flag pairs.
+- `src/successor/chat.py` now routes both main-input backspace and
+  search-bar backspace through the grapheme helper, so decomposed
+  accents and emoji clusters delete cleanly instead of leaving
+  partial characters behind.
+- `src/successor/wizard/config.py` now uses grapheme boundaries for
+  inline TEXT/SECRET/NUMBER editor left/right movement plus
+  backspace/delete.
+- `src/successor/wizard/prompt_editor.py` now uses the same helper
+  for LEFT/RIGHT and backspace/delete inside the multiline system
+  prompt editor.
+- `src/successor/wizard/setup.py` now deletes full grapheme clusters
+  in the name, provider API key, and provider model fields.
+- `CLAUDE.md`'s deferred list dropped the stale "ASCII-only typed
+  input" item and now points at the real shipped state instead.
+- Version bumped to 0.1.5 in `pyproject.toml` and
+  `src/successor/__init__.py`.
+
+### Tests
+
+1014 to 1025. 11 new tests across two files:
+
+- `tests/test_key_decoder.py`: 4 tests for mixed UTF-8 decode,
+  byte-stream reassembly, invalid-sequence recovery, and Unicode
+  bracketed paste
+- `tests/test_unicode_editing.py`: 7 tests covering grapheme-aware
+  backspace/delete across chat input, search, config inline edit,
+  prompt editor, and wizard fields
+
 ## v0.1.4, tier-1 polish (2026-04-08)
 
 Visible-gap closing pass after v0.1.3 went public. Four pieces of

@@ -72,6 +72,12 @@ from pathlib import Path
 from typing import Any
 
 from ..config import load_chat_config, save_chat_config
+from ..graphemes import (
+    delete_next_grapheme,
+    delete_prev_grapheme,
+    next_grapheme_boundary,
+    prev_grapheme_boundary,
+)
 from ..input.keys import (
     Key,
     KeyDecoder,
@@ -1331,10 +1337,10 @@ class SuccessorConfig(App):
             return
 
         if event.key == Key.LEFT:
-            edit.cursor = max(0, edit.cursor - 1)
+            edit.cursor = prev_grapheme_boundary(edit.buffer, edit.cursor)
             return
         if event.key == Key.RIGHT:
-            edit.cursor = min(len(edit.buffer), edit.cursor + 1)
+            edit.cursor = next_grapheme_boundary(edit.buffer, edit.cursor)
             return
         if event.key == Key.HOME:
             edit.cursor = 0
@@ -1345,12 +1351,17 @@ class SuccessorConfig(App):
 
         if event.key == Key.BACKSPACE:
             if edit.cursor > 0:
-                edit.buffer = edit.buffer[: edit.cursor - 1] + edit.buffer[edit.cursor :]
-                edit.cursor -= 1
+                edit.buffer, edit.cursor = delete_prev_grapheme(
+                    edit.buffer,
+                    edit.cursor,
+                )
             return
         if event.key == Key.DELETE:
             if edit.cursor < len(edit.buffer):
-                edit.buffer = edit.buffer[: edit.cursor] + edit.buffer[edit.cursor + 1 :]
+                edit.buffer, edit.cursor = delete_next_grapheme(
+                    edit.buffer,
+                    edit.cursor,
+                )
             return
 
         # Printable input

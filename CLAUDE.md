@@ -86,7 +86,7 @@ src/successor/recorder.py    record/replay session traces
 src/successor/cli.py         argparse subcommand dispatch (`successor` binary)
 src/successor/__main__.py    `python -m successor` entry point
 
-tests/                       pytest suite  1014+ tests, hermetic via SUCCESSOR_CONFIG_DIR
+tests/                       pytest suite  1025+ tests, hermetic via SUCCESSOR_CONFIG_DIR
 
 scripts/                     manual-run scripts (no auto-execution)
   e2e_chat_driver.py     scripted scenarios that drive a real chat against
@@ -250,7 +250,6 @@ reference implementation. Where we diverged:
 
 ## Things deliberately deferred
 
-- ASCII-only typed input (no UTF-8 multi-byte input)
 - No arrow-key cursor navigation in the input box
 - No interrupt during successor response other than Ctrl+G
 - Streaming tool execution (tools start AFTER stream commits)
@@ -261,6 +260,9 @@ shell-style) shipped in v0.1.4. The empty-input + Up flow + the
 recall state machine live in `chat.py`; see `tests/test_input_history.py`
 for the contract.
 
-When the real key parser lands several of the remaining items get
-fixed together. See [`docs/concepts.md`](docs/concepts.md) for the
-broader roadmap.
+UTF-8 typed input shipped with the real key parser, and v0.1.5 makes
+backspace/delete grapheme-aware across the chat, search, wizard, and
+config editors via `graphemes.py`.
+
+The remaining items are now chat/runtime gaps, not byte-decoding gaps.
+See [`docs/concepts.md`](docs/concepts.md) for the broader roadmap.

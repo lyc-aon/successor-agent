@@ -264,7 +264,7 @@ pytest
 
 The suite is hermetic. Each test gets its own
 `SUCCESSOR_CONFIG_DIR`, and bash dispatch tests use real shell
-builtins (no mocks). 1014 tests at the time of writing. Run them
+builtins (no mocks). 1025 tests at the time of writing. Run them
 with `pytest -q` for a clean dot view, or `pytest -xvs` to follow
 individual tests.
 

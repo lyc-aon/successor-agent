@@ -53,6 +53,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from .config import load_chat_config, save_chat_config
+from .graphemes import delete_prev_grapheme
 from .input.keys import (
     InputEvent,
     Key,
@@ -1918,7 +1919,10 @@ class SuccessorChat(App):
                 return
             if event.key == Key.BACKSPACE:
                 if self._search_query:
-                    self._search_query = self._search_query[:-1]
+                    self._search_query, _ = delete_prev_grapheme(
+                        self._search_query,
+                        len(self._search_query),
+                    )
                     self._search_recompute()
                 return
             if event.is_char and event.char and not event.is_ctrl:
@@ -2094,7 +2098,10 @@ class SuccessorChat(App):
                 # current contents, the recall cursor is dropped.
                 if self._history_in_recall_mode():
                     self._history_exit_recall(restore_draft=False)
-                self.input_buffer = self.input_buffer[:-1]
+                self.input_buffer, _ = delete_prev_grapheme(
+                    self.input_buffer,
+                    len(self.input_buffer),
+                )
                 # Reset autocomplete selection when the buffer changes,
                 # and clear the dismiss flag so the dropdown returns the
                 # moment the user starts engaging again.

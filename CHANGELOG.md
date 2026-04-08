@@ -3,6 +3,42 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
+## v0.1.5 — 2026-04-08
+
+Unicode input audit + grapheme-aware editing pass.
+
+### Grapheme-aware deletion
+
+Typed input was already UTF-8-capable once the real key decoder
+landed, but text editing still deleted one Python codepoint at a
+time. That showed up most clearly with decomposed accents (`e` +
+combining acute), and it also affected emoji modifiers, ZWJ emoji,
+and flag pairs.
+
+Backspace/delete now operate on whole grapheme clusters in the chat
+input, the search bar, the config menu's inline text editors, the
+setup wizard's text fields, and the multiline prompt editor. The
+config menu and prompt editor also move LEFT/RIGHT by grapheme
+boundary, so the common edit path no longer strands the cursor
+inside a visible character.
+
+### Audit cleanup
+
+`CLAUDE.md` no longer claims typed input is ASCII-only. The current
+deferred list now reflects the real remaining gaps instead of a
+stale byte-decoding limitation that was already gone.
+
+### Tests
+
+1014 → 1025. 11 new tests across two files:
+
+- `tests/test_key_decoder.py` (4 tests): mixed ASCII + UTF-8 decode,
+  byte-by-byte reassembly, invalid-sequence recovery, and
+  bracketed-paste Unicode coalescing
+- `tests/test_unicode_editing.py` (7 tests): grapheme-aware
+  backspace/delete coverage for chat input, search, config inline
+  editing, the prompt editor, and the setup wizard
+
 ## v0.1.4 — 2026-04-08
 
 Tier-1 polish pass: closes the most visible UX gaps for cold visitors
@@ -392,13 +428,16 @@ HTTP endpoint, with llama.cpp as the primary target.
   fully without a TTY because the renderer is pure functions over
   a cell grid.
 
-### Known limits (deferred)
+### Known limits (historical, at the time of this release)
 
-- ASCII-only typed input (no UTF-8 multi-byte input)
+- Typed input still lacked UTF-8 decoding (historical: the real key
+  parser landed later, and v0.1.5 also makes backspace/delete
+  grapheme-aware)
 - No arrow-key cursor navigation in the input box
-- History recall (Up/Down in input)
+- History recall (historical: shipped in v0.1.4)
 - Streaming tool execution (tools start AFTER the stream commits)
 - Concurrent tool execution
 
-When the real key parser lands, several of these get fixed together.
-See [`docs/concepts.md`](docs/concepts.md) for the broader roadmap.
+The real key parser later cleared the UTF-8/history items; see
+v0.1.4 and v0.1.5 above plus [`docs/concepts.md`](docs/concepts.md)
+for the broader roadmap.

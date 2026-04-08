@@ -45,6 +45,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
+from ..graphemes import (
+    delete_next_grapheme,
+    delete_prev_grapheme,
+    next_grapheme_boundary,
+    prev_grapheme_boundary,
+)
 from ..input.keys import (
     Key,
     KeyEvent,
@@ -381,14 +387,16 @@ class PromptEditor:
 
     def _cursor_left(self) -> None:
         if self.cursor_col > 0:
-            self.cursor_col -= 1
+            line = self.lines[self.cursor_row]
+            self.cursor_col = prev_grapheme_boundary(line, self.cursor_col)
         elif self.cursor_row > 0:
             self.cursor_row -= 1
             self.cursor_col = len(self.lines[self.cursor_row])
 
     def _cursor_right(self) -> None:
         if self.cursor_col < len(self.lines[self.cursor_row]):
-            self.cursor_col += 1
+            line = self.lines[self.cursor_row]
+            self.cursor_col = next_grapheme_boundary(line, self.cursor_col)
         elif self.cursor_row < len(self.lines) - 1:
             self.cursor_row += 1
             self.cursor_col = 0
@@ -573,8 +581,10 @@ class PromptEditor:
     def _backspace(self) -> None:
         if self.cursor_col > 0:
             line = self.lines[self.cursor_row]
-            self.lines[self.cursor_row] = line[: self.cursor_col - 1] + line[self.cursor_col :]
-            self.cursor_col -= 1
+            self.lines[self.cursor_row], self.cursor_col = delete_prev_grapheme(
+                line,
+                self.cursor_col,
+            )
             self._invalidate_line(self.cursor_row)
         elif self.cursor_row > 0:
             prev_line = self.lines[self.cursor_row - 1]
@@ -589,7 +599,10 @@ class PromptEditor:
     def _delete(self) -> None:
         line = self.lines[self.cursor_row]
         if self.cursor_col < len(line):
-            self.lines[self.cursor_row] = line[: self.cursor_col] + line[self.cursor_col + 1 :]
+            self.lines[self.cursor_row], self.cursor_col = delete_next_grapheme(
+                line,
+                self.cursor_col,
+            )
             self._invalidate_line(self.cursor_row)
         elif self.cursor_row < len(self.lines) - 1:
             next_line = self.lines[self.cursor_row + 1]

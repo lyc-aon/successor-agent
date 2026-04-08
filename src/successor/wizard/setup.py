@@ -77,6 +77,7 @@ from pathlib import Path
 from typing import Callable
 
 from ..config import save_chat_config, load_chat_config
+from ..graphemes import delete_prev_grapheme
 from ..input.keys import (
     Key,
     KeyDecoder,
@@ -744,7 +745,10 @@ class SuccessorSetup(App):
             return
         if event.key == Key.BACKSPACE:
             if self.state.name:
-                self.state.name = self.state.name[:-1]
+                self.state.name, _ = delete_prev_grapheme(
+                    self.state.name,
+                    len(self.state.name),
+                )
             return
         if event.key == Key.LEFT:
             self._retreat_step()
@@ -975,7 +979,10 @@ class SuccessorSetup(App):
             # api_key field
             if event.key == Key.BACKSPACE:
                 if self.state.provider_api_key:
-                    self.state.provider_api_key = self.state.provider_api_key[:-1]
+                    self.state.provider_api_key, _ = delete_prev_grapheme(
+                        self.state.provider_api_key,
+                        len(self.state.provider_api_key),
+                    )
                 return
             if event.is_char and event.char and not event.is_ctrl and not event.is_alt:
                 for ch in event.char:
@@ -987,7 +994,10 @@ class SuccessorSetup(App):
             # model field
             if event.key == Key.BACKSPACE:
                 if self.state.provider_model:
-                    self.state.provider_model = self.state.provider_model[:-1]
+                    self.state.provider_model, _ = delete_prev_grapheme(
+                        self.state.provider_model,
+                        len(self.state.provider_model),
+                    )
                 return
             if event.is_char and event.char and not event.is_ctrl and not event.is_alt:
                 for ch in event.char:
