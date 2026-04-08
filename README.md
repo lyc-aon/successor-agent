@@ -213,6 +213,22 @@ spawning a subprocess.
 - [`CLAUDE.md`](CLAUDE.md) — repo orientation auto-loaded by Claude
   Code sessions working in this directory
 
+## Author
+
+Built by **Lycaon LLC** (Colorado).
+
+- Twitter: [@lyc_aon](https://twitter.com/lyc_aon)
+- Email: michael@lycaon.wtf
+
+If you build something cool with Successor, I'd love to hear about it.
+PRs and issues welcome at [github.com/lyc-aon/successor-agent](https://github.com/lyc-aon/successor-agent).
+
 ## License
 
-Apache 2.0. See [`LICENSE`](LICENSE).
+Apache 2.0. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
+
+Short version: anyone can use, fork, modify, sell, or embed Successor
+in their own products (commercial or otherwise) — they just have to
+ship the LICENSE and NOTICE files alongside, and they can't strip the
+attribution. See [`NOTICE`](NOTICE) for the credit line that needs to
+travel with derivative work.

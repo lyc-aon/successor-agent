@@ -50,3 +50,4 @@ desktop.ini
 *.pem
 secrets/
 credentials/
+scripts/walkthrough_demo.py

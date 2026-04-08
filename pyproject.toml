@@ -9,7 +9,8 @@ description = "Terminal chat harness for local llama.cpp models with a custom ce
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
-authors = [{ name = "Lycaon" }]
+authors = [{ name = "Lycaon LLC", email = "michael@lycaon.wtf" }]
+maintainers = [{ name = "Lycaon LLC", email = "michael@lycaon.wtf" }]
 keywords = ["llm", "llama.cpp", "terminal", "tui", "agent", "renderer"]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -30,6 +31,7 @@ dependencies = []
 [project.urls]
 Repository = "https://github.com/lyc-aon/successor-agent"
 Issues = "https://github.com/lyc-aon/successor-agent/issues"
+Author = "https://twitter.com/lyc_aon"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
