@@ -48,6 +48,26 @@ Local verification for v0.1.7:
   is ready for same-turn parallel reads, the current model still needs
   more steering before that behavior is reliable
 
+## v0.1.8 — 2026-04-08
+
+Terminal input fix: mouse-wheel scrolling in some terminals was being
+translated into fake Up/Down cursor keys while Successor was in the
+alternate screen, which made wheel-up look like "recall previous
+prompt" instead of scroll behavior.
+
+### What changed
+
+- `src/successor/render/terminal.py` now saves and disables xterm
+  alternate-scroll mode (`?1007`) for the duration of the TTY session,
+  then restores it on exit
+- added `tests/test_terminal.py` to lock the terminal enter/exit escape
+  sequence contract in place
+
+### Verification
+
+- targeted regression: `tests/test_terminal.py` + `tests/test_input_history.py`
+- full local suite: `1060 passed`
+
 ## v0.1.6 — 2026-04-08
 
 Subagent tool pass: the background-worker foundation from v0.1.5 is

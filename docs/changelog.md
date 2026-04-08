@@ -56,6 +56,28 @@ profiles opt into slot-aware background workers.
     the reads, which confirms the runtime path is ready while Qwopus is
     not yet reliably planning same-turn parallel read calls
 
+## v0.1.8, alternate-scroll suppression (2026-04-08)
+
+TTY bugfix for the input-history feature. In terminals that map
+mouse-wheel motion in the alternate screen to Up/Down cursor keys,
+wheel-up was entering prompt-history recall instead of behaving like
+scroll.
+
+### What landed
+
+- `src/successor/render/terminal.py` now saves and disables DEC private
+  mode `?1007` (alternate scroll) when the session starts, then
+  restores it during terminal teardown
+- new `tests/test_terminal.py` locks the enter/exit escape-sequence
+  contract so future terminal work does not silently reintroduce the
+  wheel-to-Up regression
+
+### Verification
+
+- targeted regression: `tests/test_terminal.py` and
+  `tests/test_input_history.py`
+- full local suite: `1060 passed in 11.70s`
+
 ## v0.1.6, model-visible subagents (2026-04-08)
 
 Follow-on pass that turns the v0.1.5 background-task foundation into a

@@ -42,6 +42,16 @@ SHOW_CURSOR = CSI + "?25h"
 RESET_SGR = CSI + "0m"
 CLEAR_HOME = CSI + "2J" + CSI + "H"
 
+# Alternate scroll (DEC private mode 1007):
+# some terminals map mouse-wheel events in the alternate screen to
+# Up/Down cursor-key sequences instead of normal scrollback. Successor
+# uses bare Up on an empty input buffer for history recall, so that
+# translation makes the wheel look like "load previous prompt". Save
+# and disable the mode for our session, then restore it on exit.
+ALT_SCROLL_SAVE = CSI + "?1007s"
+ALT_SCROLL_RESTORE = CSI + "?1007r"
+ALT_SCROLL_OFF = CSI + "?1007l"
+
 # Bracketed paste mode (DEC mode 2004) — when on, the terminal wraps
 # pasted content in CSI 200 ~ ... CSI 201 ~ so the input parser can
 # distinguish keystrokes from pastes. Cheap to enable, expensive to
@@ -220,6 +230,8 @@ class Terminal:
                 self._saved_termios = None
         # Enter alt screen, hide cursor, enable bracketed paste, clear.
         out: list[str] = []
+        out.append(ALT_SCROLL_SAVE)
+        out.append(ALT_SCROLL_OFF)
         if self.alt_screen:
             out.append(ALT_SCREEN_ON)
         out.append(HIDE_CURSOR)
@@ -258,6 +270,7 @@ class Terminal:
             out.append(BRACKETED_PASTE_OFF)
         if self.alt_screen:
             out.append(ALT_SCREEN_OFF)
+        out.append(ALT_SCROLL_RESTORE)
         try:
             self.write("".join(out))
         except Exception:
