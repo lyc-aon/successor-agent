@@ -1,0 +1,27 @@
+{
+  "name": "paper",
+  "icon": "❍",
+  "description": "warm cream and sepia — fountain pen on aged paper, easy on the eyes for long daytime reading",
+  "dark": {
+    "bg":          "oklch(0.12, 0.012, 60)",
+    "bg_input":    "oklch(0.09, 0.012, 60)",
+    "bg_footer":   "oklch(0.16, 0.012, 60)",
+    "fg":          "oklch(0.88, 0.014, 75)",
+    "fg_dim":      "oklch(0.62, 0.014, 75)",
+    "fg_subtle":   "oklch(0.42, 0.012, 75)",
+    "accent":      "oklch(0.65, 0.13, 35)",
+    "accent_warm": "oklch(0.74, 0.12, 65)",
+    "accent_warn": "oklch(0.60, 0.18, 22)"
+  },
+  "light": {
+    "bg":          "oklch(0.97, 0.012, 80)",
+    "bg_input":    "oklch(0.99, 0.008, 80)",
+    "bg_footer":   "oklch(0.93, 0.014, 80)",
+    "fg":          "oklch(0.22, 0.018, 50)",
+    "fg_dim":      "oklch(0.45, 0.014, 50)",
+    "fg_subtle":   "oklch(0.62, 0.012, 50)",
+    "accent":      "oklch(0.42, 0.16, 28)",
+    "accent_warm": "oklch(0.55, 0.14, 70)",
+    "accent_warn": "oklch(0.50, 0.20, 22)"
+  }
+}

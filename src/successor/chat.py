@@ -390,6 +390,14 @@ WHEEL_SCROLL_LINES = 3
 MAX_AGENT_TURNS = 25
 
 
+# ─── Input history recall ───
+#
+# Cap the per-session history at 100 entries. The ring buffer drops
+# the oldest entries past the cap. 100 is enough for a long working
+# session, low enough to never matter for memory.
+INPUT_HISTORY_MAX = 100
+
+
 # ─── Slash command registry ───
 #
 # Every slash command lives here as a SlashCommand instance. The
@@ -1658,6 +1666,27 @@ class SuccessorChat(App):
         # the model produces a huge summary.
         self._autocompact_attempted_this_turn: bool = False
 
+        # ─── Input history recall (Up/Down arrow shell-style) ───
+        # Ring buffer of submitted user messages so Up arrow can
+        # recall previous prompts without retyping them. Bash and zsh
+        # users expect this; the absence is jarring on the first
+        # session. Behavior:
+        #
+        #   * EMPTY input + Up = enter recall mode, load most recent
+        #   * Recall mode + Up = older entry
+        #   * Recall mode + Down = newer entry, then back to draft
+        #   * Any editing key in recall mode = exit recall, keep buffer
+        #   * Esc in recall mode = restore the saved draft
+        #   * Submit always exits recall mode and adds to history
+        #
+        # History is in-memory only (not persisted across sessions)
+        # for v1. Slash commands are included but consecutive
+        # duplicates are deduped so /profile cycle spam doesn't fill
+        # the buffer.
+        self._input_history: list[str] = []
+        self._input_history_idx: int | None = None  # None = not in recall mode
+        self._input_history_draft: str = ""  # saved draft for restore
+
         # Cache pre-warming worker — fires after compaction completes
         # to populate llama.cpp's KV cache with the post-compact prefix.
         # Without this, the next user message after compaction pays a
@@ -1774,6 +1803,95 @@ class SuccessorChat(App):
                         self._autocomplete_accept()
                 return
 
+    # ─── Input history recall ───
+
+    def _history_in_recall_mode(self) -> bool:
+        """True when the user is currently navigating input history.
+
+        Set by Up arrow on an empty buffer, cleared by submit, by an
+        editing key, or by Esc. Used by the Up/Down handlers to know
+        whether they should navigate history vs scroll the chat, and
+        by the printable/backspace handlers to know whether they
+        should snap out of recall mode before applying the edit.
+        """
+        return self._input_history_idx is not None
+
+    def _history_add(self, text: str) -> None:
+        """Append `text` to the in-memory history if it is non-empty
+        and not an exact duplicate of the most recent entry.
+
+        Caps the history at INPUT_HISTORY_MAX entries by dropping the
+        oldest. Called from _submit before the input buffer is cleared.
+        """
+        text = text.rstrip()
+        if not text:
+            return
+        if self._input_history and self._input_history[-1] == text:
+            return  # dedupe consecutive identical entries
+        self._input_history.append(text)
+        if len(self._input_history) > INPUT_HISTORY_MAX:
+            # Drop the oldest entries until we are back at the cap.
+            self._input_history = self._input_history[-INPUT_HISTORY_MAX:]
+
+    def _history_enter_recall(self) -> None:
+        """Enter history recall mode from the empty-buffer state.
+
+        Saves whatever is currently in the input buffer (the
+        in-progress draft, possibly empty) so Down-past-newest can
+        restore it later. Loads the most recent history entry into
+        the buffer and points the recall cursor at it.
+        """
+        if not self._input_history:
+            return  # nothing to recall
+        self._input_history_draft = self.input_buffer
+        self._input_history_idx = len(self._input_history) - 1
+        self.input_buffer = self._input_history[self._input_history_idx]
+        # Reset autocomplete state — the recalled text is data, not
+        # an interactive command-typing session.
+        self._autocomplete_selected = 0
+        self._autocomplete_dismissed = True
+
+    def _history_recall_older(self) -> None:
+        """Move the recall cursor one entry older. No-op at the top.
+
+        Called from the Up arrow handler when already in recall mode.
+        """
+        if self._input_history_idx is None:
+            return
+        if self._input_history_idx > 0:
+            self._input_history_idx -= 1
+            self.input_buffer = self._input_history[self._input_history_idx]
+
+    def _history_recall_newer(self) -> None:
+        """Move the recall cursor one entry newer.
+
+        If we step past the newest entry, exit recall mode and
+        restore the saved draft (which may be the empty string).
+        Called from the Down arrow handler when already in recall
+        mode.
+        """
+        if self._input_history_idx is None:
+            return
+        if self._input_history_idx < len(self._input_history) - 1:
+            self._input_history_idx += 1
+            self.input_buffer = self._input_history[self._input_history_idx]
+        else:
+            # Past the newest entry — restore the draft and exit recall
+            self._history_exit_recall(restore_draft=True)
+
+    def _history_exit_recall(self, *, restore_draft: bool = False) -> None:
+        """Exit recall mode without losing the buffer.
+
+        With restore_draft=True, restores the in-progress draft that
+        was saved when recall mode was entered. With restore_draft=False
+        (the default), keeps whatever is currently in the buffer so
+        the user can edit the recalled text directly.
+        """
+        if restore_draft:
+            self.input_buffer = self._input_history_draft
+        self._input_history_idx = None
+        self._input_history_draft = ""
+
     def _handle_key_event(self, event: KeyEvent) -> None:
         # ─── Help overlay dismiss ───
         # When the help overlay is open, ANY keypress dismisses it
@@ -1869,17 +1987,29 @@ class SuccessorChat(App):
             return
 
         # ─── Scroll keys (always available, even mid-stream) ───
-        # When the autocomplete dropdown is open, Up/Down navigate the
-        # dropdown selection instead of scrolling the chat history.
+        # Up/Down arrow key dispatch is layered:
+        #   1. autocomplete dropdown open → navigate dropdown selection
+        #   2. already in input history recall mode → navigate history
+        #   3. empty input buffer + history exists → ENTER recall mode
+        #   4. otherwise → scroll the chat by one line
+        # That priority lets bash users hit Up to recall when they
+        # have nothing typed, scroll the chat when they have a draft
+        # in flight, and never accidentally clobber typed input.
         if event.key == Key.UP:
             if self._autocomplete_active():
                 self._autocomplete_move(-1)
+            elif self._history_in_recall_mode():
+                self._history_recall_older()
+            elif not self.input_buffer and self._input_history:
+                self._history_enter_recall()
             else:
                 self._scroll_lines(1)
             return
         if event.key == Key.DOWN:
             if self._autocomplete_active():
                 self._autocomplete_move(1)
+            elif self._history_in_recall_mode():
+                self._history_recall_newer()
             else:
                 self._scroll_lines(-1)
             return
@@ -1958,6 +2088,12 @@ class SuccessorChat(App):
         # ─── Editing ───
         if event.key == Key.BACKSPACE:
             if self.input_buffer:
+                # If we are mid-recall, exit recall mode FIRST so the
+                # user is editing the recalled text as a normal draft,
+                # not a frozen history snapshot. The buffer keeps its
+                # current contents, the recall cursor is dropped.
+                if self._history_in_recall_mode():
+                    self._history_exit_recall(restore_draft=False)
                 self.input_buffer = self.input_buffer[:-1]
                 # Reset autocomplete selection when the buffer changes,
                 # and clear the dismiss flag so the dropdown returns the
@@ -2015,6 +2151,12 @@ class SuccessorChat(App):
             # with / so we never blow away a long message.
             if self.input_buffer.startswith("/"):
                 self._autocomplete_dismiss()
+            # Esc in history recall mode: bail out of recall and put
+            # back whatever in-progress draft was on screen before
+            # the user pressed Up. This is the "I changed my mind"
+            # escape hatch.
+            if self._history_in_recall_mode():
+                self._history_exit_recall(restore_draft=True)
             return
 
         # ─── Character input (printable + UTF-8 + paste chunks) ───
@@ -2034,6 +2176,11 @@ class SuccessorChat(App):
                 if c == "\n" or ord(c) >= 0x20
             )
             if safe:
+                # If we are mid-recall, exit recall mode FIRST so the
+                # user is editing the recalled text as a normal draft,
+                # not appending to a frozen history snapshot.
+                if self._history_in_recall_mode():
+                    self._history_exit_recall(restore_draft=False)
                 self.input_buffer += safe
                 # New character → re-filter the autocomplete from the top
                 # and bring the dropdown back if it was dismissed.
@@ -2524,6 +2671,16 @@ class SuccessorChat(App):
 
     def _submit(self) -> None:
         text = self.input_buffer.strip()
+        # Add the submitted text to the input history ring buffer
+        # BEFORE clearing the buffer. _history_add dedupes consecutive
+        # duplicates and skips empty strings, so /profile cycle spam
+        # and accidental empty Enters do not pollute the history.
+        self._history_add(text)
+        # Drop out of recall mode whether or not we used a recalled
+        # entry — the act of submitting always returns the user to a
+        # fresh "ready to type" state.
+        if self._history_in_recall_mode():
+            self._history_exit_recall(restore_draft=False)
         self.input_buffer = ""
 
         # Cancel any in-flight cache warmer — the user's message takes

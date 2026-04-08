@@ -1,5 +1,9 @@
 # Successor
 
+[![tests](https://github.com/lyc-aon/successor-agent/actions/workflows/test.yml/badge.svg)](https://github.com/lyc-aon/successor-agent/actions/workflows/test.yml)
+[![license](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+
 Successor is a terminal chat harness for local language models and
 OpenAI-compatible endpoints. The renderer is a five-layer cell-based
 pipeline where one module owns the screen end to end, the agent loop
