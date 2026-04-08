@@ -40,6 +40,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from .cards import Risk, ToolCard
+from .change_capture import begin_change_capture, finalize_change_capture
 from .parser import parse_bash
 from .risk import classify_risk, max_risk
 
@@ -279,6 +280,7 @@ def dispatch_bash(
 
     # 5. Run the command. shell=True is intentional — we WANT pipes,
     # redirects, etc. to work. The classifier is our safety net.
+    change_capture = begin_change_capture(gated_card, cwd=cwd)
     start = time.monotonic()
     try:
         proc = subprocess.run(
@@ -312,7 +314,7 @@ def dispatch_bash(
     truncated_out, was_truncated_out = _truncate_output(stdout, max_bytes=max_output_bytes)
     truncated_err, was_truncated_err = _truncate_output(stderr, max_bytes=max_output_bytes)
 
-    return replace(
+    final_card = replace(
         gated_card,
         output=truncated_out,
         stderr=truncated_err,
@@ -320,6 +322,10 @@ def dispatch_bash(
         duration_ms=duration_ms,
         truncated=was_truncated_out or was_truncated_err,
     )
+    change_artifact = finalize_change_capture(change_capture)
+    if change_artifact is not None:
+        final_card = replace(final_card, change_artifact=change_artifact)
+    return final_card
 
 
 # ─── Convenience: parse-only dry-run ───

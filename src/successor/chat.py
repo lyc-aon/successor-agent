@@ -4537,6 +4537,7 @@ class SuccessorChat(App):
         False so the continue-loop dead-ends and the user can resolve.
         """
         from dataclasses import replace as _replace
+        from .bash.change_capture import begin_change_capture
         from .bash.parser import parse_bash
         from .bash.risk import classify_risk, max_risk
 
@@ -4598,6 +4599,10 @@ class SuccessorChat(App):
             timeout=bash_cfg.timeout_s,
             max_output_bytes=bash_cfg.max_output_bytes,
             tool_call_id=resolved_call_id,
+        )
+        runner.change_capture = begin_change_capture(
+            preview,
+            cwd=bash_cfg.working_directory,
         )
         msg = _Message(
             "tool",
@@ -4790,6 +4795,7 @@ class SuccessorChat(App):
         renderer falls through to the static paint path.
         """
         from dataclasses import replace as _replace
+        from .bash.change_capture import finalize_change_capture
         runner = msg.running_tool
         preview = msg.tool_card
         if runner is None or preview is None:
@@ -4813,6 +4819,11 @@ class SuccessorChat(App):
             duration_ms=runner.elapsed() * 1000.0,
             truncated=runner.truncated,
         )
+        change_artifact = finalize_change_capture(
+            getattr(runner, "change_capture", None),
+        )
+        if change_artifact is not None:
+            final_card = _replace(final_card, change_artifact=change_artifact)
         msg.tool_card = final_card
         msg.running_tool = None
         msg._card_rows_cache_key = None

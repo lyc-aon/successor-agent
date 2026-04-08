@@ -11,6 +11,82 @@ unit on top of phase 0.
 
 ---
 
+## v0.1.9, semantic diff cards (2026-04-08)
+
+Renderer/tooling pass focused on making file mutations legible inside
+the chat itself. The bash parser already knew what many write commands
+were doing before execution; this pass turns that preview metadata into
+truthful after-the-fact diffs without changing what the model sees as
+tool output.
+
+### What landed
+
+- New `src/successor/bash/diff_artifact.py`:
+  - immutable `ChangeArtifact`, `ChangedFile`, and `DiffHunk` shapes
+  - unified-diff parser for `git diff` / `git show` / `diff -u`
+  - synthetic diff builder from before/after text content
+- New `src/successor/bash/change_capture.py`:
+  - deterministic before/after capture for parser-known mutating cards
+  - current supported verbs:
+    - `write-file`
+    - `create-file`
+    - `delete-file`
+    - `delete-tree`
+    - `create-directory`
+    - single-target `copy-files`
+    - single-target `move-files`
+  - text-file capture is intentionally bounded and falls back to note
+    rows for binary, unreadable, directory, or oversized targets
+- `src/successor/bash/cards.py` now carries an optional
+  `change_artifact` on settled `ToolCard`s
+- `src/successor/bash/exec.py` and `src/successor/chat.py` both now
+  run the same capture lifecycle:
+  - snapshot before execution
+  - execute the real command
+  - attach a structured change artifact to the final card if one can be
+    computed truthfully
+- `src/successor/bash/prepared_output.py` grew a semantic diff path
+  instead of a separate renderer:
+  - explicit diff stdout parses into file/hunk/add/remove/context rows
+  - deterministic write cards render from `change_artifact`
+  - diff cards get a wider settled display budget than ordinary stdout
+- `src/successor/bash/render.py` now paints dedicated row treatments for:
+  - `diff_file`
+  - `diff_hunk`
+  - `diff_add`
+  - `diff_remove`
+  - `diff_context`
+  - `diff_note`
+- `scripts/e2e_chat_driver.py` gained:
+  - `assert_turn_plain_contains`
+  - `rewrite_diff`, a live scenario that creates then rewrites a file
+    and asserts the rendered transcript actually contains `+` / `-`
+    hunk lines
+  - richer message dumps that include `change_artifact` summaries for
+    tool cards
+
+### Verification
+
+- Hermetic local regression slice:
+  - `tests/test_bash_diff_capture.py`
+  - `tests/test_bash_exec.py`
+  - `tests/test_bash_parser.py`
+  - `tests/test_bash_prepared_output.py`
+  - `tests/test_bash_render.py`
+  - `tests/test_bash_runner.py`
+  - `tests/test_bash_stream.py`
+  - `tests/test_bash_verbclass.py`
+  - `tests/test_chat_bash.py`
+  - `tests/test_agent_loop.py`
+  - result: `317 passed in 3.25s`
+- Full local suite: `1066 passed in 11.91s`
+- Live llama.cpp/Qwopus E2E:
+  - `scripts/e2e_chat_driver.py --scenario rewrite_diff`
+  - `scripts/e2e_chat_driver.py --scenario rewrite_diff --runs 3`
+- Manual live probe confirmed the explicit-diff path too:
+  - `dispatch_bash("git diff -- note.txt")` now paints a semantic file
+    header + hunk + add/remove rows instead of raw diff text
+
 ## v0.1.7, local slot-aware scheduling (2026-04-08)
 
 Follow-on pass for the local llama.cpp case. The goal was not "more

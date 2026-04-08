@@ -52,6 +52,7 @@ import re
 from dataclasses import dataclass, field
 
 from .cards import ToolCard
+from .diff_artifact import ChangeArtifact, ChangedFile, parse_unified_diff
 from .verbclass import VerbClass, verb_class_for
 
 
@@ -78,7 +79,7 @@ class OutputLine:
     background tint of the entire row."""
 
     spans: tuple[OutputSpan, ...]
-    kind: str = "stdout"  # "stdout" | "stderr" | "match" | "truncated" | "header"
+    kind: str = "stdout"  # stdout | stderr | match | truncated | header | diff_*
 
     @property
     def plain(self) -> str:
@@ -310,6 +311,9 @@ def _query_from_search_params(card: ToolCard) -> str | None:
 # ─── The main class ───
 
 
+DIFF_MAX_OUTPUT_LINES = 12
+
+
 class PreparedToolOutput:
     """A card's output, parsed once and reusable at any width.
 
@@ -323,16 +327,20 @@ class PreparedToolOutput:
     and does one wrap pass.
     """
 
-    __slots__ = ("_prepared", "_cache_key", "_cache_lines")
+    __slots__ = ("_prepared", "_cache_key", "_cache_lines", "_has_semantic_diff")
 
     def __init__(self, card: ToolCard) -> None:
-        self._prepared = _prepare_for_card(card)
+        self._prepared, self._has_semantic_diff = _prepare_for_card(card)
         # Cache keyed by (width, max_lines) so changes to either
         # invalidate a single entry. Both axes can change at render
         # time (resize → new width, max_lines stays constant in
         # practice but we key on it anyway for correctness).
         self._cache_key: tuple[int, int] = (-1, -1)
         self._cache_lines: list[OutputLine] = []
+
+    @property
+    def preferred_max_lines(self) -> int:
+        return DIFF_MAX_OUTPUT_LINES if self._has_semantic_diff else 5
 
     def layout(
         self, width: int, *, max_lines: int | None = None,
@@ -392,7 +400,7 @@ class PreparedToolOutput:
 # ─── Per-card preparation dispatcher ───
 
 
-def _prepare_for_card(card: ToolCard) -> list[_PreparedLine]:
+def _prepare_for_card(card: ToolCard) -> tuple[list[_PreparedLine], bool]:
     """Parse `card.output` + `card.stderr` into a list of prepared
     lines, using a verb-class-specific parser where available.
 
@@ -401,11 +409,20 @@ def _prepare_for_card(card: ToolCard) -> list[_PreparedLine]:
     """
     cls = verb_class_for(card.verb, card.risk)
     prepared: list[_PreparedLine] = []
+    has_semantic_diff = False
 
     stdout_raw = card.output or ""
     stderr_raw = card.stderr or ""
 
-    if cls == VerbClass.SEARCH and card.verb == "search-content" and stdout_raw:
+    change_artifact = card.change_artifact
+    if change_artifact is None and _should_parse_unified_diff(card, stdout_raw):
+        change_artifact = parse_unified_diff(stdout_raw)
+
+    if change_artifact is not None and change_artifact.has_diff_rows:
+        prepared.extend(_prepare_change_artifact(change_artifact))
+        has_semantic_diff = True
+
+    elif cls == VerbClass.SEARCH and card.verb == "search-content" and stdout_raw:
         query = _query_from_search_params(card)
         for raw in stdout_raw.split("\n"):
             raw = raw.rstrip("\r")
@@ -439,7 +456,88 @@ def _prepare_for_card(card: ToolCard) -> list[_PreparedLine]:
     if stderr_raw:
         prepared.extend(_split_plain_lines(stderr_raw, kind="stderr"))
 
+    return prepared, has_semantic_diff
+
+
+def _should_parse_unified_diff(card: ToolCard, stdout_raw: str) -> bool:
+    if not stdout_raw:
+        return False
+    if card.verb in ("git-diff", "git-show"):
+        return True
+    lines = stdout_raw.splitlines()
+    return (
+        any(line.startswith("diff --git ") for line in lines[:8])
+        or (
+            any(line.startswith("--- ") for line in lines[:8])
+            and any(line.startswith("+++ ") for line in lines[:12])
+            and any(line.startswith("@@ ") for line in lines[:20])
+        )
+    )
+
+
+def _prepare_change_artifact(artifact: ChangeArtifact) -> list[_PreparedLine]:
+    prepared: list[_PreparedLine] = []
+    for line in artifact.prelude:
+        prepared.append(_PreparedLine(
+            spans=(OutputSpan(text=line, kind="dim"),),
+            kind="diff_note",
+        ))
+    for file_change in artifact.files:
+        prepared.extend(_prepare_changed_file(file_change))
     return prepared
+
+
+def _prepare_changed_file(file_change: ChangedFile) -> list[_PreparedLine]:
+    out: list[_PreparedLine] = []
+    status_text = {
+        "added": "added",
+        "deleted": "deleted",
+        "renamed": "renamed",
+        "binary": "binary",
+        "modified": "modified",
+        "note": "changed",
+    }.get(file_change.status, file_change.status)
+
+    if file_change.old_path and file_change.old_path != file_change.path:
+        header = (
+            OutputSpan(text=f"{file_change.old_path} ", kind="dim"),
+            OutputSpan(text="→", kind="chrome"),
+            OutputSpan(text=f" {file_change.path}", kind="chrome"),
+            OutputSpan(text=f"  [{status_text}]", kind="dim"),
+        )
+    else:
+        header = (
+            OutputSpan(text=file_change.path, kind="chrome"),
+            OutputSpan(text=f"  [{status_text}]", kind="dim"),
+        )
+    out.append(_PreparedLine(spans=header, kind="diff_file"))
+
+    for note in file_change.notes:
+        out.append(_PreparedLine(
+            spans=(OutputSpan(text=note, kind="dim"),),
+            kind="diff_note",
+        ))
+
+    for hunk in file_change.hunks:
+        if hunk.lines:
+            out.append(_PreparedLine(
+                spans=(OutputSpan(text=hunk.lines[0], kind="warn"),),
+                kind="diff_hunk",
+            ))
+        for body_line in hunk.lines[1:]:
+            if body_line.startswith("+"):
+                kind = "diff_add"
+            elif body_line.startswith("-"):
+                kind = "diff_remove"
+            elif body_line == r"\ No newline at end of file":
+                kind = "diff_note"
+            else:
+                kind = "diff_context"
+            out.append(_PreparedLine(
+                spans=(OutputSpan(text=body_line, kind="plain"),),
+                kind=kind,
+            ))
+    return out
 
 
 # ─── Wrapping ───

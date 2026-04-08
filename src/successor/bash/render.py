@@ -51,7 +51,7 @@ from ..render.paint import (
     paint_text,
 )
 from ..render.text import lerp_rgb
-from ..render.theme import ThemeVariant
+from ..render.theme import ThemeVariant, oklch_to_rgb
 from .cards import Risk, ToolCard
 from .prepared_output import OutputLine, OutputSpan, PreparedToolOutput
 from .verbclass import VerbClass, glyph_for_class, verb_class_for
@@ -127,9 +127,38 @@ def _span_style(
     # Row-level base: stderr lines get a warn-tinted base fg; header
     # lines (ls "total N") get the subtle treatment; the rest default
     # to the theme's normal fg. Truncated rows mimic the old dim italic.
+    diff_add_fg = oklch_to_rgb(0.78, 0.17, 145)
+    diff_remove_fg = oklch_to_rgb(0.72, 0.20, 25)
+    diff_add_bg = lerp_rgb(theme.bg_input, diff_add_fg, 0.14)
+    diff_remove_bg = lerp_rgb(theme.bg_input, diff_remove_fg, 0.12)
+    diff_hunk_bg = lerp_rgb(theme.bg_input, theme.accent_warm, 0.12)
+    diff_file_bg = lerp_rgb(theme.bg_input, theme.accent, 0.08)
+
     if row_kind == "stderr":
         base_fg = theme.accent_warn
         base_attrs = ATTR_DIM
+    elif row_kind == "diff_add":
+        base_fg = diff_add_fg
+        base_bg = diff_add_bg
+        base_attrs = 0
+    elif row_kind == "diff_remove":
+        base_fg = diff_remove_fg
+        base_bg = diff_remove_bg
+        base_attrs = 0
+    elif row_kind == "diff_hunk":
+        base_fg = theme.accent_warm
+        base_bg = diff_hunk_bg
+        base_attrs = ATTR_DIM | ATTR_BOLD
+    elif row_kind == "diff_file":
+        base_fg = theme.accent
+        base_bg = diff_file_bg
+        base_attrs = ATTR_BOLD
+    elif row_kind == "diff_note":
+        base_fg = theme.fg_subtle
+        base_attrs = ATTR_DIM | ATTR_ITALIC
+    elif row_kind == "diff_context":
+        base_fg = theme.fg
+        base_attrs = 0
     elif row_kind == "truncated":
         base_fg = theme.fg_subtle
         base_attrs = ATTR_DIM | ATTR_ITALIC
@@ -156,8 +185,9 @@ def _span_style(
             fg=theme.fg_dim, bg=base_bg, attrs=ATTR_DIM,
         )
     if span_kind == "warn":
+        warn_fg = theme.accent_warn if not row_kind.startswith("diff_") else base_fg
         return Style(
-            fg=theme.accent_warn, bg=base_bg, attrs=ATTR_BOLD,
+            fg=warn_fg, bg=base_bg, attrs=ATTR_BOLD,
         )
 
     # Plain span inherits the row's base treatment
@@ -258,7 +288,7 @@ def measure_tool_card_height(
     # separate hard ceiling at a lower level.
     prep = prepared if prepared is not None else PreparedToolOutput(card)
     avail = max(20, width - OUTPUT_INDENT - 2)
-    out_lines = prep.layout(avail, max_lines=DEFAULT_MAX_OUTPUT_LINES)
+    out_lines = prep.layout(avail, max_lines=prep.preferred_max_lines)
     return box_h + len(out_lines) + 1  # +1 for the trailing status line
 
 
@@ -401,7 +431,7 @@ def paint_tool_card(
 
     prep = prepared if prepared is not None else PreparedToolOutput(card)
     avail = max(20, w - OUTPUT_INDENT - 2)
-    out_lines = prep.layout(avail, max_lines=DEFAULT_MAX_OUTPUT_LINES)
+    out_lines = prep.layout(avail, max_lines=prep.preferred_max_lines)
     out_x = x + OUTPUT_INDENT
     for line in out_lines:
         if cur_y >= grid.rows:

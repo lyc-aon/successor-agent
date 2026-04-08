@@ -158,6 +158,10 @@ class BashRunner:
         self._done = threading.Event()
         self._worker: threading.Thread | None = None
         self._proc: subprocess.Popen | None = None
+        # Optional before-state capture plan installed by the chat
+        # before start(). The worker does not touch it; completion
+        # finalization happens in chat.py after the subprocess settles.
+        self.change_capture = None
 
         # Output accumulators visible to the main thread between
         # drain() calls. Both buffers are bounded by _max_bytes total

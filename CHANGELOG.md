@@ -3,6 +3,39 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
+## v0.1.9 — 2026-04-08
+
+Semantic diff cards for file changes.
+
+### What changed
+
+- deterministic mutating bash cards now settle with structured change
+  artifacts when the target shape is known ahead of time:
+  `write-file`, `create-file`, `delete-file`, `delete-tree`,
+  `create-directory`, single-target `copy-files`, and single-target
+  `move-files`
+- explicit unified diff commands now render semantically too:
+  `git diff`, `git show`, and generic unified-diff stdout with
+  `---` / `+++` / `@@` hunk markers
+- tool cards now show file headers, hunk headers, context lines, added
+  lines, removed lines, and note rows through the existing prepared
+  output cache instead of falling back to plain wrapped stdout
+- `scripts/e2e_chat_driver.py` gained `assert_turn_plain_contains` plus
+  a live `rewrite_diff` scenario so the E2E harness can verify the
+  rendered transcript, not just the final filesystem state
+
+### Verification
+
+- targeted bash/chat regression slice: `317 passed`
+- full local suite: `1066 passed`
+- live local llama.cpp/Qwopus E2E:
+  `scripts/e2e_chat_driver.py --scenario rewrite_diff --runs 3`
+- live artifact review confirmed:
+  - deterministic `write-file` cards show `note.txt [added]` and
+    `note.txt [modified]`
+  - modified cards show real hunk lines including `-beta` and `+gamma`
+  - explicit `git diff -- note.txt` also renders as a semantic diff card
+
 ## v0.1.7 — 2026-04-08
 
 Local subagent/runtime follow-on: slot-aware scheduling is now a real

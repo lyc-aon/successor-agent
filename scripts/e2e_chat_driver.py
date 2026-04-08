@@ -93,6 +93,10 @@ class Scenario:
       - assert_no_files: paths that must NOT exist (for refusal scenarios).
       - assert_min_text_in_final: substrings the final assistant
         message must contain. Use lowercase; matched case-insensitively.
+      - assert_turn_plain_contains: maps turn index -> required substrings
+        that must appear in the captured `turn_NN_plain.txt` render for
+        that prompt. This is the main renderer-level regression hook for
+        live E2E scenarios.
       - assert_max_total_cards: ceiling on total tool cards across the
         whole scenario (catches loops).
       - assert_min_total_cards: floor (catches "model didn't run anything").
@@ -107,6 +111,7 @@ class Scenario:
     assert_files: dict[str, str | None] = field(default_factory=dict)
     assert_no_files: list[str] = field(default_factory=list)
     assert_min_text_in_final: list[str] = field(default_factory=list)
+    assert_turn_plain_contains: dict[int, list[str]] = field(default_factory=dict)
     assert_max_total_cards: int | None = None
     assert_min_total_cards: int | None = None
     assert_max_agent_turns_per_prompt: int | None = None
@@ -426,6 +431,20 @@ def dump_snapshots(
                 "raw_command_preview": (card.raw_command or "")[:200],
                 "params": list(card.params),
             }
+            if card.change_artifact is not None:
+                entry["tool_card"]["change_artifact"] = {
+                    "prelude": list(card.change_artifact.prelude),
+                    "files": [
+                        {
+                            "path": file_change.path,
+                            "status": file_change.status,
+                            "old_path": file_change.old_path,
+                            "notes": list(file_change.notes),
+                            "hunk_count": len(file_change.hunks),
+                        }
+                        for file_change in card.change_artifact.files
+                    ],
+                }
         elif getattr(m, "subagent_card", None) is not None:
             card = m.subagent_card
             entry["subagent_card"] = {
@@ -464,6 +483,7 @@ def evaluate_assertions(
     scenario: Scenario,
     chat: SuccessorChat,
     workspace: Path,
+    out_dir: Path,
     all_stats: list[TurnStats],
 ) -> list[AssertionResult]:
     """Run every assertion declared on the scenario against the
@@ -570,6 +590,37 @@ def evaluate_assertions(
                     passed=True,
                     detail=f"all {len(scenario.assert_min_text_in_final)} substrings present",
                 ))
+
+    # Rendered-turn assertions against captured plaintext frames
+    for turn_index, required_substrings in scenario.assert_turn_plain_contains.items():
+        turn_path = out_dir / f"turn_{turn_index:02d}_plain.txt"
+        if not turn_path.exists():
+            results.append(AssertionResult(
+                name=f"turn_plain:{turn_index}",
+                passed=False,
+                detail=f"missing artifact {turn_path}",
+            ))
+            continue
+        plain = turn_path.read_text()
+        missing = [
+            needle for needle in required_substrings
+            if needle not in plain
+        ]
+        if missing:
+            results.append(AssertionResult(
+                name=f"turn_plain:{turn_index}",
+                passed=False,
+                detail=(
+                    f"missing substrings {missing}; first 500 chars: "
+                    f"{plain[:500]!r}"
+                ),
+            ))
+        else:
+            results.append(AssertionResult(
+                name=f"turn_plain:{turn_index}",
+                passed=True,
+                detail=f"all {len(required_substrings)} substrings present",
+            ))
 
     # Card count assertions
     total_cards = sum(s.tool_cards_appended for s in all_stats)
@@ -805,7 +856,7 @@ def run_scenario(
         dump_snapshots(chat, workspace, out_dir, stats)
         all_stats.append(stats)
 
-    assertions = evaluate_assertions(scenario, chat, workspace, all_stats)
+    assertions = evaluate_assertions(scenario, chat, workspace, out_dir, all_stats)
     write_index(out_dir, scenario, all_stats, assertions)
 
     log("")
@@ -923,6 +974,25 @@ SCENARIOS: dict[str, Scenario] = {
             "note.txt": "hello from successor",
         },
         assert_min_text_in_final=["hello from successor"],
+        assert_max_total_cards=4,
+        assert_min_total_cards=2,
+        assert_max_agent_turns_per_prompt=4,
+    ),
+    "rewrite_diff": Scenario(
+        name="rewrite_diff",
+        description="Create a file, rewrite it, and verify the rendered diff card shows added/removed lines",
+        prompts=[
+            "Create a file called note.txt using a heredoc so it contains exactly two lines: alpha and beta.",
+            "Rewrite note.txt using a heredoc so it now contains exactly two lines: alpha and gamma. Then briefly confirm what changed.",
+        ],
+        assert_files={
+            "note.txt": "gamma",
+        },
+        assert_min_text_in_final=["gamma"],
+        assert_turn_plain_contains={
+            1: ["note.txt  [added]", "+alpha", "+beta"],
+            2: ["note.txt  [modified]", "-beta", "+gamma"],
+        },
         assert_max_total_cards=4,
         assert_min_total_cards=2,
         assert_max_agent_turns_per_prompt=4,

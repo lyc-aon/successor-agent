@@ -135,7 +135,11 @@ elapsed-time counter, then feeds the result back to the model for a
 continuation turn. The card's verb and parameters are inferred from
 the partial command as the arguments stream in, so the header
 resolves to `write-file path: about.html` while the body is still
-arriving.
+arriving. When the command is an explicit unified diff (`git diff`,
+`git show`, `diff -u`) or a deterministic file mutation the parser
+understands (`write-file`, `rm`, `cp`, `mv`, `mkdir`, `touch`), the
+settled card renders semantic file headers and hunk lines so the user
+sees `+` / `-` changes directly instead of a raw output blob.
 
 Subagents reuse the same runtime shape through isolated headless child
 chats. Manual `/fork` and the model-visible `subagent` tool both

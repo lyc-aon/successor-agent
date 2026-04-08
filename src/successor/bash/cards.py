@@ -23,6 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
+from .diff_artifact import ChangeArtifact
 
 # ─── Risk classes ───
 #
@@ -77,6 +78,11 @@ class ToolCard:
         duration_ms     wall-clock execution time, None if not yet
                         executed.
         truncated       True if the executor clipped output for size.
+        change_artifact optional user-facing structured diff / change
+                        summary shown in the rendered card. This is
+                        NOT substituted into the model-facing tool
+                        result message; stdout/stderr remain the source
+                        of truth for API history.
     """
 
     verb: str
@@ -90,6 +96,7 @@ class ToolCard:
     exit_code: int | None = None
     duration_ms: float | None = None
     truncated: bool = False
+    change_artifact: ChangeArtifact | None = None
     # Tool-call linkage for native Qwen tool calling. When the model
     # emits a structured tool_call, the harness propagates the model's
     # call id here so the corresponding `role: "tool"` message can

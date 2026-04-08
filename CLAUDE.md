@@ -56,6 +56,8 @@ src/successor/bash/          bash-masking subsystem — parse model bash → str
   cards.py               ToolCard frozen dataclass (verb/params/risk/raw/output/exit_code)
   parser.py              @bash_parser registry, parse_bash(), clip_at_operators
   risk.py                independent risk classifier (safe/mutating/dangerous)
+  diff_artifact.py       structured file-diff artifacts + unified-diff parser
+  change_capture.py      deterministic before/after capture for known file mutations
   exec.py                dispatch_bash() — parse + classify + run, refuse dangerous
   runner.py              BashRunner — async subprocess worker (background threads)
   render.py              paint_tool_card() — pure paint function for the cards
@@ -86,7 +88,7 @@ src/successor/recorder.py    record/replay session traces
 src/successor/cli.py         argparse subcommand dispatch (`successor` binary)
 src/successor/__main__.py    `python -m successor` entry point
 
-tests/                       pytest suite  1027+ tests, hermetic via SUCCESSOR_CONFIG_DIR
+tests/                       pytest suite  1066+ tests, hermetic via SUCCESSOR_CONFIG_DIR
 
 scripts/                     manual-run scripts (no auto-execution)
   e2e_chat_driver.py     scripted scenarios that drive a real chat against
