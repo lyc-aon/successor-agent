@@ -1,9 +1,9 @@
 # Subagents Design Notes
 
-Current state on 2026-04-08: Successor now ships a real serial
-background-subagent runtime. This document records what is actually
-implemented, what deterministic references shaped it, and what should
-come next.
+Current state on 2026-04-08: Successor now ships a real
+background-subagent runtime with serial default plus slot-aware local
+scheduling. This document records what is actually implemented, what
+deterministic references shaped it, and what should come next.
 
 ## Deterministic sources
 
@@ -87,16 +87,18 @@ come next.
 
 ### Scheduling
 
-- The foundation scheduler is serial by default: `max_model_tasks`
-  governs the number of concurrent child chats.
+- `SubagentConfig.strategy` is now real and shipped:
+  - `serial`: always one background model lane
+  - `slots`: use llama.cpp slot count, reserving one slot for the
+    parent chat
+  - `manual`: trust `max_model_tasks` directly
 - Queue-width edits made while tasks are active are deferred until the
   manager goes idle, then applied safely.
+- The default remains `serial`, because the current local measurements
+  still show "more simultaneous generations" is not automatically
+  "faster".
 - The foreground chat is not yet part of the same lease pool. That is a
   later optimization phase, not a correctness dependency.
-- Given the current local measurements, the future slot-aware scheduler
-  should default to one active model lane unless the user opts into
-  broader fan-out or the runtime proves the extra slots help more than
-  they hurt.
 
 ### Rendering
 
@@ -112,18 +114,31 @@ come next.
   model-visible spawn, task listing, cancellation, transcript writing,
   notification injection, tool serialization, and deferred queue-width
   reconfiguration.
+- Hermetic provider/config/CLI coverage now also locks:
+  - llama.cpp `/props` capability probing
+  - subagent scheduling-strategy parsing and effective lane resolution
+  - config-menu round-trip for the scheduling field
+  - `successor doctor` slot / parallel-tool reporting
 - Live local llama.cpp + Qwopus E2E passed for:
   - manual `/fork` summary flow
   - model uses `subagent`, then answers from the later notification
+- Live local slot-aware overlap check passed:
+  - two `/fork` tasks reached `running` concurrently under
+    `strategy=slots` with `max_model_tasks=2`
+  - both completed cleanly on the local 4-slot server
 - Visual/plain artifacts from the live runs were inspected to confirm:
   - the task badge renders
   - the inline subagent card renders
   - the completion notification renders in the parent transcript
+- A live two-file read probe against the main chat still serialized the
+  reads even with explicit prompting. That confirms the runtime is ready
+  for same-turn parallel read-only tool calls, but the current local
+  model does not yet choose that plan reliably.
 
 ## Next phases
 
-1. Adaptive slot-aware scheduling for llama.cpp, with sticky parent
-   lanes and serial fallback.
+1. Sticky parent-slot leasing and smarter local scheduling heuristics
+   so the runtime can decide when slot fan-out is actually worth it.
 2. Better task inspection UI: open transcript, compact old tasks,
    richer completion summaries.
 3. Parallel read-only execution inside a subagent turn, so one worker

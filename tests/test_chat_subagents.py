@@ -8,7 +8,13 @@ from pathlib import Path
 
 from successor.chat import SuccessorChat, _Message
 from successor.profiles import Profile, SubagentConfig
-from successor.providers.llama import ContentChunk, StreamEnded, StreamError, StreamStarted
+from successor.providers.llama import (
+    ContentChunk,
+    LlamaCppRuntimeCapabilities,
+    StreamEnded,
+    StreamError,
+    StreamStarted,
+)
 from successor.subagents.cards import SubagentToolCard
 from successor.subagents.manager import SubagentManager
 from successor.subagents.prompt import build_child_prompt
@@ -70,6 +76,7 @@ class _MockClient:
     stream_factory: object
     base_url: str = "http://mock"
     model: str = "mock-model"
+    capabilities: object | None = None
 
     def stream_chat(self, messages, *, max_tokens=None, temperature=None,
                     timeout=None, extra=None, tools=None):
@@ -80,6 +87,9 @@ class _MockClient:
 
     def detect_context_window(self) -> int:
         return 200_000
+
+    def detect_runtime_capabilities(self):
+        return self.capabilities
 
 
 def _wait_until(predicate, *, timeout_s: float = 3.0) -> None:
@@ -168,6 +178,52 @@ def test_tasks_command_lists_transcript_path(temp_config_dir: Path) -> None:
     chat._submit()
     assert "subagent tasks:" in chat.messages[-1].raw_text
     assert "transcript:" in chat.messages[-1].raw_text
+
+
+def test_tasks_command_surfaces_scheduler_summary(temp_config_dir: Path) -> None:
+    chat = SuccessorChat(
+        profile=Profile(
+            name="chat-subagents",
+            tools=("bash", "subagent"),
+            subagents=SubagentConfig(
+                enabled=True,
+                strategy="slots",
+                max_model_tasks=4,
+                timeout_s=30.0,
+            ),
+        ),
+        client=_MockClient(
+            lambda: _StaticStream([]),
+            capabilities=LlamaCppRuntimeCapabilities(
+                context_window=262144,
+                total_slots=4,
+                endpoint_slots=True,
+                supports_parallel_tool_calls=True,
+            ),
+        ),
+    )
+    chat._subagent_manager = SubagentManager(
+        max_model_tasks=chat.profile.subagents.effective_max_model_tasks(chat.client),
+        transcript_dir=temp_config_dir / "subagents",
+        client_factory=lambda profile: _MockClient(
+            lambda: _StaticStream([
+                StreamStarted(),
+                ContentChunk(text="child result"),
+                StreamEnded(finish_reason="stop", usage=None, timings=None),
+            ])
+        ),
+        settle_sleep_s=0.01,
+    )
+
+    chat.input_buffer = "/fork inspect the repo"
+    chat._submit()
+    _wait_until(lambda: not chat._has_active_subagent_tasks())
+    chat.input_buffer = "/tasks"
+    chat._submit()
+
+    assert "scheduler: llama slots, 3 background lanes from 4 total slots" in (
+        chat.messages[-1].raw_text
+    )
 
 
 def test_config_command_refused_while_subagent_running(temp_config_dir: Path) -> None:

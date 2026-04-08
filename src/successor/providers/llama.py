@@ -100,6 +100,25 @@ class StreamError:
 StreamEvent = StreamStarted | ReasoningChunk | ContentChunk | StreamEnded | StreamError
 
 
+@dataclass(slots=True, frozen=True)
+class LlamaCppRuntimeCapabilities:
+    """Runtime capabilities surfaced by llama.cpp's /props endpoint."""
+
+    context_window: int | None = None
+    total_slots: int | None = None
+    endpoint_slots: bool = False
+    supports_parallel_tool_calls: bool = False
+
+    @property
+    def usable_background_slots(self) -> int:
+        """Background lanes after reserving one slot for the parent chat."""
+        if not self.endpoint_slots:
+            return 1
+        if not isinstance(self.total_slots, int) or self.total_slots < 2:
+            return 1
+        return max(1, self.total_slots - 1)
+
+
 # ─── ChatStream — one in-flight request ───
 
 
@@ -561,6 +580,23 @@ class LlamaCppClient:
             root = root[:-3]
         return root
 
+    def _detect_props(self) -> dict | None:
+        """Fetch and cache llama.cpp's /props payload."""
+        if hasattr(self, "_cached_props"):
+            return self._cached_props
+        payload: dict | None = None
+        try:
+            req = urllib.request.Request(f"{self._server_root()}/props")
+            with urllib.request.urlopen(req, timeout=2.0) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode("utf-8", errors="replace"))
+                    if isinstance(data, dict):
+                        payload = data
+        except Exception:
+            pass
+        self._cached_props = payload
+        return payload
+
     def detect_context_window(self) -> int | None:
         """Probe llama.cpp's /props endpoint and return n_ctx.
 
@@ -576,19 +612,34 @@ class LlamaCppClient:
         is unexpected, or n_ctx is missing — callers fall back to
         the profile override or the hardcoded default.
         """
-        if hasattr(self, "_cached_context_window"):
-            return self._cached_context_window
-        result: int | None = None
-        try:
-            req = urllib.request.Request(f"{self._server_root()}/props")
-            with urllib.request.urlopen(req, timeout=2.0) as resp:
-                if resp.status == 200:
-                    data = json.loads(resp.read().decode("utf-8", errors="replace"))
-                    settings = data.get("default_generation_settings") or {}
-                    n_ctx = settings.get("n_ctx")
-                    if isinstance(n_ctx, int) and n_ctx > 0:
-                        result = n_ctx
-        except Exception:
-            pass
-        self._cached_context_window = result
-        return result
+        props = self._detect_props() or {}
+        settings = props.get("default_generation_settings") or {}
+        n_ctx = settings.get("n_ctx")
+        if isinstance(n_ctx, int) and n_ctx > 0:
+            return n_ctx
+        return None
+
+    def detect_runtime_capabilities(self) -> LlamaCppRuntimeCapabilities:
+        """Return cached llama.cpp runtime capabilities from /props."""
+        props = self._detect_props() or {}
+        settings = props.get("default_generation_settings") or {}
+        chat_caps = props.get("chat_template_caps") or {}
+
+        context_window: int | None = None
+        n_ctx = settings.get("n_ctx")
+        if isinstance(n_ctx, int) and n_ctx > 0:
+            context_window = n_ctx
+
+        total_slots: int | None = None
+        raw_total_slots = props.get("total_slots")
+        if isinstance(raw_total_slots, int) and raw_total_slots > 0:
+            total_slots = raw_total_slots
+
+        return LlamaCppRuntimeCapabilities(
+            context_window=context_window,
+            total_slots=total_slots,
+            endpoint_slots=bool(props.get("endpoint_slots", False)),
+            supports_parallel_tool_calls=bool(
+                chat_caps.get("supports_parallel_tool_calls", False)
+            ),
+        )

@@ -1794,7 +1794,9 @@ class SuccessorChat(App):
         # enable/disable, timeout, and notification policy are checked
         # from `profile.subagents`.
         self._subagent_manager = SubagentManager(
-            max_model_tasks=self.profile.subagents.max_model_tasks,
+            max_model_tasks=self.profile.subagents.effective_max_model_tasks(
+                self.client
+            ),
         )
 
         # Chat-level cached total token count for the static footer.
@@ -2436,7 +2438,9 @@ class SuccessorChat(App):
         # background tasks are active, keep the old scheduler shape
         # until they finish; future profile switches can retry.
         self._subagent_manager.reconfigure(
-            max_model_tasks=new_profile.subagents.max_model_tasks,
+            max_model_tasks=new_profile.subagents.effective_max_model_tasks(
+                self.client
+            ),
         )
 
         # Persist the new active profile name to chat.json so the next
@@ -2754,6 +2758,35 @@ class SuccessorChat(App):
     def _has_active_subagent_tasks(self) -> bool:
         return self._subagent_manager.has_active_tasks()
 
+    def _detect_client_runtime_capabilities(self) -> object | None:
+        detect = getattr(self.client, "detect_runtime_capabilities", None)
+        if not callable(detect):
+            return None
+        try:
+            return detect()
+        except Exception:
+            return None
+
+    def _subagent_scheduler_summary(self) -> str:
+        cfg = self.profile.subagents
+        lanes = cfg.effective_max_model_tasks(self.client)
+        if cfg.strategy == "serial":
+            noun = "lane" if lanes == 1 else "lanes"
+            return f"serial, {lanes} model {noun}"
+        if cfg.strategy == "manual":
+            noun = "lane" if lanes == 1 else "lanes"
+            return f"manual, {lanes} model {noun}"
+        capabilities = self._detect_client_runtime_capabilities()
+        total_slots = getattr(capabilities, "total_slots", None)
+        if isinstance(total_slots, int) and total_slots > 0:
+            noun = "lane" if lanes == 1 else "lanes"
+            return (
+                f"llama slots, {lanes} background {noun} from "
+                f"{total_slots} total slots"
+            )
+        noun = "lane" if lanes == 1 else "lanes"
+        return f"llama slots, fallback to {lanes} model {noun}"
+
     def _subagent_context_snapshot(self) -> list[dict[str, object]]:
         """Snapshot the current chat context for a child task.
 
@@ -2847,6 +2880,7 @@ class SuccessorChat(App):
         counts = self._subagent_counts()
         lines = [
             f"subagent tasks: {counts.active} active, {counts.total} total",
+            f"scheduler: {self._subagent_scheduler_summary()}",
             "",
         ]
         for idx, task in enumerate(tasks):
@@ -3385,6 +3419,23 @@ class SuccessorChat(App):
                 f"(no tool call) is how you finish the task and "
                 f"return control to the user."
             )
+            capabilities = self._detect_client_runtime_capabilities()
+            if bool(getattr(capabilities, "supports_parallel_tool_calls", False)):
+                sys_prompt = (
+                    f"{sys_prompt}\n\n"
+                    f"## Parallel read-only bash work\n\n"
+                    f"When a task is pure inspection across multiple "
+                    f"independent files, directories, or grep targets, "
+                    f"prefer launching all required read-only `bash` tool "
+                    f"calls in the FIRST assistant turn instead of "
+                    f"serializing them one-by-one. It is valid to emit "
+                    f"multiple tool calls before any result has returned, "
+                    f"and if the user explicitly asks for separate same-turn "
+                    f"calls you should follow that literally. Use this only "
+                    f"for independent read-only checks. Keep dependent "
+                    f"steps, writes, and read-after-write verification "
+                    f"serialized."
+                )
 
         tool_guidance = build_model_tool_guidance(enabled_tools)
         if tool_guidance:

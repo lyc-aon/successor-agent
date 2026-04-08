@@ -26,7 +26,7 @@ from unittest.mock import patch
 
 import pytest
 
-from successor.providers.llama import LlamaCppClient
+from successor.providers.llama import LlamaCppClient, LlamaCppRuntimeCapabilities
 from successor.providers.openai_compat import OpenAICompatClient
 
 
@@ -81,6 +81,45 @@ def test_llama_detect_caches_result() -> None:
         assert client.detect_context_window() == 32768
         assert client.detect_context_window() == 32768
         assert client.detect_context_window() == 32768
+    assert call_count["n"] == 1
+
+
+def test_llama_detect_runtime_capabilities_from_props() -> None:
+    client = LlamaCppClient(base_url="http://localhost:8080")
+    payload = (
+        b'{"default_generation_settings": {"n_ctx": 262144}, '
+        b'"total_slots": 4, '
+        b'"endpoint_slots": true, '
+        b'"chat_template_caps": {"supports_parallel_tool_calls": true}}'
+    )
+    with patch(
+        "successor.providers.llama.urllib.request.urlopen",
+        _fake_urlopen(payload),
+    ):
+        assert client.detect_runtime_capabilities() == LlamaCppRuntimeCapabilities(
+            context_window=262144,
+            total_slots=4,
+            endpoint_slots=True,
+            supports_parallel_tool_calls=True,
+        )
+
+
+def test_llama_context_window_and_capabilities_share_props_cache() -> None:
+    client = LlamaCppClient(base_url="http://localhost:8080")
+    payload = b'{"default_generation_settings": {"n_ctx": 32768}}'
+    call_count = {"n": 0}
+
+    def counting_open(req, timeout=None):
+        call_count["n"] += 1
+        return _FakeResponse(payload)
+
+    with patch(
+        "successor.providers.llama.urllib.request.urlopen",
+        counting_open,
+    ):
+        assert client.detect_context_window() == 32768
+        caps = client.detect_runtime_capabilities()
+        assert caps.context_window == 32768
     assert call_count["n"] == 1
 
 

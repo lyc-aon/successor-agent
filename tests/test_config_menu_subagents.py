@@ -21,6 +21,7 @@ def test_subagent_section_renders_in_config_menu(temp_config_dir: Path) -> None:
     )
     plain = render_grid_to_plain(grid)
     assert "subagents" in plain.lower()
+    assert "scheduling" in plain.lower()
     assert "max model tasks" in plain.lower()
     assert "notify on finish" in plain.lower()
 
@@ -32,6 +33,7 @@ def test_profile_json_round_trip_includes_subagents(temp_config_dir: Path) -> No
         name="roundtrip-subagents",
         subagents=SubagentConfig(
             enabled=False,
+            strategy="slots",
             max_model_tasks=2,
             notify_on_finish=False,
             timeout_s=123.0,
@@ -58,6 +60,11 @@ def test_config_menu_save_writes_subagent_settings(temp_config_dir: Path) -> Non
     )
     menu._set_field_on_profile(
         menu._profile_cursor,
+        _SETTINGS_TREE[_field_idx("subagents_strategy")],
+        "manual",
+    )
+    menu._set_field_on_profile(
+        menu._profile_cursor,
         _SETTINGS_TREE[_field_idx("subagents_max_model_tasks")],
         2,
     )
@@ -77,6 +84,7 @@ def test_config_menu_save_writes_subagent_settings(temp_config_dir: Path) -> Non
     payload = json.loads(target.read_text())
     assert payload["subagents"] == {
         "enabled": False,
+        "strategy": "manual",
         "max_model_tasks": 2,
         "notify_on_finish": False,
         "timeout_s": 111.0,

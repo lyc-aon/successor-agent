@@ -103,9 +103,9 @@ editing            scroll                 look & feel        commands
 
 `/fork <directive>` spawns a background subagent against the current
 chat context. `/tasks` lists queued/running/completed background
-tasks, and `/task-cancel <id|all>` requests cancellation. Queue width,
-timeout, and notifications live in `/config`, under the `subagents`
-section.
+tasks, and `/task-cancel <id|all>` requests cancellation. Scheduling,
+queue width, timeout, and notifications live in `/config`, under the
+`subagents` section.
 
 If the current profile also has the `subagent` tool enabled in its
 tool list, the model can fork background workers on its own. That path
@@ -143,12 +143,12 @@ create background tasks with transcript files, a title-bar task badge,
 an inline spawn card, and a later completion notification injected back
 into the parent chat.
 
-The current scheduler keeps background subagents serial by default even
-on llama.cpp servers that expose multiple slots. That is intentional:
-local multi-slot generation can improve responsiveness and isolation,
-but on a saturated local box it can also reduce total throughput. The
-next optimization phase is slot-aware scheduling with a serial fallback,
-not blind fan-out.
+Background scheduling is now explicit per profile: `serial` keeps one
+background model lane, `slots` uses llama.cpp's reported slot count
+with one slot reserved for the parent chat, and `manual` trusts the
+configured width directly. The default remains `serial`, because local
+multi-slot generation can improve responsiveness and isolation while
+still reducing total throughput on a saturated box.
 
 Compaction runs as a visible animation when the context budget
 tightens. The chat stays responsive throughout. Once the summary is
@@ -205,8 +205,9 @@ successor bench           renderer benchmark, no TTY required
 `successor doctor` is the troubleshooting command. It dumps your
 terminal capabilities, lists the active profile's provider and model,
 probes the configured `base_url` to see if it is reachable, and
-reports the resolved context window. Run it first when something is
-not working.
+reports the resolved context window. On llama.cpp it also reports the
+visible slot count and whether the server advertises parallel tool-call
+support. Run it first when something is not working.
 
 ## The architectural premise
 

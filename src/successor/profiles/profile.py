@@ -307,8 +307,9 @@ class Profile:
                         menu's compaction section.
       subagents         background-task settings shared by manual
                         `/fork` and the model-visible `subagent`
-                        tool: enable/disable, queue width, completion
-                        notifications, and timeout.
+                        tool: enable/disable, scheduling strategy,
+                        queue width, completion notifications, and
+                        timeout.
     """
 
     name: str

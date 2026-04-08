@@ -35,6 +35,7 @@
   },
   "subagents": {
     "enabled": true,
+    "strategy": "serial",
     "max_model_tasks": 1,
     "notify_on_finish": true,
     "timeout_s": 900.0

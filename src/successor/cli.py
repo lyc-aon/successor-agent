@@ -357,6 +357,26 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 print(f"    ctx window  {ctx} tokens (auto-detected)")
             else:
                 print(f"    ctx window  unknown — falls back to 262144 default")
+
+        detect_caps = getattr(client, "detect_runtime_capabilities", None)
+        if callable(detect_caps):
+            try:
+                caps = detect_caps()
+            except Exception:  # noqa: BLE001
+                caps = None
+            total_slots = getattr(caps, "total_slots", None)
+            endpoint_slots = bool(getattr(caps, "endpoint_slots", False))
+            parallel_tools = bool(
+                getattr(caps, "supports_parallel_tool_calls", False)
+            )
+            if isinstance(total_slots, int) and total_slots > 0:
+                slot_note = "/slots on" if endpoint_slots else "/slots off"
+                print(f"    slots       {total_slots} total ({slot_note})")
+            if caps is not None:
+                print(
+                    "    tool calls  "
+                    + ("parallel supported" if parallel_tools else "serial only")
+                )
     except Exception as exc:  # noqa: BLE001
         print(f"    error: could not load active profile ({exc})")
     return 0

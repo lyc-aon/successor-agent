@@ -150,6 +150,11 @@ Background subagents now have two paths:
   the profile's tool list and also requires `subagents.notify_on_finish`
   so the parent chat receives the later completion event
 
+Subagent scheduling is now profile-driven: `serial` keeps one
+background model lane, `slots` uses llama.cpp slot capacity with one
+slot reserved for the parent chat, and `manual` trusts the configured
+width directly. The default remains `serial`.
+
 ## The five layers
 
 Understand these before touching anything in `render/`:

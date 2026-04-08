@@ -5,18 +5,20 @@ exposes knobs the runtime actually honors today:
 
   - enabled           gates manual `/fork` plus the model-visible
                       `subagent` tool
+  - strategy          how background model lanes are scheduled:
+                      serial, slot-aware llama.cpp, or manual width
   - max_model_tasks   queue width for background child chats
   - notify_on_finish  whether the parent chat gets completion toasts
   - timeout_s         hard wall-clock limit per child task
-
-The future slot-aware scheduler can grow this surface later without
-breaking the JSON shape.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+
+
+SUBAGENT_STRATEGIES = ("serial", "slots", "manual")
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,11 +31,17 @@ class SubagentConfig:
     """
 
     enabled: bool = True
+    strategy: str = "serial"
     max_model_tasks: int = 1
     notify_on_finish: bool = True
     timeout_s: float = 900.0
 
     def __post_init__(self) -> None:
+        if self.strategy not in SUBAGENT_STRATEGIES:
+            raise ValueError(
+                f"strategy must be one of {', '.join(SUBAGENT_STRATEGIES)}, "
+                f"got {self.strategy!r}"
+            )
         if self.max_model_tasks < 1:
             raise ValueError(
                 f"max_model_tasks must be >= 1, got {self.max_model_tasks}"
@@ -46,10 +54,30 @@ class SubagentConfig:
     def to_dict(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
+            "strategy": self.strategy,
             "max_model_tasks": self.max_model_tasks,
             "notify_on_finish": self.notify_on_finish,
             "timeout_s": self.timeout_s,
         }
+
+    def effective_max_model_tasks(self, client: object | None) -> int:
+        """Resolve the live background-model width for this provider."""
+        requested = max(1, int(self.max_model_tasks))
+        if self.strategy == "serial":
+            return 1
+        if self.strategy == "manual":
+            return requested
+        detect = getattr(client, "detect_runtime_capabilities", None)
+        if not callable(detect):
+            return 1
+        try:
+            capabilities = detect()
+        except Exception:
+            return 1
+        usable = getattr(capabilities, "usable_background_slots", None)
+        if isinstance(usable, int) and usable > 0:
+            return min(requested, usable)
+        return 1
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "SubagentConfig":
@@ -64,6 +92,11 @@ class SubagentConfig:
             kwargs["enabled"] = data["enabled"]
         if isinstance(data.get("notify_on_finish"), bool):
             kwargs["notify_on_finish"] = data["notify_on_finish"]
+        strategy = data.get("strategy")
+        if isinstance(strategy, str):
+            normalized = strategy.strip().lower()
+            if normalized in SUBAGENT_STRATEGIES:
+                kwargs["strategy"] = normalized
 
         max_model_tasks = data.get("max_model_tasks")
         if isinstance(max_model_tasks, int) and not isinstance(max_model_tasks, bool):
@@ -81,7 +114,7 @@ class SubagentConfig:
         except ValueError:
             safe_kwargs = {
                 k: v for k, v in kwargs.items()
-                if k in ("enabled", "notify_on_finish")
+                if k in ("enabled", "notify_on_finish", "strategy")
             }
             try:
                 return cls(**safe_kwargs)

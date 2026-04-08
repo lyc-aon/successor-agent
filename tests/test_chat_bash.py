@@ -20,7 +20,12 @@ import pytest
 from successor.agent.bash_stream import BashStreamDetector
 from successor.bash import ToolCard, dispatch_bash, preview_bash
 from successor.chat import SuccessorChat, _Message
-from successor.providers.llama import ContentChunk, StreamEnded, StreamStarted
+from successor.providers.llama import (
+    ContentChunk,
+    LlamaCppRuntimeCapabilities,
+    StreamEnded,
+    StreamStarted,
+)
 from successor.render.cells import Grid
 from successor.snapshot import render_grid_to_plain
 
@@ -755,6 +760,44 @@ def test_cwd_profile_override_takes_precedence(temp_config_dir: Path, tmp_path) 
 
     sys_msg = captured["messages"][0]
     assert f"cwd={tmp_path}" in sys_msg["content"]
+
+
+def test_parallel_read_guidance_only_injected_when_provider_supports_it(
+    temp_config_dir: Path,
+) -> None:
+    from successor.profiles import Profile
+
+    chat = SuccessorChat()
+    chat.profile = Profile(
+        name="parallel-reads",
+        tools=("bash",),
+        tool_config={},
+    )
+    chat.messages = []
+
+    captured: dict = {}
+
+    class _CapturingClient:
+        def stream_chat(self, messages, **kwargs):
+            captured["messages"] = messages
+            return _FakeStream([_stream_end()])
+
+        def detect_runtime_capabilities(self):
+            return LlamaCppRuntimeCapabilities(
+                context_window=262144,
+                total_slots=4,
+                endpoint_slots=True,
+                supports_parallel_tool_calls=True,
+            )
+
+    chat.client = _CapturingClient()
+    chat.input_buffer = "inspect two files"
+    chat._submit()
+    _drive_until_idle(chat)
+
+    sys_msg = captured["messages"][0]
+    assert "Parallel read-only bash work" in sys_msg["content"]
+    assert "multiple tool calls before any result has returned" in sys_msg["content"]
 
 
 def test_live_stream_never_exposes_bash_block_mid_stream(

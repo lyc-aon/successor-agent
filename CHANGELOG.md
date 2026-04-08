@@ -3,6 +3,51 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
+## v0.1.7 — 2026-04-08
+
+Local subagent/runtime follow-on: slot-aware scheduling is now a real
+profile feature instead of a design note, and the local diagnostics now
+surface the server capabilities that actually matter for running worker
+tasks well.
+
+### Local scheduling + diagnostics
+
+- `SubagentConfig` now has an explicit `strategy` field:
+  `serial`, `slots`, or `manual`
+- `src/successor/chat.py` now resolves the live background-model width
+  from that strategy and the active provider, and `/tasks` reports the
+  effective scheduler shape
+- `src/successor/wizard/config.py` now exposes the scheduling strategy
+  in the `subagents` section
+- `src/successor/providers/llama.py` now surfaces runtime capabilities
+  from `/props`: context window, slot count, `/slots` availability, and
+  parallel-tool-call support
+- `successor doctor` now reports llama.cpp slot capacity and whether
+  the server advertises parallel tool calls
+
+### Parallel read guidance
+
+When the active provider advertises parallel native tool calls,
+`src/successor/chat.py` now tells the model to fan out only independent
+read-only bash work in the same assistant turn, while keeping writes
+and dependent steps serialized.
+
+### Verification
+
+Local verification for v0.1.7:
+
+- full pytest suite: 1059 passing
+- `successor doctor` on the local llama.cpp server reports:
+  - `ctx window 262144 tokens`
+  - `slots 4 total (/slots on)`
+  - `tool calls parallel supported`
+- live Qwopus subagent overlap check with `strategy=slots` showed two
+  `/fork` tasks running concurrently and completing cleanly
+- live Qwopus two-file read probe still returned the correct answer,
+  but the model continued to serialize the two bash reads; the runtime
+  is ready for same-turn parallel reads, the current model still needs
+  more steering before that behavior is reliable
+
 ## v0.1.6 — 2026-04-08
 
 Subagent tool pass: the background-worker foundation from v0.1.5 is

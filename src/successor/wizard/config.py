@@ -119,6 +119,7 @@ from ..render.theme import (
     normalize_display_mode,
     toggle_display_mode,
 )
+from ..subagents.config import SUBAGENT_STRATEGIES
 from ..tools_registry import AVAILABLE_TOOLS
 from .prompt_editor import PromptEditor
 
@@ -316,6 +317,11 @@ _SETTINGS_TREE: tuple[_SettingField, ...] = (
         name="subagents_enabled", label="enabled", section="subagents",
         kind=FieldKind.TOGGLE,
         options_getter=lambda: [True, False],
+    ),
+    _SettingField(
+        name="subagents_strategy", label="scheduling", section="",
+        kind=FieldKind.CYCLE,
+        options_getter=lambda: list(SUBAGENT_STRATEGIES),
     ),
     _SettingField(
         name="subagents_max_model_tasks", label="max model tasks", section="",
@@ -696,6 +702,14 @@ class SuccessorConfig(App):
             raw = self._profile_value_for_field_raw(profile, field)
             if field.name == "subagents_enabled":
                 return "on" if raw else "off"
+            if field.name == "subagents_strategy":
+                if raw == "serial":
+                    return "serial (1 lane)"
+                if raw == "slots":
+                    return "llama slots"
+                if raw == "manual":
+                    return "manual width"
+                return str(raw)
             if field.name == "subagents_notify_on_finish":
                 return "on" if raw else "off"
             if isinstance(raw, (int, float)):

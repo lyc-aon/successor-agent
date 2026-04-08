@@ -11,6 +11,51 @@ unit on top of phase 0.
 
 ---
 
+## v0.1.7, local slot-aware scheduling (2026-04-08)
+
+Follow-on pass for the local llama.cpp case. The goal was not "more
+parallelism at any cost"; it was to make the runtime honest about local
+capabilities, keep serial default for throughput, and let advanced
+profiles opt into slot-aware background workers.
+
+### What landed
+
+- `src/successor/providers/llama.py` now has
+  `detect_runtime_capabilities()`, cached off `/props`, exposing:
+  - `context_window`
+  - `total_slots`
+  - `endpoint_slots`
+  - `supports_parallel_tool_calls`
+- `src/successor/subagents/config.py` now carries a real scheduling
+  strategy:
+  - `serial`: always 1 background model lane
+  - `slots`: use llama.cpp slot count with one slot reserved for the
+    parent chat
+  - `manual`: trust `max_model_tasks` directly
+- `src/successor/chat.py` now resolves the manager width from that
+  strategy at startup and profile switch time, shows the effective
+  scheduler summary in `/tasks`, and only injects "parallel read-only
+  bash work" guidance when the provider actually advertises parallel
+  native tool calls.
+- `src/successor/wizard/config.py` now exposes the subagent scheduling
+  strategy in the config menu.
+- Built-in profiles now serialize the subagent strategy explicitly so
+  the shipped defaults are unambiguous.
+- `successor doctor` now reports llama.cpp slots and parallel tool-call
+  support instead of only the context window.
+
+### Verification
+
+- Hermetic local suite: `1059 passed in 11.85s`
+- Live local llama.cpp verification:
+  - `successor doctor` reported `ctx window 262144`, `slots 4 total
+    (/slots on)`, and `tool calls parallel supported`
+  - manual slot-aware `/fork` overlap run showed two background tasks
+    in `running` state at the same time and both completed cleanly
+  - the two-file bash-read probe still answered correctly but serialized
+    the reads, which confirms the runtime path is ready while Qwopus is
+    not yet reliably planning same-turn parallel read calls
+
 ## v0.1.6, model-visible subagents (2026-04-08)
 
 Follow-on pass that turns the v0.1.5 background-task foundation into a
