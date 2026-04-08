@@ -279,19 +279,20 @@ class Profile:
       system_prompt     full system prompt sent to the model
       provider          provider config dict for make_provider, or None
                         to use the chat's default LlamaCppClient
-      skills            ordered tuple of skill names (not yet wired into
-                        the chat — phase 5 ships the skill loader)
-      tools             ordered tuple of tool names (not yet wired into
-                        the chat — phase 6 ships the tool registry)
-      tool_config       per-tool configuration dict (passed to tools at
-                        dispatch time when the agent loop lands)
+      skills            ordered tuple of skill names (loaded and
+                        listed, but not yet injected into prompts)
+      tools             ordered tuple of enabled tool names. Currently
+                        this controls built-in bash availability and
+                        the tool docs injected into the system prompt
+      tool_config       per-tool configuration dict. `bash` reads this
+                        live today; future tools can do the same
       intro_animation   name of an intro animation to play before chat,
                         or None to skip. "successor" plays the bundled
-                        braille emergence sequence for ~4 seconds.
+                        braille emergence sequence for ~5 seconds.
       chat_intro_art    name of a braille frame to use as the chat's
                         empty-state hero panel, or None to skip the
                         hero entirely. "successor" loads the bundled
-                        title portrait. Custom art: drop a braille
+                        hero art (`hero.txt`). Custom art: drop a braille
                         text file at ~/.config/successor/art/<name>.txt
                         and reference it as `<name>`, or pass an
                         absolute path.

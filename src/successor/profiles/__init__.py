@@ -4,9 +4,9 @@ A profile is the user's persona unit. Switching profiles atomically
 swaps everything that defines "how this chat feels": the visual theme,
 the display mode, the layout density, the system prompt sent to the
 model, the provider and model configuration, the active skill list,
-the active tool list (deferred — slot exists but not yet wired into
-the agent loop), and an optional intro animation that plays before
-the chat opens.
+the active tool list (currently drives bash availability + tool docs in
+the chat), and an optional intro animation that plays before the chat
+opens.
 
 Profiles are JSON files loaded via the same Registry pattern themes
 use. Built-ins ship in `src/successor/builtin/profiles/`; user files live

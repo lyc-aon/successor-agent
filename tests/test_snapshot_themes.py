@@ -98,7 +98,7 @@ def test_blank_scenario_shows_empty_state(temp_config_dir: Path) -> None:
     """The blank scenario renders the empty-state hero + info panel.
 
     Default profiles ship with chat_intro_art="successor", so a fresh
-    chat with no real messages paints the title portrait on the left
+    chat with no real messages paints the bundled hero art on the left
     and an info panel on the right. The panel includes the section
     headers and the bottom hint, regardless of which profile or
     theme is active.

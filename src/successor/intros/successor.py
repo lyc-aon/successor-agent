@@ -1,14 +1,14 @@
 """SuccessorIntro — the chill emergence animation that opens the chat.
 
-Plays the bundled successor braille frames sequentially with smooth
-Bayer-dot interpolation between adjacent frames, then holds the final
-title frame for a couple of seconds before auto-exiting. Any keypress
-skips ahead.
+Plays the bundled successor braille animation frames sequentially with
+smooth Bayer-dot interpolation between adjacent frames, then holds the
+final title frame for a couple of seconds before auto-exiting. Any
+keypress skips ahead.
 
-The frames live in `src/successor/builtin/intros/successor/` as 11
-text files (`00-emerge.txt` through `10-title.txt`). Frame 10 is the
-held title frame — the integrated portrait. Frames 0-9 are the
-emerge sequence that morphs toward it.
+The animation frames live in `src/successor/builtin/intros/successor/`
+as 11 numbered text files (`00-emerge.txt` through `10-title.txt`).
+`hero.txt` lives in the same directory for the chat's empty-state
+panel, but it is NOT part of the intro animation sequence.
 
 Renderer features used:
   - BrailleArt prepare/layout cache (Pretext-shaped) — re-runs of the
@@ -68,6 +68,16 @@ def _intro_frames_dir() -> Path:
     return builtin_root() / "intros" / "successor"
 
 
+def successor_intro_frame_paths(directory: Path | None = None) -> list[Path]:
+    """Ordered numbered frame files for the bundled successor intro.
+
+    Excludes `hero.txt`, which is dedicated empty-state art for the
+    chat surface rather than part of the startup animation.
+    """
+    frames_dir = directory if directory is not None else _intro_frames_dir()
+    return sorted(frames_dir.glob("[0-9][0-9]-*.txt"))
+
+
 class SuccessorIntro(App):
     """The bundled successor emergence intro.
 
@@ -101,12 +111,13 @@ class SuccessorIntro(App):
             steel = find_theme_or_fallback("steel")
             self._variant = steel.variant("dark")
 
-        # Load all frames sorted by filename so 00→10 ordering is
-        # preserved. Each becomes a BrailleArt for the cached layout.
+        # Load only the numbered animation frames in filename order so
+        # 00→10 is preserved. `hero.txt` is separate chat art, not an
+        # animation frame.
         frames_dir = _intro_frames_dir()
         if not frames_dir.exists() or not frames_dir.is_dir():
             raise RuntimeError(f"successor intro frames dir missing: {frames_dir}")
-        frame_paths = sorted(frames_dir.glob("*.txt"))
+        frame_paths = successor_intro_frame_paths(frames_dir)
         if not frame_paths:
             raise RuntimeError(f"no intro frames in {frames_dir}")
         self._arts: list[BrailleArt] = [BrailleArt(load_frame(p)) for p in frame_paths]

@@ -23,15 +23,15 @@ pip install -e .
 successor setup
 ```
 
-The install registers `successor` and the `sx` two-letter alias in
-`~/.local/bin`. Python 3.11 or newer. Zero third-party runtime
+The install provides `successor` and the `sx` two-letter alias in the
+current environment's `bin` directory. Python 3.11 or newer. Zero third-party runtime
 dependencies. The renderer, the chat surface, the bash dispatch, the
 autocompactor, and the wizard are all pure stdlib.
 
 `successor setup` plays the SUCCESSOR emergence animation and walks
-you through 10 wizard steps with a live preview pane: name, theme,
-dark/light, density, intro animation, provider, tools, autocompact,
-review, save. The provider step gives you three choices out of the
+you through 10 interactive wizard steps with a live preview pane:
+welcome, name, theme, dark/light, density, intro animation, provider,
+tools, autocompact, review. The provider step gives you three choices out of the
 box:
 
 | Provider | Auth | Notes |
@@ -46,7 +46,7 @@ chat. The context window is auto-detected from the provider on first
 use, so the autocompactor's percentage thresholds resolve to actual
 token counts without you having to set anything manually.
 
-If you skip the wizard and run `successor chat` directly, you get the
+If you skip the wizard and run `successor chat` directly on a fresh install, you get the
 bundled default profile pointed at `http://localhost:8080`. Bash is
 enabled by default, so the model can read files, run quick checks,
 and verify its work as part of any reply. If your first message
@@ -264,7 +264,7 @@ pytest
 
 The suite is hermetic. Each test gets its own
 `SUCCESSOR_CONFIG_DIR`, and bash dispatch tests use real shell
-builtins (no mocks). 1025 tests at the time of writing. Run them
+builtins (no mocks). 1027 tests at the time of writing. Run them
 with `pytest -q` for a clean dot view, or `pytest -xvs` to follow
 individual tests.
 

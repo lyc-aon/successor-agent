@@ -137,10 +137,11 @@ def _play_intro_animation(name: str) -> None:
     """Play a registered intro animation, blocking until it finishes.
 
     For v0, only "successor" is supported — it plays the bundled
-    11-frame braille emergence sequence ending on the title portrait
-    held for a couple of seconds. Any keypress skips ahead. Unknown
-    intro names are silently ignored so a profile that references a
-    future intro doesn't break the chat.
+    11-frame numbered emergence sequence ending on the title frame,
+    held for a couple of seconds. `hero.txt` is separate empty-state
+    art for the chat and is not part of this animation. Any keypress
+    skips ahead. Unknown intro names are silently ignored so a profile
+    that references a future intro doesn't break the chat.
     """
     if name != "successor":
         # Future: walk ~/.config/successor/intros/<name>/ for user intros.
@@ -203,12 +204,13 @@ def cmd_skills(args: argparse.Namespace) -> int:
 
 
 def cmd_tools(args: argparse.Namespace) -> int:
-    """List every registered tool (built-in + user) with source.
+    """List Python-import tools from the ToolRegistry with source.
 
-    Phase 6 scaffold: the tool registry exists, the @tool decorator
-    works, but no tools are actually wired into the chat (no agent
-    loop yet). This command shows what would be available when the
-    agent loop lands.
+    This registry is distinct from the built-in `bash` capability,
+    which is already wired into the chat via `tools_registry.py`.
+    `successor tools` inventories the dynamic Python-import tool
+    loader (`read_file`, future user tools, etc.), which is not yet
+    dispatched by the chat loop.
     """
     from .tools import TOOL_REGISTRY
 
@@ -216,7 +218,7 @@ def cmd_tools(args: argparse.Namespace) -> int:
     tools = TOOL_REGISTRY.all()
     if not tools:
         print("successor: no tools registered")
-        print("  the agent loop is not yet wired (phase 6+).")
+        print("  bash is still available via profiles + the chat tool path.")
         from .loader import builtin_root, config_dir
 
         print(f"  builtin: {builtin_root() / 'tools'}")
@@ -276,11 +278,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"    {label:12s}  char_width={char_width(ch[0])}  text_width={text_width(ch)}")
     print()
 
+    from .intros import successor_intro_frame_paths
     from .loader import builtin_root
     intro_dir = builtin_root() / "intros" / "successor"
     if intro_dir.exists():
-        intro_frames = list(intro_dir.glob("*.txt"))
+        intro_frames = successor_intro_frame_paths(intro_dir)
         print(f"  intro       {len(intro_frames)} successor emergence frames")
+        if (intro_dir / "hero.txt").exists():
+            print(f"  hero        chat empty-state hero art present")
         print(f"  intro_dir   {intro_dir}")
 
     # ─── Active profile + provider connectivity check ───
@@ -462,6 +467,7 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
 
 
 def cmd_bench(args: argparse.Namespace) -> int:
+    from .intros import successor_intro_frame_paths
     from .loader import builtin_root
     from .render.braille import interpolate_frame, load_frame
     from .render.cells import Grid, Style
@@ -475,7 +481,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
     print(f"successor bench: {n} frames at {cols}×{rows}")
 
     intro_dir = builtin_root() / "intros" / "successor"
-    fr = sorted(intro_dir.glob("*.txt")) if intro_dir.exists() else []
+    fr = successor_intro_frame_paths(intro_dir) if intro_dir.exists() else []
     if len(fr) < 2:
         print("successor: need at least 2 intro frames to bench", file=sys.stderr)
         return 1
@@ -570,7 +576,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_tools = sub.add_parser(
         "tools",
-        help="list registered tools (bash is wired by default)",
+        help="list Python-import tools in the registry (separate from bash)",
     )
     p_tools.set_defaults(func=cmd_tools)
 

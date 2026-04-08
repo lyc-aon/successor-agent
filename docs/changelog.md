@@ -42,7 +42,7 @@ editing still deleting one codepoint at a time.
 
 ### Tests
 
-1014 to 1025. 11 new tests across two files:
+1014 to 1027. 13 new tests across three files:
 
 - `tests/test_key_decoder.py`: 4 tests for mixed UTF-8 decode,
   byte-stream reassembly, invalid-sequence recovery, and Unicode
@@ -50,6 +50,8 @@ editing still deleting one codepoint at a time.
 - `tests/test_unicode_editing.py`: 7 tests covering grapheme-aware
   backspace/delete across chat input, search, config inline edit,
   prompt editor, and wizard fields
+- `tests/test_intro_sequence.py`: 2 tests ensuring the startup intro
+  only consumes numbered animation frames and excludes `hero.txt`
 
 ## v0.1.4, tier-1 polish (2026-04-08)
 

@@ -308,8 +308,8 @@ class _WizardState:
     display_mode: str = "dark"
     density: str = "normal"
     # Default to the bundled "successor" intro for both: the emergence
-    # animation plays when the chat opens, and the title portrait
-    # serves as the empty-state hero panel until the user sends their
+    # animation plays when the chat opens, and the bundled hero art
+    # serves as the empty-state panel until the user sends their
     # first message. Both are fully skippable from inside the chat
     # (any keypress aborts the intro; submitting a message replaces
     # the empty state). The wizard's INTRO step lets the user opt
@@ -434,7 +434,7 @@ def _try_load_welcome_frame() -> BrailleArt | None:
     Returns None if the asset isn't available — the welcome screen
     falls back to text-only in that case. The frame lives at
     `src/successor/builtin/intros/successor/10-title.txt`, the same
-    final-frame portrait the intro animation holds at the end.
+    held title frame the intro animation ends on.
     """
     from ..loader import builtin_root
     candidate = builtin_root() / "intros" / "successor" / "10-title.txt"

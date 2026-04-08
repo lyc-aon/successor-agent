@@ -30,7 +30,7 @@ stale byte-decoding limitation that was already gone.
 
 ### Tests
 
-1014 → 1025. 11 new tests across two files:
+1014 → 1027. 13 new tests across three files:
 
 - `tests/test_key_decoder.py` (4 tests): mixed ASCII + UTF-8 decode,
   byte-by-byte reassembly, invalid-sequence recovery, and
@@ -38,6 +38,8 @@ stale byte-decoding limitation that was already gone.
 - `tests/test_unicode_editing.py` (7 tests): grapheme-aware
   backspace/delete coverage for chat input, search, config inline
   editing, the prompt editor, and the setup wizard
+- `tests/test_intro_sequence.py` (2 tests): startup intro frame
+  selection excludes `hero.txt` and preserves numbered ordering
 
 ## v0.1.4 — 2026-04-08
 

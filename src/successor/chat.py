@@ -1,4 +1,4 @@
-"""SuccessorChat — chat interface backed by a real local model.
+"""SuccessorChat — chat interface backed by a real model backend.
 
 The first chat-shaped piece of Successor. Wires together:
 
@@ -7,9 +7,9 @@ The first chat-shaped piece of Successor. Wires together:
 - The real key parser (input/keys.py — UTF-8, ESC sequences,
   bracketed paste, modifier-bearing arrows, all decoded into typed
   KeyEvents)
-- The llama.cpp streaming client (providers/llama.py — streams
-  reasoning_content + content channels separately, runs the request
-  on a worker thread, posts events to a thread-safe queue)
+- The provider clients (llama.cpp and OpenAI-compatible endpoints),
+  which stream reasoning/content chunks on a worker thread and post
+  events to a thread-safe queue
 
 Layout (alt-screen with locked footer):
 

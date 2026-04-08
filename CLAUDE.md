@@ -6,8 +6,8 @@ orientation; the deeper architectural docs live in `docs/`.
 
 ## What is Successor
 
-Custom Python agent harness for locally-run mid-grade models on
-llama.cpp. Pure Python 3.11+, zero runtime dependencies. The renderer
+Custom Python agent harness for local models and OpenAI-compatible
+endpoints. Pure Python 3.11+, zero runtime dependencies. The renderer
 is a five-layer cell-based pipeline where one module owns the screen
 end to end.
 
@@ -78,7 +78,7 @@ src/successor/builtin/       package-shipped data files loaded by the registries
   profiles/successor-dev.json             harness-development profile
   skills/successor-rendering-pattern.md   the One Rule + five-layer architecture
   tools/read_file.py                      example built-in tool
-  intros/successor/00..10-*.txt           11 braille frames for the bundled emergence intro
+  intros/successor/00..10-*.txt + hero.txt  11 intro frames + dedicated empty-state hero art
 
 src/successor/chat.py        SuccessorChat — chat interface (profile-aware, real llama.cpp streaming)
 src/successor/snapshot.py    headless render via *_demo_snapshot()
@@ -86,7 +86,7 @@ src/successor/recorder.py    record/replay session traces
 src/successor/cli.py         argparse subcommand dispatch (`successor` binary)
 src/successor/__main__.py    `python -m successor` entry point
 
-tests/                       pytest suite  1025+ tests, hermetic via SUCCESSOR_CONFIG_DIR
+tests/                       pytest suite  1027+ tests, hermetic via SUCCESSOR_CONFIG_DIR
 
 scripts/                     manual-run scripts (no auto-execution)
   e2e_chat_driver.py     scripted scenarios that drive a real chat against

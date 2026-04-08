@@ -52,7 +52,7 @@ def test_wizard_state_defaults() -> None:
     assert state.density == "normal"
     # Both intro animation and the empty-state hero art default to
     # "successor" so wizard-created profiles open with the bundled
-    # emergence animation + title portrait. Users can clear either
+    # emergence animation + bundled chat hero. Users can clear either
     # field via the wizard's INTRO step or by editing the saved JSON.
     assert state.intro_animation == "successor"
     assert state.chat_intro_art == "successor"

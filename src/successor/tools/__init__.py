@@ -9,12 +9,14 @@ Phase 6 ships the SCAFFOLD only:
     to load and you can see what the API looks like
 
 What phase 6 deliberately does NOT do:
-  - Wire tools into the chat (no agent loop yet)
+  - Dispatch these Python-import tools from the chat loop yet
   - Implement any dispatch / execution / sandboxing
   - Register the example tool with any model
 
-When the agent loop lands, it will consume this registry. Until then,
-tools are visible via `successor tools list` but inert.
+The built-in `bash` capability is separate and already wired through
+`tools_registry.py`. This module is only about the Python-import tool
+loader. Those tools are visible via `successor tools list` but still
+inert at runtime.
 
 Public surface:
     Tool             dataclass: name, description, schema, callable, source_path
