@@ -249,7 +249,7 @@ def test_backspace_in_recall_exits_and_deletes(temp_config_dir: Path) -> None:
 
 
 def test_esc_in_recall_restores_draft(temp_config_dir: Path) -> None:
-    """Esc is the 'I changed my mind' escape hatch — buffer reverts."""
+    """Esc is the 'I changed my mind' escape hatch. Buffer reverts."""
     chat = _new_chat(temp_config_dir)
     chat._history_add("from history")
     # Simulate the user typing something, then clearing it, then Up

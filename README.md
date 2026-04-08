@@ -153,6 +153,13 @@ Multi-line paste handling normalizes CRLF to `\n`, expands tabs to
 visible input rows you get an `↑ N more lines` overflow indicator so
 you know your content is still there.
 
+Input history recall works the way it does in any shell. Up arrow on
+an empty input loads the most recent submitted message. Up walks
+older, Down walks newer, Down past the newest restores any draft you
+were working on before you started recalling. Esc bails out of recall
+mode and brings the draft back. Any editing key turns the recalled
+text into a fresh draft you can edit normally.
+
 ## Commands
 
 ```
@@ -257,7 +264,7 @@ pytest
 
 The suite is hermetic. Each test gets its own
 `SUCCESSOR_CONFIG_DIR`, and bash dispatch tests use real shell
-builtins (no mocks). 974 tests at the time of writing. Run them
+builtins (no mocks). 1014 tests at the time of writing. Run them
 with `pytest -q` for a clean dot view, or `pytest -xvs` to follow
 individual tests.
 

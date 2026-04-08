@@ -86,7 +86,7 @@ src/successor/recorder.py    record/replay session traces
 src/successor/cli.py         argparse subcommand dispatch (`successor` binary)
 src/successor/__main__.py    `python -m successor` entry point
 
-tests/                       pytest suite  974+ tests, hermetic via SUCCESSOR_CONFIG_DIR
+tests/                       pytest suite  1014+ tests, hermetic via SUCCESSOR_CONFIG_DIR
 
 scripts/                     manual-run scripts (no auto-execution)
   e2e_chat_driver.py     scripted scenarios that drive a real chat against
@@ -253,9 +253,14 @@ reference implementation. Where we diverged:
 - ASCII-only typed input (no UTF-8 multi-byte input)
 - No arrow-key cursor navigation in the input box
 - No interrupt during successor response other than Ctrl+G
-- History recall (Up/Down in input)
 - Streaming tool execution (tools start AFTER stream commits)
 - Concurrent tool execution
 
-When the real key parser lands several of these get fixed together.
-See [`docs/concepts.md`](docs/concepts.md) for the broader roadmap.
+History recall (Up/Down arrows recall previous user messages,
+shell-style) shipped in v0.1.4. The empty-input + Up flow + the
+recall state machine live in `chat.py`; see `tests/test_input_history.py`
+for the contract.
+
+When the real key parser lands several of the remaining items get
+fixed together. See [`docs/concepts.md`](docs/concepts.md) for the
+broader roadmap.

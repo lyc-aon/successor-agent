@@ -23,7 +23,7 @@ Resolution order:
      that doesn't have a full animation directory).
 
 Returns None for any name that can't be resolved or any file that
-fails to parse — the chat falls back to painting the info panel
+fails to parse. The chat falls back to painting the info panel
 without a hero, gracefully. The chat still works either way.
 
 The loader is pure: no caching here. The chat instance caches the

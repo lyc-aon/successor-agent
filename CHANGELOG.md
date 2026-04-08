@@ -3,6 +3,90 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
+## v0.1.4 — 2026-04-08
+
+Tier-1 polish pass: closes the most visible UX gaps for cold visitors
+landing on the public repo, adds two new themes, and ships
+GitHub Actions CI.
+
+### Input history recall
+
+Up arrow on an empty input buffer enters recall mode and loads the
+most recent submitted message, the same way bash and zsh handle
+history. Up walks older, Down walks newer, Down past newest
+restores any draft you were typing before you started recalling.
+Esc bails out of recall mode and brings the draft back. Any
+editing key (typing, backspace) exits recall mode and lets you
+edit the recalled text as a fresh draft.
+
+The Up/Down handlers are layered: autocomplete dropdown wins
+first, then history recall, then chat scroll. Up never clobbers
+an in-progress draft because the recall gate requires an empty
+input buffer to trigger. The history is in-memory only and capped
+at 100 entries; consecutive duplicates are deduped so `/profile
+cycle` spam does not pollute the buffer.
+
+### Two new builtin themes
+
+- `paper`: warm cream and sepia palette with fountain-pen accents,
+  designed for daytime reading. Both dark (warm low-blue surface)
+  and light (cream document surface) modes.
+- `cobalt`: deep saturated cobalt blue dark theme with cool white
+  text plus a complementary warm accent. Most users will pick this
+  for night sessions.
+
+Successor now ships **four** builtin themes (steel, forge, paper,
+cobalt). All four use oklch color space for accurate perceptual
+blending between themes and dark/light modes.
+
+### Chat empty-state hero swap
+
+The chat empty-state hero panel was loading the final frame of the
+emergence animation, which has the SUCCESSOR title text painted
+across the top. Reading the title text once you are already in the
+chat felt redundant. Swapped to a new `hero.txt` file (the soldier
+portrait without the title overlaid). The wizard welcome screen
+still loads the title frame because the welcome screen wants the
+"welcome to SUCCESSOR" framing.
+
+The loader prefers `hero.txt` and falls back to `10-title.txt` for
+any custom intros that have not added a hero file yet.
+
+### CONTRIBUTING.md + GitHub Actions CI
+
+- New `CONTRIBUTING.md` covers dev setup, test commands, the One
+  Rule reference, the anti-slop discipline for new docs, and a
+  PR process.
+- New `.github/workflows/test.yml` runs pytest on push to master
+  and every PR, against Python 3.11 / 3.12 / 3.13 in matrix.
+  Caught a real Python 3.13-only `from copy import replace`
+  import on the very first run that broke 3.11 / 3.12 (the import
+  was dead code, fixed in the same release).
+- README picks up CI status, Apache 2.0 license, and Python 3.11+
+  badges at the top.
+
+### pyproject.toml description
+
+The package description on PyPI / `pip show` / GitHub social
+previews used to say "for local llama.cpp models" which understated
+the harness. Updated to mention OpenAI + OpenRouter alongside
+llama.cpp, the renderer architecture, and the autocompactor.
+
+### Tests
+
+974 → 1014. 40 new tests across three files:
+
+- `tests/test_input_history.py` (24 tests): the full recall state
+  machine including ring buffer, dedupe, cap, Up/Down navigation,
+  in-recall edits, Esc restore, and submit interactions
+- `tests/test_tier1_polish.py` (13 tests): both new themes load,
+  full palettes, distinct bg colors, chat construction with each
+  theme, pyproject description regex check, CI workflow YAML
+  validation, README badge presence
+- `tests/test_intro_art.py` picked up 3 new tests for the hero.txt
+  loader preference + the legacy 10-title.txt fallback + a density
+  check confirming the bundled hero is the no-text variant
+
 ## v0.1.3 — 2026-04-07
 
 Configurable autocompactor + first-launch polish.

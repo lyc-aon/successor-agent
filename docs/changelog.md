@@ -11,6 +11,102 @@ unit on top of phase 0.
 
 ---
 
+## v0.1.4, tier-1 polish (2026-04-08)
+
+Visible-gap closing pass after v0.1.3 went public. Four pieces of
+polish that move the project from "shipped" to "ready to invite
+people in", plus a chat hero swap based on user feedback.
+
+### What landed
+
+- `src/successor/chat.py` picks up an in-memory input history ring
+  buffer (capped at `INPUT_HISTORY_MAX = 100`) plus the recall
+  state machine. Up arrow on an empty input enters recall mode and
+  loads the most recent submitted message; Up walks older, Down
+  walks newer, Down past the newest restores the saved draft. Any
+  editing key (typing, backspace) exits recall mode and lets the
+  user edit the recalled text as a fresh draft. Esc bails and
+  brings the saved draft back. Submit always exits recall mode and
+  adds the new entry to the history (deduped against the most
+  recent entry to avoid `/profile cycle` spam).
+- The Up/Down handlers in `_handle_key_event` are now layered:
+  autocomplete dropdown wins first, then history recall (when the
+  buffer is empty AND history is non-empty), then chat scroll. Up
+  never clobbers an in-progress draft because the recall gate
+  requires an empty buffer to trigger.
+- Two new builtin themes shipped:
+  `src/successor/builtin/themes/paper.json` (warm cream + sepia,
+  fountain-pen accents) and `cobalt.json` (deep saturated cobalt
+  blue dark with cool white text). Both use oklch color space.
+  Successor now ships four builtin themes total.
+- `src/successor/builtin/intros/successor/hero.txt` ships as the
+  canonical chat empty-state hero file, replacing the 10-title.txt
+  convention for the chat surface only. The hero is the soldier
+  full body without the SUCCESSOR title text overlaid; the title
+  frame is still loaded by the wizard welcome screen because the
+  welcome screen wants the title framing.
+- `src/successor/render/intro_art.py` updated to prefer hero.txt
+  and fall back to 10-title.txt for legacy custom intros.
+- New `.github/workflows/test.yml` runs pytest on push to master
+  and every PR against Python 3.11 / 3.12 / 3.13 in matrix. The
+  very first CI run caught a Python-3.13-only `from copy import
+  replace` import in `tests/test_context_fill_bar.py` that had
+  been working silently locally because the dev environment was on
+  3.13. The import was dead code; deleting it restored the
+  Python 3.11+ support claim.
+- New `CONTRIBUTING.md` covers dev setup, test commands, the One
+  Rule reference, the anti-slop discipline, and the PR process.
+- README picks up three badges at the top: CI status, Apache 2.0
+  license, Python 3.11+. Standard convention for maintained OSS.
+- `pyproject.toml` description updated. Old text said "for local
+  llama.cpp models" which understated the harness; new text
+  mentions OpenAI + OpenRouter alongside llama.cpp, references
+  the renderer architecture, and stays under PyPI's 300 char cap.
+- Version bumped to 0.1.4 in `pyproject.toml` and
+  `src/successor/__init__.py`.
+
+### Tests
+
+974 to 1014. 40 new tests across three files:
+
+- `tests/test_input_history.py`: 24 tests for the full recall
+  state machine (ring buffer + dedupe + cap, Up/Down navigation
+  including the at-oldest no-op edge case, in-recall edits, Esc
+  restore, submit interactions, recalled-text-unchanged dedupe).
+- `tests/test_tier1_polish.py`: 13 tests covering the new themes
+  loading, full palette completeness, distinct bg colors, chat
+  construction with each theme, the pyproject description regex
+  check, the CI workflow YAML validity + branch targeting, and
+  the README badge presence.
+- `tests/test_intro_art.py` picked up 3 new tests for the hero.txt
+  loader preference, the legacy 10-title.txt fallback, and a
+  density check confirming the bundled hero is the no-text
+  variant.
+
+### Fix-up commits in the same release
+
+- `486486e test: drop dead Python 3.13-only import that broke CI
+  on 3.11/3.12`. Caught by the new CI matrix on its first run.
+- `3e08218 chat hero: switch empty-state portrait to soldier
+  without SUCCESSOR title`. The hero swap based on user feedback
+  after seeing the v0.1.4 candidate.
+
+### Doc cross-check pass
+
+After all of the above shipped, did one more pass over README,
+CHANGELOG, NOTICE, CLAUDE.md, CONTRIBUTING.md, and every doc
+under docs/ to catch stale references. Found and fixed:
+
+- Three stale "974 tests" references (README, CLAUDE.md,
+  CONTRIBUTING.md) updated to 1014.
+- CLAUDE.md "Things deliberately deferred" still listed
+  "History recall (Up/Down in input)" even though we just
+  shipped it. Removed and added a forward-pointer note to the
+  shipped feature.
+- Two prose em dashes that leaked into recently-touched files
+  (intro_art.py docstring + test_input_history.py docstring)
+  cleaned to commas.
+
 ## v0.1.3, configurable autocompactor (2026-04-08)
 
 The autocompactor got a proper chat-layer gate, percentage-based

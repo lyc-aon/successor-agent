@@ -32,7 +32,7 @@ The full suite is hermetic. Each test gets its own
 no mocks. Visual snapshot tests run headless against the renderer
 without spawning a TTY.
 
-There are 974+ tests at the time of writing. Please add tests for
+There are 1014+ tests at the time of writing. Please add tests for
 any new feature you ship. Visual features should have a snapshot
 test that asserts grid contents directly via the `wizard_demo_snapshot`
 or `chat_demo_snapshot` helpers in `src/successor/snapshot.py`.
