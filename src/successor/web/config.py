@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -65,6 +66,7 @@ class HolonetConfig:
 class BrowserConfig:
     headless: bool = True
     channel: str = "chrome"
+    python_executable: str = ""
     executable_path: str = ""
     user_data_dir: str = ""
     viewport_width: int = 1440
@@ -83,6 +85,10 @@ class BrowserConfig:
 
     def resolved_executable_path(self) -> str:
         return os.path.expanduser(os.path.expandvars(self.executable_path)).strip()
+
+    def resolved_python_executable(self) -> str:
+        value = os.path.expanduser(os.path.expandvars(self.python_executable)).strip()
+        return value or sys.executable
 
 
 def resolve_holonet_config(profile: Any) -> HolonetConfig:
@@ -125,6 +131,7 @@ def resolve_browser_config(profile: Any) -> BrowserConfig:
         return BrowserConfig(
             headless=bool(raw.get("headless", True)),
             channel=str(raw.get("channel", "chrome") or "chrome").strip(),
+            python_executable=str(raw.get("python_executable", "") or ""),
             executable_path=str(raw.get("executable_path", "") or ""),
             user_data_dir=str(raw.get("user_data_dir", "") or ""),
             viewport_width=width,

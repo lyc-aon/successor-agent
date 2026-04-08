@@ -7,6 +7,7 @@ import argparse
 from successor.cli import cmd_doctor
 from successor.profiles import Profile
 from successor.providers.llama import LlamaCppRuntimeCapabilities
+from successor.web.browser import BrowserRuntimeStatus
 
 
 class _FakeClient:
@@ -88,8 +89,15 @@ def test_doctor_reports_holonet_and_browser_status(
         lambda cfg: _FakeClient(),
     )
     monkeypatch.setattr(
-        "successor.web.browser.playwright_available",
-        lambda: True,
+        "successor.web.browser_runtime_status",
+        lambda *_args, **_kwargs: BrowserRuntimeStatus(
+            package_available=True,
+            python_executable="/usr/bin/python3",
+            using_external_runtime=True,
+            channel="chrome",
+            executable_path="",
+            user_data_dir="/tmp/browser",
+        ),
     )
 
     assert cmd_doctor(argparse.Namespace()) == 0
@@ -97,3 +105,4 @@ def test_doctor_reports_holonet_and_browser_status(
     assert "holonet     default=auto" in out
     assert "holonet ok  europe_pmc, clinicaltrials, biomedical_research" in out
     assert "browser     playwright ready" in out
+    assert "browser py  /usr/bin/python3 (external runtime)" in out

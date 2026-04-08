@@ -94,7 +94,7 @@ src/successor/session_trace.py normal chat runtime JSONL traces for postmortem d
 src/successor/cli.py         argparse subcommand dispatch (`successor` binary)
 src/successor/__main__.py    `python -m successor` entry point
 
-tests/                       pytest suite  1097+ tests, hermetic via SUCCESSOR_CONFIG_DIR
+tests/                       pytest suite  1110+ tests, hermetic via SUCCESSOR_CONFIG_DIR
 
 scripts/                     manual-run scripts (no auto-execution)
   e2e_chat_driver.py     scripted scenarios that drive a real chat against

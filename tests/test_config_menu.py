@@ -1421,6 +1421,54 @@ def test_snapshot_tools_overlay_renders(temp_config_dir: Path) -> None:
     assert "space toggles" in plain
 
 
+def test_skills_edit_opens_overlay_and_toggles_live(temp_config_dir: Path) -> None:
+    menu = SuccessorConfig()
+    menu._settings_cursor = _field_idx("skills")
+    menu._begin_edit()
+    assert menu._tools_edit is not None
+
+    initial = menu._current_profile().skills
+    menu._handle_tools_edit_key(KeyEvent(char=" "))
+    after_first = menu._current_profile().skills
+    assert after_first != initial
+
+    menu._handle_tools_edit_key(KeyEvent(char=" "))
+    after_second = menu._current_profile().skills
+    assert after_second == initial
+
+
+def test_snapshot_skills_overlay_renders(temp_config_dir: Path) -> None:
+    menu = SuccessorConfig()
+    menu._settings_cursor = _field_idx("skills")
+    menu._begin_edit()
+
+    from successor.render.cells import Grid
+    g = Grid(30, 120)
+    menu.on_tick(g)
+    plain = render_grid_to_plain(g)
+    assert "browser-operator" in plain
+    assert "holonet-research" in plain
+    assert "space toggles" in plain
+
+
+def test_enabling_web_tools_seeds_recommended_skills_once(temp_config_dir: Path) -> None:
+    from dataclasses import replace
+
+    menu = SuccessorConfig()
+    cur = replace(menu._current_profile(), tools=("bash",), skills=())
+    menu._working_profiles[menu._profile_cursor] = cur
+    menu._set_field_on_profile(
+        menu._profile_cursor,
+        _SETTINGS_TREE[_field_idx("tools")],
+        ("bash", "holonet", "browser"),
+    )
+    assert menu._current_profile().skills == (
+        "holonet-research",
+        "biomedical-research",
+        "browser-operator",
+    )
+
+
 # ─── Bash safety flags (yolo mode etc) ───
 
 

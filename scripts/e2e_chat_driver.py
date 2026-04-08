@@ -97,6 +97,10 @@ class Scenario:
         that must appear in the captured `turn_NN_plain.txt` render for
         that prompt. This is the main renderer-level regression hook for
         live E2E scenarios.
+      - assert_turn_tool_verbs_contains: maps turn index -> required tool
+        verbs that must appear in `turn_NN_messages.json`. Use this for
+        tool cards that may have legitimately scrolled off the captured
+        viewport by the end of a long turn.
       - assert_max_total_cards: ceiling on total tool cards across the
         whole scenario (catches loops).
       - assert_min_total_cards: floor (catches "model didn't run anything").
@@ -112,6 +116,7 @@ class Scenario:
     assert_no_files: list[str] = field(default_factory=list)
     assert_min_text_in_final: list[str] = field(default_factory=list)
     assert_turn_plain_contains: dict[int, list[str]] = field(default_factory=dict)
+    assert_turn_tool_verbs_contains: dict[int, list[str]] = field(default_factory=dict)
     assert_max_total_cards: int | None = None
     assert_min_total_cards: int | None = None
     assert_max_agent_turns_per_prompt: int | None = None
@@ -624,6 +629,43 @@ def evaluate_assertions(
                 detail=f"all {len(required_substrings)} substrings present",
             ))
 
+    for turn_index, required_verbs in scenario.assert_turn_tool_verbs_contains.items():
+        turn_path = out_dir / f"turn_{turn_index:02d}_messages.json"
+        if not turn_path.exists():
+            results.append(AssertionResult(
+                name=f"turn_tools:{turn_index}",
+                passed=False,
+                detail=f"missing artifact {turn_path}",
+            ))
+            continue
+        try:
+            payload = json.loads(turn_path.read_text())
+        except Exception as exc:  # noqa: BLE001
+            results.append(AssertionResult(
+                name=f"turn_tools:{turn_index}",
+                passed=False,
+                detail=f"invalid JSON in {turn_path}: {type(exc).__name__}: {exc}",
+            ))
+            continue
+        seen_verbs = {
+            str(entry.get("tool_card", {}).get("verb") or "").strip()
+            for entry in payload
+            if isinstance(entry, dict) and isinstance(entry.get("tool_card"), dict)
+        }
+        missing = [verb for verb in required_verbs if verb not in seen_verbs]
+        if missing:
+            results.append(AssertionResult(
+                name=f"turn_tools:{turn_index}",
+                passed=False,
+                detail=f"missing tool verbs {missing}; saw {sorted(seen_verbs)}",
+            ))
+        else:
+            results.append(AssertionResult(
+                name=f"turn_tools:{turn_index}",
+                passed=True,
+                detail=f"all {len(required_verbs)} tool verbs present",
+            ))
+
     # Card count assertions
     total_cards = sum(s.tool_cards_appended for s in all_stats)
     if scenario.assert_max_total_cards is not None:
@@ -970,6 +1012,28 @@ def _enable_holonet_tool(chat: SuccessorChat) -> None:
     chat.client = make_provider(profile.provider)
 
 
+def _enable_holonet_tool_with_skills(chat: SuccessorChat) -> None:
+    profile = replace(
+        chat.profile,
+        tools=("holonet",),
+        skills=("holonet-research", "biomedical-research"),
+        tool_config={
+            "holonet": {
+                "default_provider": "auto",
+            }
+        },
+    )
+    chat.profile = profile
+    chat.system_prompt = (
+        "You are successor — a focused, brief assistant. "
+        "This test session exposes holonet plus any relevant enabled skills. "
+        "If a listed skill clearly matches the request, load it before using "
+        "holonet. Do not invent bash commands or alternate tools. After the "
+        "tool returns, answer in one short paragraph."
+    )
+    chat.client = make_provider(profile.provider)
+
+
 def _enable_browser_tool_with_fixture(chat: SuccessorChat) -> None:
     workspace = Path(
         ((chat.profile.tool_config or {}).get("bash") or {}).get("working_directory") or "."
@@ -1022,6 +1086,23 @@ def _enable_browser_tool_with_fixture(chat: SuccessorChat) -> None:
     chat.messages = [
         _Message("user", f"Local browser fixture URL: {fixture.as_uri()}")
     ]
+
+
+def _enable_browser_tool_with_skill(chat: SuccessorChat) -> None:
+    _enable_browser_tool_with_fixture(chat)
+    profile = replace(
+        chat.profile,
+        skills=("browser-operator",),
+    )
+    chat.profile = profile
+    chat.system_prompt = (
+        "You are successor — a focused, brief assistant. "
+        "This test session exposes the browser tool plus any relevant enabled skills. "
+        "If a listed skill clearly matches the request, load it before using the "
+        "browser. Do not invent bash commands or alternate tools. After the tool "
+        "returns, answer in one short paragraph."
+    )
+    chat.client = make_provider(profile.provider)
 
 
 SCENARIOS: dict[str, Scenario] = {
@@ -1244,6 +1325,22 @@ SCENARIOS: dict[str, Scenario] = {
         },
         assert_each_settles=True,
     ),
+    "holonet_skill_biomedical": Scenario(
+        name="holonet_skill_biomedical",
+        description="Model loads the biomedical skill, then uses holonet against live biomedical APIs",
+        pre_setup=_enable_holonet_tool_with_skills,
+        prompts=[
+            "Find one semaglutide obesity paper and one registered clinical trial, then tell me one trial ID and the paper title.",
+        ],
+        assert_min_text_in_final=["semaglutide"],
+        assert_turn_plain_contains={
+            1: ["biomedical-search"],
+        },
+        assert_turn_tool_verbs_contains={
+            1: ["load-skill", "biomedical-search"],
+        },
+        assert_each_settles=True,
+    ),
     "browser_local_fixture": Scenario(
         name="browser_local_fixture",
         description="Use the Playwright browser tool on a local interactive fixture page",
@@ -1254,6 +1351,22 @@ SCENARIOS: dict[str, Scenario] = {
         assert_min_text_in_final=["successor browser test"],
         assert_turn_plain_contains={
             1: ["browser-open", "browser-type", "browser-click"],
+        },
+        assert_each_settles=True,
+    ),
+    "browser_skill_local_fixture": Scenario(
+        name="browser_skill_local_fixture",
+        description="Model loads the browser skill, then uses the Playwright browser tool on a local fixture",
+        pre_setup=_enable_browser_tool_with_skill,
+        prompts=[
+            "Open the local browser fixture URL already in context, type 'successor browser test' into the Message field, click Apply, then tell me the final visible result text.",
+        ],
+        assert_min_text_in_final=["successor browser test"],
+        assert_turn_plain_contains={
+            1: ["browser-type", "browser-click"],
+        },
+        assert_turn_tool_verbs_contains={
+            1: ["load-skill", "browser-open", "browser-type", "browser-click"],
         },
         assert_each_settles=True,
     ),

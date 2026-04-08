@@ -14,8 +14,10 @@ from successor.skills import (
     SKILL_REGISTRY,
     Skill,
     all_skills,
+    build_skill_discovery_section,
     get_skill,
     parse_skill_file,
+    recommended_skills_for_tools,
 )
 from successor.skills.skill import _split_frontmatter
 
@@ -28,6 +30,8 @@ def test_split_frontmatter_happy_path() -> None:
         "---\n"
         "name: test-skill\n"
         "description: a test skill\n"
+        "when_to_use: when testing routing\n"
+        "allowed-tools: holonet, browser\n"
         "---\n"
         "\n"
         "# Body\n"
@@ -36,7 +40,12 @@ def test_split_frontmatter_happy_path() -> None:
     )
     fm, body = _split_frontmatter(text)
     assert fm is not None
-    assert fm == {"name": "test-skill", "description": "a test skill"}
+    assert fm == {
+        "name": "test-skill",
+        "description": "a test skill",
+        "when_to_use": "when testing routing",
+        "allowed-tools": "holonet, browser",
+    }
     assert body.startswith("# Body")
 
 
@@ -97,6 +106,8 @@ def test_parse_minimal_skill(tmp_path: Path) -> None:
     assert skill is not None
     assert skill.name == "minimal"
     assert skill.description == ""
+    assert skill.when_to_use == ""
+    assert skill.allowed_tools == ()
     assert skill.body == "body"
 
 
@@ -106,6 +117,8 @@ def test_parse_full_skill(tmp_path: Path) -> None:
         "---\n"
         "name: TheBigOne\n"
         "description: when to use this skill\n"
+        "when_to_use: use when the route matters\n"
+        "allowed-tools: holonet, browser\n"
         "---\n"
         "\n"
         "# Heading\n"
@@ -117,6 +130,8 @@ def test_parse_full_skill(tmp_path: Path) -> None:
     assert skill is not None
     assert skill.name == "thebigone"  # lowercased
     assert skill.description == "when to use this skill"
+    assert skill.when_to_use == "use when the route matters"
+    assert skill.allowed_tools == ("holonet", "browser")
     assert "# Heading" in skill.body
     assert "multiple" in skill.body
 
@@ -255,3 +270,41 @@ def test_all_skills_returns_loaded(temp_config_dir: Path) -> None:
     assert len(skills) >= 1  # at least the builtin
     names = [s.name for s in skills]
     assert "successor-rendering-pattern" in names
+
+
+def test_builtin_browser_and_holonet_skills_load(temp_config_dir: Path) -> None:
+    SKILL_REGISTRY.reload()
+    names = {skill.name for skill in all_skills()}
+    assert "browser-operator" in names
+    assert "holonet-research" in names
+    assert "biomedical-research" in names
+
+
+def test_build_skill_discovery_section_lists_enabled_skills(temp_config_dir: Path) -> None:
+    SKILL_REGISTRY.reload()
+    section = build_skill_discovery_section(
+        [
+            skill
+            for skill in (
+                get_skill("browser-operator"),
+                get_skill("holonet-research"),
+            )
+            if skill is not None
+        ],
+        context_window_tokens=262_144,
+    )
+    assert "Available Skills" in section
+    assert "browser-operator" in section
+    assert "holonet-research" in section
+    assert "call the `skill` tool" in section
+
+
+def test_recommended_skills_for_tools_returns_builtin_web_defaults(
+    temp_config_dir: Path,
+) -> None:
+    SKILL_REGISTRY.reload()
+    assert recommended_skills_for_tools(("holonet", "browser")) == (
+        "holonet-research",
+        "biomedical-research",
+        "browser-operator",
+    )

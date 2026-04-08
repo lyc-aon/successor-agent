@@ -176,9 +176,20 @@ console-error checks all happen in one place.
 
 Both tools are configured under `/config` once enabled. `holonet` has
 per-provider toggles plus inline key / key-file fields. `browser` has
-`headless`, `channel`, `executable_path`, `user_data_dir`, viewport,
-timeout, and `screenshot_on_error`. The full reference is in
+`headless`, `channel`, `python_executable`, `executable_path`,
+`user_data_dir`, viewport, timeout, and `screenshot_on_error`. The full reference is in
 [`docs/web-tools.md`](docs/web-tools.md).
+
+Successor also ships focused helper skills for these tools:
+
+- `holonet-research`
+- `biomedical-research`
+- `browser-operator`
+
+Profiles created through `successor setup` auto-seed the matching
+built-in skills when you enable `holonet` or `browser`. Existing
+profiles can edit the skill list later in `/config` under the
+`extensions` section.
 
 `/budget` shows the live token fill, the warning / autocompact /
 blocking thresholds derived from the active profile, and the round
@@ -224,6 +235,13 @@ that actually needs a real page session. A persistent browser manager
 owns one session per profile and exposes navigation, clicking, typing,
 waiting, text extraction, screenshots, and console-error checks through
 the same native tool-call path the rest of the chat already uses.
+
+Browser and holonet usage can now be taught on demand instead of being
+hardcoded into every turn's base prompt. The system prompt gets a
+compact available-skills list, and the model loads the full skill body
+through the internal `skill` tool only when the task clearly matches
+it. That keeps the base prompt lean while still giving the model
+focused browser/research workflows when those tools are enabled.
 
 Background scheduling is now explicit per profile: `serial` keeps one
 background model lane, `slots` uses llama.cpp's reported slot count

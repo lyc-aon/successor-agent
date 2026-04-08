@@ -11,6 +11,98 @@ unit on top of phase 0.
 
 ---
 
+## v0.1.14, on-demand web/browser skills + external Playwright runtime (2026-04-08)
+
+The holonet/browser tool pass was functional, but two important product
+gaps remained:
+
+- the model had schemas and short guidance, but not a real on-demand
+  skill path for web/browser workflows
+- the Playwright tool assumed the main Successor interpreter owned the
+  Playwright package, which was too rigid for local setups where the
+  system Python already had a working install
+
+This pass closes both.
+
+### What landed
+
+- `src/successor/skills/prompt.py`:
+  - compact available-skills listing for the system prompt
+  - full model-facing `<skill-loaded>` payloads
+  - duplicate-load suppression payloads
+  - built-in recommended-skill mapping for `holonet` and `browser`
+- New bundled skills:
+  - `src/successor/builtin/skills/holonet-research.md`
+  - `src/successor/builtin/skills/biomedical-research.md`
+  - `src/successor/builtin/skills/browser-operator.md`
+- `src/successor/tools_registry.py`:
+  - hidden internal native `skill` tool descriptor/schema
+  - user-visible tool filtering so setup/config do not expose the
+    internal helper as a normal toggle
+- `src/successor/chat.py`:
+  - runtime filtering for usable skills based on enabled tools plus
+    browser runtime availability
+  - available-skills prompt injection per turn
+  - native `skill` dispatch with short user-facing cards and richer
+    model-facing payloads
+- `src/successor/wizard/setup.py`:
+  - setup-created profiles now auto-seed the matching built-in skills
+    when `holonet` or `browser` is enabled
+- `src/successor/wizard/config.py`:
+  - `/config` can edit the `skills` list directly
+  - when a previously skill-empty profile first enables `holonet` or
+    `browser`, the matching built-in skills are seeded automatically
+- `src/successor/web/browser.py` + new
+  `src/successor/web/browser_helper.py`:
+  - browser runtime detection across the current interpreter and an
+    optional external Python
+  - persistent helper process for Playwright sessions when the chosen
+    runtime is external
+- `src/successor/web/config.py`:
+  - new `browser.python_executable` setting
+- `src/successor/cli.py`:
+  - `successor doctor` now reports the resolved Playwright Python path
+    and whether it is external
+  - `successor skills` now describes the real chat integration and
+    prints `when:` / `tools:` metadata
+
+### Why this shape
+
+This follows the good part of free-code's skill model: keep the base
+prompt lean, give the model a compact discovery list first, and load the
+full specialized instructions only when the task clearly warrants it.
+The exact hosted-provider prompt-cache tricks from free-code were not
+the relevant local optimization; the useful transferable idea was
+on-demand specialization without permanent prompt bloat.
+
+The external-runtime browser bridge follows the same local-first logic.
+Base Successor stays lean, but the browser tool can still work when the
+user already has Playwright somewhere else on the machine.
+
+### Verification
+
+- Focused regression slices:
+  - `tests/test_skills.py`
+  - `tests/test_wizard.py`
+  - `tests/test_config_menu.py`
+  - `tests/test_cli_doctor.py`
+  - `tests/test_browser_tool.py`
+  - `tests/test_chat_web_tools.py`
+  - `tests/test_config_menu_web.py`
+  - `tests/test_web_config.py`
+  - result: `191 passed in 0.56s`
+- Full local suite: `1110 passed in 12.23s`
+- Live local llama.cpp/Qwopus E2E:
+  - `holonet_skill_biomedical --runs 2` passed
+  - `browser_skill_local_fixture --runs 2` passed
+- Visual artifact review:
+  - `/tmp/successor-e2e/holonet_skill_biomedical/run_1/turn_01_plain.txt`
+  - `/tmp/successor-e2e/browser_skill_local_fixture/run_1/turn_01_plain.txt`
+  confirmed the skill-load cards render before the real holonet/browser
+  cards on the final behavior path
+  and the final browser pass no longer wastes a 20-second timeout on
+  the initial typed-input action
+
 ## v0.1.13, holonet + optional Playwright browser (2026-04-08)
 
 This pass adds the first real non-bash web capability set to Successor.

@@ -90,6 +90,7 @@ from ..profiles import (
     all_profiles,
     get_active_profile,
 )
+from ..skills import SKILL_REGISTRY, all_skills, get_skill, recommended_skills_for_tools
 from ..render.app import App
 from ..render.braille import BrailleArt
 from ..render.cells import (
@@ -120,7 +121,7 @@ from ..render.theme import (
     toggle_display_mode,
 )
 from ..subagents.config import SUBAGENT_STRATEGIES
-from ..tools_registry import AVAILABLE_TOOLS
+from ..tools_registry import AVAILABLE_TOOLS, selectable_tool_names
 from ..web.config import HOLO_DEFAULT_PROVIDER_OPTIONS
 from .prompt_editor import PromptEditor
 
@@ -254,7 +255,7 @@ _SETTINGS_TREE: tuple[_SettingField, ...] = (
     ),
     _SettingField(
         name="skills", label="skills", section="extensions",
-        kind=FieldKind.READONLY, hint="phase 5 not yet wired",
+        kind=FieldKind.TOOLS_TOGGLE,
     ),
     _SettingField(
         name="tools", label="tools", section="",
@@ -338,6 +339,10 @@ _SETTINGS_TREE: tuple[_SettingField, ...] = (
     ),
     _SettingField(
         name="browser_channel", label="channel", section="",
+        kind=FieldKind.TEXT,
+    ),
+    _SettingField(
+        name="browser_python_executable", label="python runtime", section="",
         kind=FieldKind.TEXT,
     ),
     _SettingField(
@@ -559,6 +564,7 @@ class SuccessorConfig(App):
         # show up if they were added since startup
         THEME_REGISTRY.reload()
         PROFILE_REGISTRY.reload()
+        SKILL_REGISTRY.reload()
 
         # ─── Profile state ───
         # Snapshot the registry at config-open time. _initial holds the
@@ -716,6 +722,32 @@ class SuccessorConfig(App):
             if _field_visible_for_profile(profile, _SETTINGS_TREE[i])
         )
 
+    def _multi_select_names(self, field: _SettingField) -> tuple[str, ...]:
+        """Return the selectable option names for tools/skills overlays."""
+        if field.name == "tools":
+            return selectable_tool_names()
+        if field.name == "skills":
+            return tuple(skill.name for skill in all_skills())
+        return ()
+
+    def _multi_select_label_desc(
+        self,
+        field: _SettingField,
+        name: str,
+    ) -> tuple[str, str]:
+        """Display label + secondary description for a multi-select row."""
+        if field.name == "tools":
+            descriptor = AVAILABLE_TOOLS[name]
+            return descriptor.label, descriptor.description
+        skill = get_skill(name)
+        if skill is None:
+            return name, ""
+        desc = skill.description or skill.when_to_use
+        if skill.allowed_tools:
+            tools = ", ".join(skill.allowed_tools)
+            desc = f"{desc} [tools: {tools}]" if desc else f"tools: {tools}"
+        return skill.name, desc
+
     def _first_editable_at_or_after(self, start_idx: int) -> int:
         """Find the first editable row index at or after start_idx."""
         editable = self._editable_visible_indices() or _EDITABLE_INDICES
@@ -755,6 +787,10 @@ class SuccessorConfig(App):
             # Show a truncated preview of the prompt for the row label
             return (profile.system_prompt[:24] + "…") if len(profile.system_prompt) > 24 else profile.system_prompt
         if field.name == "skills":
+            if not profile.skills:
+                return "(none)"
+            if len(profile.skills) == 1:
+                return profile.skills[0]
             return f"({len(profile.skills)})"
         if field.name == "tools":
             if not profile.tools:
@@ -855,7 +891,14 @@ class SuccessorConfig(App):
         elif field.name == "system_prompt":
             new_profile = replace(old_profile, system_prompt=new_value)
         elif field.name == "tools":
-            new_profile = replace(old_profile, tools=tuple(new_value))
+            new_tools = tuple(new_value)
+            new_skills = tuple(old_profile.skills)
+            added_tools = set(new_tools) - set(old_profile.tools)
+            if not new_skills and added_tools.intersection({"holonet", "browser"}):
+                new_skills = recommended_skills_for_tools(new_tools)
+            new_profile = replace(old_profile, tools=new_tools, skills=new_skills)
+        elif field.name == "skills":
+            new_profile = replace(old_profile, skills=tuple(new_value))
         elif field.name.startswith("bash_"):
             # Write into a fresh tool_config dict so the compare with
             # the initial snapshot is clean.
@@ -963,6 +1006,8 @@ class SuccessorConfig(App):
             return profile.intro_animation
         if field.name == "system_prompt":
             return profile.system_prompt
+        if field.name == "skills":
+            return tuple(profile.skills)
         if field.name == "tools":
             return tuple(profile.tools)
         if field.name.startswith("bash_"):
@@ -1012,6 +1057,7 @@ class SuccessorConfig(App):
             defaults = {
                 "headless": True,
                 "channel": "chrome",
+                "python_executable": "",
                 "executable_path": "",
                 "user_data_dir": "",
                 "viewport_width": 1440,
@@ -1662,8 +1708,8 @@ class SuccessorConfig(App):
         if edit is None:
             return
         field = _SETTINGS_TREE[edit.field_idx]
-        tool_names = tuple(AVAILABLE_TOOLS.keys())
-        if not tool_names:
+        option_names = self._multi_select_names(field)
+        if not option_names:
             self._tools_edit = None
             return
 
@@ -1678,14 +1724,14 @@ class SuccessorConfig(App):
             self._tools_edit = None
             return
         if event.key == Key.UP:
-            edit.cursor = (edit.cursor - 1) % len(tool_names)
+            edit.cursor = (edit.cursor - 1) % len(option_names)
             return
         if event.key == Key.DOWN:
-            edit.cursor = (edit.cursor + 1) % len(tool_names)
+            edit.cursor = (edit.cursor + 1) % len(option_names)
             return
         if event.is_char and event.char == " ":
             # Toggle the highlighted tool on/off in the live profile
-            name = tool_names[edit.cursor]
+            name = option_names[edit.cursor]
             current = list(
                 self._profile_value_for_field_raw(self._current_profile(), field) or ()
             )
@@ -2472,20 +2518,20 @@ class SuccessorConfig(App):
         if edit is None:
             return
         field = _SETTINGS_TREE[edit.field_idx]
-        tool_names = tuple(AVAILABLE_TOOLS.keys())
-        if not tool_names:
+        option_names = self._multi_select_names(field)
+        if not option_names:
             return
 
         # Compute the overlay box dimensions. Each row shows the
         # checkbox + label + short description, so we want a wider box
         # than the cycle overlay.
         longest_desc = max(
-            len(AVAILABLE_TOOLS[n].description) for n in tool_names
+            len(self._multi_select_label_desc(field, n)[1]) for n in option_names
         )
-        longest_label = max(len(AVAILABLE_TOOLS[n].label) for n in tool_names)
+        longest_label = max(len(self._multi_select_label_desc(field, n)[0]) for n in option_names)
         desired_w = longest_label + longest_desc + 12
         box_w = min(middle_w - 4, max(32, desired_w))
-        box_h = min(body_bottom - body_top - 2, len(tool_names) + 4)
+        box_h = min(body_bottom - body_top - 2, len(option_names) + 4)
 
         # Anchor to the row being edited — same walk as the cycle overlay
         list_top = body_top + 4
@@ -2526,16 +2572,14 @@ class SuccessorConfig(App):
 
         # Current enabled set (read live from the profile so toggles
         # reflect immediately)
-        enabled = set(
-            self._profile_value_for_field_raw(self._current_profile(), field) or ()
-        )
+        enabled = set(self._profile_value_for_field_raw(self._current_profile(), field) or ())
 
         # Rows
-        for i, name in enumerate(tool_names):
+        for i, name in enumerate(option_names):
             row_y = box_y + 1 + i
             if row_y >= box_y + box_h - 1:
                 break
-            descriptor = AVAILABLE_TOOLS[name]
+            label, desc = self._multi_select_label_desc(field, name)
             is_cursor = i == edit.cursor
             is_on = name in enabled
             check = "[✓]" if is_on else "[ ]"
@@ -2546,7 +2590,7 @@ class SuccessorConfig(App):
                 style=Style(bg=row_bg),
             )
             cursor_glyph = "▸" if is_cursor else " "
-            row_text = f" {cursor_glyph} {check}  {descriptor.label}"
+            row_text = f" {cursor_glyph} {check}  {label}"
             paint_text(
                 grid, row_text, box_x + 1, row_y,
                 style=Style(fg=row_fg, bg=row_bg, attrs=ATTR_BOLD),
@@ -2554,7 +2598,6 @@ class SuccessorConfig(App):
             # Dim description trailing the label
             desc_x = box_x + 1 + len(row_text) + 2
             max_desc_w = max(0, box_x + box_w - 2 - desc_x)
-            desc = descriptor.description
             if len(desc) > max_desc_w:
                 desc = desc[: max(0, max_desc_w - 1)] + "…"
             desc_fg = theme.bg if is_cursor else theme.fg_dim

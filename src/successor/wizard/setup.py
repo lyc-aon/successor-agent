@@ -119,9 +119,11 @@ from ..render.theme import (
     normalize_display_mode,
     toggle_display_mode,
 )
+from ..skills import recommended_skills_for_tools
 from ..tools_registry import (
     AVAILABLE_TOOLS,
     default_enabled_tools,
+    selectable_tool_names,
 )
 
 
@@ -375,6 +377,7 @@ class _WizardState:
 
     def to_profile(self) -> Profile:
         """Build the final Profile dataclass from the user's choices."""
+        recommended_skills = recommended_skills_for_tools(self.enabled_tools)
         return Profile(
             name=self.name.strip().lower() or "untitled",
             description=f"created via successor setup",
@@ -383,7 +386,7 @@ class _WizardState:
             density=self.density,
             system_prompt=_DEFAULT_SYSTEM_PROMPT,
             provider=self._build_provider_dict(),
-            skills=(),
+            skills=recommended_skills,
             tools=tuple(self.enabled_tools),
             tool_config={},
             intro_animation=self.intro_animation,
@@ -393,6 +396,7 @@ class _WizardState:
 
     def to_json_dict(self) -> dict:
         """Serialize for the saved JSON file (matches builtin profile shape)."""
+        recommended_skills = recommended_skills_for_tools(self.enabled_tools)
         return {
             "name": self.name.strip().lower() or "untitled",
             "description": "created via successor setup",
@@ -401,7 +405,7 @@ class _WizardState:
             "density": self.density,
             "system_prompt": _DEFAULT_SYSTEM_PROMPT,
             "provider": self._build_provider_dict(),
-            "skills": [],
+            "skills": list(recommended_skills),
             "tools": list(self.enabled_tools),
             "tool_config": {},
             "intro_animation": self.intro_animation,
@@ -1016,7 +1020,7 @@ class SuccessorSetup(App):
         modifier key) toggles the currently highlighted one. → advances
         to REVIEW.
         """
-        tool_names = tuple(AVAILABLE_TOOLS.keys())
+        tool_names = selectable_tool_names()
         if not tool_names:
             # No tools registered at all — this step is a no-op. Allow
             # nav but don't try to toggle anything.
@@ -1894,7 +1898,7 @@ class SuccessorSetup(App):
             style=Style(fg=theme.fg_dim, bg=theme.bg, attrs=ATTR_DIM | ATTR_ITALIC),
         )
 
-        tool_names = tuple(AVAILABLE_TOOLS.keys())
+        tool_names = selectable_tool_names()
         if not tool_names:
             paint_text(
                 grid, "(no tools registered)", left, top + 3,

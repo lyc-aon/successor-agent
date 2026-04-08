@@ -96,6 +96,12 @@ class ToolCard:
         raw_label_prefix short prefix shown on the card's bottom border
                         before raw_command. Bash uses `$`; API tools
                         can use a plain label marker instead.
+        api_content_override optional model-facing tool-result payload.
+                        When set, the conversation serializer uses this
+                        instead of stdout/stderr for the `role:"tool"`
+                        message. This lets user-facing cards stay short
+                        while the model receives a richer structured
+                        payload, as with the native `skill` tool.
     """
 
     verb: str
@@ -113,6 +119,7 @@ class ToolCard:
     tool_name: str = "bash"
     tool_arguments: dict[str, Any] = field(default_factory=dict)
     raw_label_prefix: str = "$"
+    api_content_override: str | None = None
     # Tool-call linkage for native Qwen tool calling. When the model
     # emits a structured tool_call, the harness propagates the model's
     # call id here so the corresponding `role: "tool"` message can

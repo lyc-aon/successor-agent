@@ -90,6 +90,25 @@ def test_wizard_state_to_json_dict_round_trips() -> None:
     assert parsed["provider"]["type"] == "llamacpp"
 
 
+def test_wizard_state_seeds_recommended_skills_for_web_tools() -> None:
+    state = _WizardState(
+        name="x",
+        enabled_tools=("bash", "holonet", "browser"),
+    )
+    profile = state.to_profile()
+    payload = state.to_json_dict()
+    assert profile.skills == (
+        "holonet-research",
+        "biomedical-research",
+        "browser-operator",
+    )
+    assert payload["skills"] == [
+        "holonet-research",
+        "biomedical-research",
+        "browser-operator",
+    ]
+
+
 def test_wizard_state_empty_name_falls_back_to_untitled() -> None:
     state = _WizardState(name="")
     assert state.to_profile().name == "untitled"

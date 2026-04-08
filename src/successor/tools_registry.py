@@ -62,6 +62,10 @@ class ToolDescriptor:
                         active system prompt when the tool is enabled.
                         Use this for semantic rules that the generic
                         schema description cannot teach by itself.
+      user_visible      whether setup/config should show this tool as
+                        a user-toggleable capability. Internal helper
+                        tools like `skill` stay hidden and are enabled
+                        dynamically by runtime conditions instead.
     """
 
     name: str
@@ -71,6 +75,7 @@ class ToolDescriptor:
     system_prompt_doc: str
     schema: dict[str, Any] | None = None
     model_guidance: str = ""
+    user_visible: bool = True
 
 
 # ─── The registry ───
@@ -284,6 +289,83 @@ _SUBAGENT_TOOL_SCHEMA: dict[str, Any] = {
                 },
             },
             "required": ["prompt"],
+        },
+    },
+}
+
+SKILL_DOC = """\
+### skill — load an enabled skill on demand
+
+Use `skill` to load a profile-enabled skill into the conversation only
+when it clearly matches the current task. Skills are specialized
+instruction bundles: they tell you when to prefer `holonet` over the
+browser, how to operate the browser cleanly, or how to handle a domain
+workflow without bloating every turn's base prompt.
+
+### How to invoke
+
+Call `skill` with the exact skill name from the available-skills list.
+Pass a short `task` string when a scoped reminder would help the loaded
+skill focus on the user's request.
+
+Example — load a browser workflow:
+
+    {"skill": "browser-operator", "task": "Open the local app, click the signup CTA, and report any console errors."}
+
+### Critical rules
+
+- Only invoke skills that appear in the available-skills list for this
+  turn.
+- If a listed skill clearly matches the user's request, load it BEFORE
+  using other tools or answering from memory.
+- Do not mention a skill without actually calling `skill`.
+- After a skill has been loaded, follow its instructions directly and do
+  not reload the same skill unless the task meaningfully changes.
+"""
+
+SKILL_MODEL_GUIDANCE = """\
+## Using enabled skills
+
+Some profiles expose an internal `skill` tool. Skills are NOT always-on
+prompt text; they are loaded on demand when they clearly match the task.
+
+### Skill routing rules
+
+- Check the available-skills list in the system prompt before acting.
+- If one skill clearly matches the user's request, invoking `skill` is a
+  blocking first step. Load it BEFORE calling other tools or answering.
+- Never say "I'll use the X skill" without actually calling `skill`.
+- If the conversation already contains that skill's loaded instructions,
+  do not reload it unless the task has materially changed.
+"""
+
+_SKILL_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "skill",
+        "description": (
+            "Load one enabled skill into the current conversation so its "
+            "specialized instructions become available on demand."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "skill": {
+                    "type": "string",
+                    "description": (
+                        "Exact skill name from the available-skills list "
+                        "for this turn."
+                    ),
+                },
+                "task": {
+                    "type": "string",
+                    "description": (
+                        "Optional short reminder of the specific task this "
+                        "skill should help with right now."
+                    ),
+                },
+            },
+            "required": ["skill"],
         },
     },
 }
@@ -504,6 +586,16 @@ AVAILABLE_TOOLS: Mapping[str, ToolDescriptor] = {
         schema=_BASH_TOOL_SCHEMA,
         system_prompt_doc=BASH_DOC,
     ),
+    "skill": ToolDescriptor(
+        name="skill",
+        label="skill",
+        description="Internal on-demand skill loader for profile-enabled workflows.",
+        default_enabled=False,
+        schema=_SKILL_TOOL_SCHEMA,
+        system_prompt_doc=SKILL_DOC,
+        model_guidance=SKILL_MODEL_GUIDANCE,
+        user_visible=False,
+    ),
     "subagent": ToolDescriptor(
         name="subagent",
         label="subagent",
@@ -556,7 +648,18 @@ def default_enabled_tools() -> tuple[str, ...]:
     """The list of tool names that should be enabled by default in
     a new profile. Used by the setup wizard to pre-check toggles."""
     return tuple(
-        d.name for d in AVAILABLE_TOOLS.values() if d.default_enabled
+        d.name
+        for d in AVAILABLE_TOOLS.values()
+        if d.user_visible and d.default_enabled
+    )
+
+
+def selectable_tool_names() -> tuple[str, ...]:
+    """Tools that should appear in setup/config multi-select UIs."""
+    return tuple(
+        name
+        for name, descriptor in AVAILABLE_TOOLS.items()
+        if descriptor.user_visible
     )
 
 

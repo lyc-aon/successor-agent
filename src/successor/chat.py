@@ -49,7 +49,7 @@ import json
 import os
 import random
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from . import __version__
@@ -135,6 +135,13 @@ from .tools_registry import (
     build_native_tool_schemas,
     filter_known,
 )
+from .skills import (
+    build_skill_card_output,
+    build_skill_discovery_section,
+    build_skill_reuse_result,
+    build_skill_tool_result,
+    enabled_profile_skills,
+)
 from .subagents.cards import SubagentToolCard
 from .subagents.manager import (
     SubagentManager,
@@ -154,8 +161,8 @@ from .subagents.render import (
 from .web import (
     PlaywrightBrowserManager,
     browser_preview_card,
+    browser_runtime_status,
     holonet_preview_card,
-    playwright_available,
     resolve_browser_config,
     resolve_holonet_config,
     resolve_route as resolve_holonet_route,
@@ -183,6 +190,8 @@ from .render.theme import (
     normalize_display_mode,
     toggle_display_mode,
 )
+
+from .skills.skill import Skill
 
 
 # Theme transition duration — how long it takes to lerp between themes
@@ -608,6 +617,8 @@ def _tool_card_content_for_api(card: ToolArtifact) -> str:
     """
     if isinstance(card, SubagentToolCard):
         return card.spawn_result
+    if card.api_content_override is not None:
+        return card.api_content_override
 
     parts: list[str] = []
     if card.output:
@@ -824,6 +835,11 @@ def _extract_json_string_field(raw_args: str, field: str) -> str:
 def _tool_preview_text(name: str, raw_args: str) -> str:
     if name == "bash":
         return _extract_command_tail(raw_args)
+    if name == "skill":
+        skill = _extract_json_string_field(raw_args, "skill")
+        task = _extract_json_string_field(raw_args, "task")
+        bits = [bit for bit in (skill, task) if bit]
+        return " ".join(bits) if bits else raw_args
     if name == "subagent":
         return _extract_json_string_field(raw_args, "prompt")
     if name == "holonet":
@@ -896,6 +912,11 @@ def _trace_tool_call_summary(tc: dict[str, Any]) -> dict[str, object]:
             str(args.get("command") or ""),
             limit=320,
         )
+    elif name == "skill" and isinstance(args, dict):
+        entry["skill_name"] = str(args.get("skill") or "")
+        task = str(args.get("task") or "")
+        if task:
+            entry["task_excerpt"] = _trace_clip_text(task, limit=320)
     elif name == "subagent" and isinstance(args, dict):
         entry["prompt_excerpt"] = _trace_clip_text(
             str(args.get("prompt") or ""),
@@ -2949,9 +2970,58 @@ class SuccessorChat(App):
             or not self.profile.subagents.notify_on_finish
         ):
             enabled_tools = [name for name in enabled_tools if name != "subagent"]
-        if "browser" in enabled_tools and not playwright_available():
-            enabled_tools = [name for name in enabled_tools if name != "browser"]
+        if "browser" in enabled_tools:
+            browser_cfg = resolve_browser_config(self.profile)
+            status = browser_runtime_status(self.profile.name, browser_cfg)
+            if not status.package_available:
+                enabled_tools = [name for name in enabled_tools if name != "browser"]
+        if self._enabled_skills_for_turn(enabled_tools) and "skill" not in enabled_tools:
+            enabled_tools.append("skill")
         return enabled_tools
+
+    def _enabled_skills_for_turn(
+        self,
+        enabled_tools: list[str] | tuple[str, ...] | None = None,
+    ) -> list[Skill]:
+        """Runtime-usable skills for this turn.
+
+        Profile skills are opt-in. A skill only becomes model-visible when:
+
+        1. the profile lists it
+        2. the skill file exists
+        3. every tool named in `allowed_tools` is available this turn
+        """
+        if enabled_tools is None:
+            tools = list(filter_known(self.profile.tools or ()))
+            if (
+                not self.profile.subagents.enabled
+                or not self.profile.subagents.notify_on_finish
+            ):
+                tools = [name for name in tools if name != "subagent"]
+            if "browser" in tools:
+                browser_cfg = resolve_browser_config(self.profile)
+                status = browser_runtime_status(self.profile.name, browser_cfg)
+                if not status.package_available:
+                    tools = [name for name in tools if name != "browser"]
+        else:
+            tools = list(enabled_tools)
+        return enabled_profile_skills(
+            self.profile.skills,
+            enabled_tools=tools,
+        )
+
+    def _skill_already_loaded(self, skill_name: str) -> bool:
+        target = skill_name.strip().lower()
+        if not target:
+            return False
+        for msg in self.messages:
+            card = msg.tool_card
+            if card is None or card.tool_name != "skill":
+                continue
+            loaded = str(card.tool_arguments.get("skill") or "").strip().lower()
+            if loaded == target:
+                return True
+        return False
 
     def _browser_manager_for_profile(self) -> PlaywrightBrowserManager:
         if self._browser_manager is not None:
@@ -3567,6 +3637,7 @@ class SuccessorChat(App):
         # profile. filter_known() drops any unrecognized names so a
         # stale profile referencing a future tool doesn't crash us.
         enabled_tools = self._enabled_tools_for_turn()
+        enabled_skills = self._enabled_skills_for_turn(enabled_tools)
 
         # Build the system prompt for THIS turn. When `tools=` is sent
         # to the model, Qwen's chat template auto-injects its OWN
@@ -3639,6 +3710,12 @@ class SuccessorChat(App):
         tool_guidance = build_model_tool_guidance(enabled_tools)
         if tool_guidance:
             sys_prompt = f"{sys_prompt}\n\n{tool_guidance}"
+        skill_discovery = build_skill_discovery_section(
+            enabled_skills,
+            context_window_tokens=self._resolve_context_window(),
+        )
+        if skill_discovery:
+            sys_prompt = f"{sys_prompt}\n\n{skill_discovery}"
 
         # Build the conversation history for the model in NATIVE Qwen
         # tool-call shape. Each pass through the message list pairs an
@@ -3666,6 +3743,7 @@ class SuccessorChat(App):
             turn=self._agent_turn,
             continuation=(self._agent_turn > 1),
             enabled_tools=enabled_tools,
+            enabled_skills=[skill.name for skill in enabled_skills],
             api_message_count=len(api_messages),
             last_user_excerpt=_find_last_user_excerpt(api_messages),
         )
@@ -4998,6 +5076,116 @@ class SuccessorChat(App):
             tool_call_id=tool_call_id,
         )
 
+    def _spawn_skill_runner(
+        self,
+        arguments: dict[str, Any],
+        *,
+        tool_call_id: str | None = None,
+    ) -> bool:
+        from .bash.exec import _new_tool_call_id  # noqa: PLC0415
+
+        resolved_call_id = tool_call_id or _new_tool_call_id()
+        requested_name = str(arguments.get("skill") or "").strip().lower()
+        task = " ".join(str(arguments.get("task") or "").split()).strip()
+        enabled_skills = {
+            skill.name: skill
+            for skill in self._enabled_skills_for_turn()
+        }
+        skill = enabled_skills.get(requested_name)
+        if skill is None:
+            card = self._tool_error_card(
+                tool_name="skill",
+                verb="load-skill",
+                raw_command=requested_name or "skill",
+                tool_call_id=resolved_call_id,
+                params=(),
+                tool_arguments={
+                    "skill": requested_name,
+                    **({"task": task} if task else {}),
+                },
+                raw_label_prefix="§",
+                message=(
+                    f"skill '{requested_name or '(missing)'}' is not enabled for "
+                    "this profile, is missing on disk, or requires tools that are "
+                    "not available in this turn."
+                ),
+            )
+            self.messages.append(_Message("tool", "", tool_card=card))
+            return False
+
+        params: list[tuple[str, str]] = [("skill", skill.name)]
+        if skill.allowed_tools:
+            params.append(("tools", ", ".join(skill.allowed_tools)))
+        if task:
+            task_value = task if len(task) <= 64 else task[:63].rstrip() + "…"
+            params.append(("task", task_value))
+        raw_command = " ".join(bit for bit in (skill.name, task) if bit)
+        preview = ToolCard(
+            verb="load-skill",
+            params=tuple(params),
+            risk="safe",
+            raw_command=raw_command,
+            confidence=1.0,
+            parser_name="native-skill",
+            tool_name="skill",
+            tool_arguments={
+                "skill": skill.name,
+                **({"task": task} if task else {}),
+            },
+            raw_label_prefix="§",
+            tool_call_id=resolved_call_id,
+        )
+
+        source = "builtin"
+        source_path = getattr(skill, "source_path", "")
+        if "/.config/" in source_path:
+            source = "user"
+
+        if self._skill_already_loaded(skill.name):
+            final_card = replace(
+                preview,
+                output=f"Skill `{skill.name}` is already loaded earlier in the conversation.",
+                exit_code=0,
+                duration_ms=0.0,
+                api_content_override=build_skill_reuse_result(skill.name, task=task),
+            )
+            self.messages.append(_Message("tool", "", tool_card=final_card))
+            self._scroll_to_bottom()
+            return True
+
+        final_card = replace(
+            preview,
+            output=build_skill_card_output(skill, task=task, source=source),
+            exit_code=0,
+            duration_ms=0.0,
+            api_content_override=build_skill_tool_result(
+                skill,
+                task=task,
+                source=source,
+            ),
+        )
+        self._trace_event(
+            "tool_spawn",
+            tool_name="skill",
+            tool_call_id=resolved_call_id,
+            skill_name=skill.name,
+            task=task,
+        )
+        self._trace_event(
+            "tool_runner_finished",
+            tool_name="skill",
+            tool_call_id=resolved_call_id,
+            exit_code=0,
+            error="",
+            duration_ms=0.0,
+            stdout_excerpt=_trace_clip_text(final_card.output, limit=320),
+            stderr_excerpt="",
+            truncated=False,
+        )
+        self.messages.append(_Message("tool", "", tool_card=final_card))
+        self._scroll_to_bottom()
+        return True
+
     def _spawn_holonet_runner(
         self,
         arguments: dict[str, Any],
@@ -5055,7 +5243,9 @@ class SuccessorChat(App):
 
         resolved_call_id = tool_call_id or _new_tool_call_id()
         preview = browser_preview_card(arguments, tool_call_id=resolved_call_id)
-        if not playwright_available():
+        browser_cfg = resolve_browser_config(self.profile)
+        browser_status = browser_runtime_status(self.profile.name, browser_cfg)
+        if not browser_status.package_available:
             card = self._tool_error_card(
                 tool_name="browser",
                 verb=preview.verb,
@@ -5065,9 +5255,10 @@ class SuccessorChat(App):
                 tool_arguments=preview.tool_arguments,
                 raw_label_prefix=preview.raw_label_prefix,
                 message=(
-                    "Playwright is not installed. Install with "
-                    "`pip install 'successor[browser]'` or switch to a "
-                    "profile/environment where Playwright is available."
+                    "Playwright is not available in the configured runtime. "
+                    "Install with `pip install 'successor[browser]'`, or set "
+                    "browser.python_executable to a Python interpreter that "
+                    "already has Playwright installed."
                 ),
             )
             self.messages.append(_Message("tool", "", tool_card=card))
@@ -5114,6 +5305,13 @@ class SuccessorChat(App):
             call_id = tc.get("id") or ""
 
             if name != "bash":
+                if name == "skill":
+                    if isinstance(args, dict) and self._spawn_skill_runner(
+                        dict(args),
+                        tool_call_id=call_id,
+                    ):
+                        any_ran = True
+                    continue
                 if name == "subagent":
                     prompt = args.get("prompt") if isinstance(args, dict) else ""
                     label = args.get("name") if isinstance(args, dict) else ""
@@ -5140,7 +5338,7 @@ class SuccessorChat(App):
                     continue
                 self.messages.append(_Message(
                     "successor",
-                    f"unknown tool {name!r} — supported tools are bash, subagent, holonet, and browser",
+                    f"unknown tool {name!r} — supported tools are bash, skill, subagent, holonet, and browser",
                     synthetic=True,
                 ))
                 continue

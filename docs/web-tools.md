@@ -9,6 +9,16 @@ Neither is enabled for the model by default on the bundled `default`
 profile. Turn them on in the setup wizard's `tools` step or later in
 `/config`.
 
+Successor also ships built-in helper skills for these tools:
+
+- `holonet-research`
+- `biomedical-research`
+- `browser-operator`
+
+Profiles created through `successor setup` automatically seed the
+matching skills when you enable `holonet` or `browser`. Existing
+profiles can edit the skill list later in `/config` under `extensions`.
+
 ## Holonet
 
 `holonet` is the first choice when the task needs search, article
@@ -76,6 +86,14 @@ python -m playwright install chromium
 2. Point Successor at an existing browser install through
    `browser.channel` or `browser.executable_path`
 
+3. Point Successor at a different Python that already has Playwright
+   installed through `browser.python_executable`
+
+That third path matters when your main Successor environment stays lean
+but your system Python or another venv already has a working Playwright
+install. Successor can run the browser helper under that interpreter
+while the main chat keeps running in the original environment.
+
 The current browser actions are:
 
 - `open`
@@ -91,6 +109,7 @@ exposes:
 
 - `headless`
 - `channel`
+- `python_executable`
 - `executable_path`
 - `user_data_dir`
 - `viewport_width`
@@ -117,6 +136,7 @@ reveals the corresponding section automatically.
 
 - `holonet` default route and which providers are actually usable
 - whether the Playwright Python package is available
+- which Python interpreter Successor will use for Playwright
 - browser channel / executable path
 - persistent browser user-data directory
 
@@ -128,6 +148,9 @@ Run `successor doctor` first if a profile is not surfacing `holonet` or
 - Prefer `holonet` for search, news, article retrieval, papers, and
   clinical-study lookup.
 - Use `browser` only when a real page session or JS execution matters.
+- Let the built-in skills handle the routing details when they are
+  available. They keep the base prompt smaller and teach the model when
+  to prefer `holonet` over `browser`.
 - Keep `browser` disabled on profiles that do not need it. It is
   heavier than API-backed retrieval and should be treated as a focused
   capability, not the default path for all web tasks.

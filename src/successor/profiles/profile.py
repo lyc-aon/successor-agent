@@ -280,8 +280,11 @@ class Profile:
       system_prompt     full system prompt sent to the model
       provider          provider config dict for make_provider, or None
                         to use the chat's default LlamaCppClient
-      skills            ordered tuple of skill names (loaded and
-                        listed, but not yet injected into prompts)
+      skills            ordered tuple of skill names. The system prompt
+                        gets a compact discovery list, and the full
+                        skill body is loaded on demand through the
+                        internal `skill` tool only when the model asks
+                        for it
       tools             ordered tuple of enabled tool names. This
                         controls model-visible native tools plus the
                         tool docs injected into the system prompt

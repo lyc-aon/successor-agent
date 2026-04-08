@@ -3,6 +3,44 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
+## v0.1.14 — 2026-04-08
+
+On-demand browser / holonet skills plus external-Python Playwright runtime support.
+
+### What changed
+
+- wired profile-selected skills into chat for real through an internal
+  native `skill` tool: the model now gets a compact available-skills
+  list in the system prompt and can load the full skill body on demand
+- added bundled skills for `holonet` and the browser:
+  `holonet-research`, `biomedical-research`, and `browser-operator`
+- setup-created profiles now auto-seed the matching built-in skills
+  when `holonet` or `browser` is enabled, and `/config` can edit the
+  skill list directly
+- the optional Playwright browser path can now run through a different
+  Python interpreter via `browser.python_executable`, so Successor can
+  reuse an existing Playwright install instead of requiring the main
+  environment to carry it
+- `successor doctor` now reports the resolved browser Python runtime,
+  including whether the browser session is running through an external
+  interpreter
+- `successor skills` now reflects the live runtime truth instead of the
+  old inventory-only wording, and shows `when:` / `tools:` metadata for
+  each loaded skill
+
+### Verification
+
+- focused integration slices: `191 passed`
+- full local suite: `1110 passed`
+- live local llama.cpp/Qwopus E2E:
+  - `scripts/e2e_chat_driver.py --scenario holonet_skill_biomedical --runs 2`
+  - `scripts/e2e_chat_driver.py --scenario browser_skill_local_fixture --runs 2`
+- live artifact review confirmed:
+  - browser-skill runs show a loaded-skill card followed by real
+    `browser-open` / `browser-type` / `browser-click` cards
+  - holonet-skill runs show the skill load followed by real biomedical
+    provider cards and a grounded answer
+
 ## v0.1.13 — 2026-04-08
 
 Holonet web research plus an optional Playwright browser tool.

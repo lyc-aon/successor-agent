@@ -37,6 +37,8 @@ class Skill:
     Fields:
       name           lowercase identifier (matches the frontmatter `name`)
       description    one-line "when to use this skill" hint
+      when_to_use    longer routing hint for model-side discovery
+      allowed_tools  native tools this skill expects to use once loaded
       body           the markdown content below the frontmatter block
       source_path    absolute path to the source file (for `successor skills list`
                      and debugging)
@@ -44,6 +46,8 @@ class Skill:
 
     name: str
     description: str
+    when_to_use: str
+    allowed_tools: tuple[str, ...]
     body: str
     source_path: str
 
@@ -83,10 +87,22 @@ def parse_skill_file(path: Path) -> Skill | None:
     if not name:
         raise ValueError("frontmatter missing 'name' field")
     description = frontmatter.get("description", "")
+    when_to_use = frontmatter.get("when_to_use", "") or frontmatter.get("when-to-use", "")
+    allowed_raw = (
+        frontmatter.get("allowed_tools", "")
+        or frontmatter.get("allowed-tools", "")
+    )
+    allowed_tools = tuple(
+        part.strip().lower()
+        for part in allowed_raw.replace("\n", ",").split(",")
+        if part.strip()
+    )
 
     return Skill(
         name=name.strip().lower(),
         description=description.strip(),
+        when_to_use=when_to_use.strip(),
+        allowed_tools=allowed_tools,
         body=body,
         source_path=str(path.resolve()),
     )

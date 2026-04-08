@@ -158,9 +158,10 @@ def _play_intro_animation(name: str) -> None:
 def cmd_skills(args: argparse.Namespace) -> int:
     """List every loaded skill (built-in + user) with size + source.
 
-    Inventory only — phase 5 deliberately doesn't wire skills into the
-    chat. The list shows what's available so the user can confirm their
-    `~/.config/successor/skills/*.md` files are being picked up.
+    Skills are selected per profile and loaded on demand by the chat's
+    internal `skill` tool. This command is the inventory view: it shows
+    what is installed, where it came from, and the approximate prompt
+    budget once a skill is actually loaded.
     """
     from .skills import SKILL_REGISTRY
 
@@ -198,6 +199,11 @@ def cmd_skills(args: argparse.Namespace) -> int:
                     cut = max_w
                 print(f"{indent}{desc[:cut]}")
                 desc = desc[cut:].lstrip()
+        indent = " " * (4 + name_w)
+        if skill.when_to_use:
+            print(f"{indent}when:  {skill.when_to_use}")
+        if skill.allowed_tools:
+            print(f"{indent}tools: {', '.join(skill.allowed_tools)}")
         print()
     print(f"  {len(skills)} skills · ~{total_tokens:,} tokens total")
     return 0
@@ -407,6 +413,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 "    browser     "
                 + ("playwright ready" if browser_status.package_available else "playwright missing")
             )
+            runtime_note = " (external runtime)" if browser_status.using_external_runtime else ""
+            print(f"    browser py  {browser_status.python_executable}{runtime_note}")
             print(f"    browser ch  {browser_status.channel or '(default chromium)'}")
             if browser_status.executable_path:
                 print(f"    browser exe {browser_status.executable_path}")
