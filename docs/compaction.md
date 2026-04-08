@@ -9,9 +9,9 @@ to extend or override the defaults.
 
 Two layers, both running automatically:
 
-1. **Microcompact** — every tick, the harness clears stale tool
+1. **Microcompact**. Every tick, the harness clears stale tool
    results from old rounds. Cheap, no model call, runs constantly.
-2. **Autocompact** — when the conversation crosses a configured
+2. **Autocompact**. When the conversation crosses a configured
    percentage of the context window, the harness pauses the next
    user turn, sends the older rounds to the model for summarization,
    and replaces them with one summary message + a verbatim copy of
@@ -24,19 +24,19 @@ covers the work; you can press `Ctrl+G` to abort.
 ## The thresholds
 
 Three thresholds, each defined as a percentage of the **resolved**
-context window (which the chat detects from the active model
-provider — `/props` on llama.cpp, `/v1/models` on OpenRouter, a
-fallback table on OpenAI):
+context window. The chat detects it from the active model
+provider: `/props` on llama.cpp, `/v1/models` on OpenRouter, a
+fallback table on OpenAI.
 
 | Threshold | Default | What happens |
 |-----------|---------|--------------|
 | **warning** | window × 12.5% | The title-bar pill turns warm and shows the fill % |
 | **autocompact** | window × 6.25% | A compaction worker fires before the next turn |
-| **blocking** | window × 1.5625% | The chat refuses to send the request — you must compact manually or shorten the prompt |
+| **blocking** | window × 1.5625% | The chat refuses to send the request. You must compact manually or shorten the prompt. |
 
-The percentages are buffer sizes — the threshold trips at
-`used >= window - (window × pct)`. So 6.25% buffer = autocompact at
-93.75% full.
+The percentages are buffer sizes. The threshold trips at
+`used >= window - (window × pct)`. So 6.25% buffer means autocompact
+at 93.75% full.
 
 Each threshold also has a hard floor (`warning_floor=8000`,
 `autocompact_floor=4000`, `blocking_floor=1000`) so a tiny
@@ -64,19 +64,19 @@ Edit `~/.config/successor/profiles/<name>.json` and add a
 }
 ```
 
-All fields are optional — anything missing uses the default.
+All fields are optional. Anything missing uses the default.
 Anything malformed (wrong type, out-of-range value, threshold
-ordering violation) silently falls back to defaults; the rest of
-the profile still loads. This is the same lenient-load policy the
-profile parser uses everywhere.
+ordering violation) silently falls back to defaults, and the rest
+of the profile still loads. This is the same lenient-load policy
+the profile parser uses everywhere.
 
 ### Field reference
 
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
-| `warning_pct` | float | 0.125 | 12.5% — pill turns warm |
-| `autocompact_pct` | float | 0.0625 | 6.25% — autocompact fires |
-| `blocking_pct` | float | 0.015625 | 1.5625% — refuse the API call |
+| `warning_pct` | float | 0.125 | 12.5%, pill turns warm |
+| `autocompact_pct` | float | 0.0625 | 6.25%, autocompact fires |
+| `blocking_pct` | float | 0.015625 | 1.5625%, refuse the API call |
 | `warning_floor` | int | 8000 | min warning buffer in tokens |
 | `autocompact_floor` | int | 4000 | min autocompact buffer in tokens |
 | `blocking_floor` | int | 1000 | min blocking buffer in tokens |
@@ -102,7 +102,7 @@ The chat's config menu (`Ctrl+,`) has a `compaction` section with
 all six fields. Editing them updates the profile in memory and
 marks the row as dirty; pressing `s` writes the profile back to
 disk and reloads the registry. Percentage fields are entered as
-percent (e.g. type `6.25` for 6.25%) — the conversion to fraction
+percent (e.g. type `6.25` for 6.25%). The conversion to fraction
 happens at commit time.
 
 The setup wizard (`successor setup`) has a one-screen `compact`
@@ -134,7 +134,7 @@ bar, to decide whether to autocompact), it calls
 
 This is the only seam between the static profile config and the
 runtime budget. Changing `self.profile` and re-calling
-`_agent_budget()` produces a budget with the new thresholds — no
+`_agent_budget()` produces a budget with the new thresholds. No
 restart needed.
 
 ## How autocompact triggers
@@ -170,7 +170,7 @@ When the worker reports a result, `_poll_compaction_worker`:
 4. Fires the cache pre-warmer for the post-compact prefix
 
 If the worker fails, the gate still calls `_begin_agent_turn`
-again — reactive PTL recovery in the streaming layer may save the
+again. Reactive PTL recovery in the streaming layer may save the
 turn, or the user gets a clear API error.
 
 `Ctrl+G` during an in-flight autocompact aborts the worker AND
@@ -192,10 +192,10 @@ This catches three failure modes:
 1. The model produced an oversized summary (often happens at high
    `summary_max_tokens` with chatty models)
 2. `keep_recent_rounds` was too large for the log
-3. The log was already mostly recent rounds — there was nothing
+3. The log was already mostly recent rounds, so there was nothing
    to compact
 
-The new log is still applied — the assertion is non-fatal.
+The new log is still applied. The assertion is non-fatal.
 
 ## Disabling compaction
 
@@ -205,9 +205,9 @@ the `off` preset in the setup wizard.
 When disabled:
 
 - The autocompact gate at `_begin_agent_turn` is a no-op
-- The blocking buffer is **still** honored — the chat refuses to
+- The blocking buffer is **still** honored. The chat refuses to
   send a request that exceeds the API limit even when autocompact
-  is off
+  is off.
 - Manual `/compact` still works
 - Reactive PTL recovery still catches API rejections
 
@@ -221,28 +221,28 @@ The relevant tests are:
 | `tests/test_chat_compaction_scaling.py` | `_agent_budget()` percentage math at 8K / 50K / 128K / 200K / 262K / 1M / 2M windows |
 | `tests/test_compaction_assertion.py` | post-compact size assertion |
 | `tests/test_chat_autocompact_gate.py` | chat-layer autocompact gate (per-turn guard, in-flight guard, deferred resume, cancel) |
-| `tests/test_chat_compaction_e2e.py` | edge cases — tiny window, huge window, disabled, invalid JSON |
+| `tests/test_chat_compaction_e2e.py` | edge cases (tiny window, huge window, disabled, invalid JSON) |
 | `tests/test_wizard_compaction_snapshot.py` | wizard step visual rendering for each preset |
 | `tests/test_config_menu_compaction_snapshot.py` | config menu compaction section visual rendering |
 | `tests/test_agent_budget.py` | (existing) ContextBudget invariants, BudgetTracker, CircuitBreaker, RecompactChain |
 | `tests/test_agent_compact.py` | (existing) compact() function, PTL retry, summary content |
 
-The tests are hermetic — no live llama.cpp server. The
+The tests are hermetic. No live llama.cpp server is needed. The
 `temp_config_dir` fixture isolates each test's config and registry
 state. Mock clients implement the bare `stream_chat()` surface that
 `compact()` and the chat both need.
 
 ## See also
 
-- `src/successor/profiles/profile.py` — `CompactionConfig` + `Profile`
-- `src/successor/agent/budget.py` — `ContextBudget`, `CircuitBreaker`,
+- `src/successor/profiles/profile.py`: `CompactionConfig` + `Profile`
+- `src/successor/agent/budget.py`: `ContextBudget`, `CircuitBreaker`,
   `RecompactChain`, `BudgetTracker`
-- `src/successor/agent/compact.py` — the `compact()` function and the
+- `src/successor/agent/compact.py`: the `compact()` function and the
   PTL retry loop
-- `src/successor/agent/microcompact.py` — the cheap stale-result clearing
-- `src/successor/chat.py` — `_agent_budget`,
+- `src/successor/agent/microcompact.py`: the cheap stale-result clearing
+- `src/successor/chat.py`: `_agent_budget`,
   `_check_and_maybe_defer_for_autocompact`, `_handle_compact_cmd`
-- `~/dev/agent-compaction-guide/` — the design reference this is
+- `~/dev/agent-compaction-guide/`: the design reference this is
   modeled on (production-compaction.ts in particular)
-- `~/dev/ai/free-code-main/src/services/compact/` — the parallel
+- `~/dev/ai/free-code-main/src/services/compact/`: the parallel
   TypeScript implementation we cross-checked against

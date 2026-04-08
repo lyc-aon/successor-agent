@@ -86,7 +86,7 @@ src/successor/recorder.py    record/replay session traces
 src/successor/cli.py         argparse subcommand dispatch (`successor` binary)
 src/successor/__main__.py    `python -m successor` entry point
 
-tests/                       pytest suite — 881+ tests, hermetic via SUCCESSOR_CONFIG_DIR
+tests/                       pytest suite  974+ tests, hermetic via SUCCESSOR_CONFIG_DIR
 
 scripts/                     manual-run scripts (no auto-execution)
   e2e_chat_driver.py     scripted scenarios that drive a real chat against
@@ -215,7 +215,7 @@ When you want to add a new visual feature:
 5. Add a headless render test (no PTY needed)
 
 If your new feature doesn't fit through this recipe, **the recipe is
-not wrong** — your feature has a hidden side effect. Find and remove
+not wrong**. Your feature has a hidden side effect. Find and remove
 it before continuing.
 
 ## Architectural decisions cross-checked against free-code

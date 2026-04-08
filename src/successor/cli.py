@@ -546,7 +546,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_setup = sub.add_parser(
         "setup",
-        help="9-step profile creation wizard with live preview pane",
+        help="10-step profile creation wizard with live preview pane",
     )
     p_setup.set_defaults(func=cmd_setup)
 

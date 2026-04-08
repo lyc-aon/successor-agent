@@ -6,8 +6,116 @@ that add a self-contained capability with full tests.
 
 The numbering jumps from "phase 0" (the original renderer + v0 chat)
 straight to "phases 1–6" of the framework infra. There's no
-contradiction — the framework phases were designed and built as a
+contradiction; the framework phases were designed and built as a
 unit on top of phase 0.
+
+---
+
+## v0.1.3, configurable autocompactor (2026-04-08)
+
+The autocompactor got a proper chat-layer gate, percentage-based
+thresholds, per-profile configuration, and 93 new tests.
+
+### What landed
+
+- `src/successor/profiles/profile.py` picked up a `CompactionConfig`
+  frozen dataclass: nine fields (`warning_pct`, `autocompact_pct`,
+  `blocking_pct` as fractions of the resolved context window, matching
+  `*_floor` token minimums, plus `enabled`, `keep_recent_rounds`, and
+  `summary_max_tokens`). `__post_init__` enforces the threshold
+  ordering invariant and range checks. `from_dict` is lenient: missing
+  fields use defaults, wrong-typed fields fall back, and an invariant
+  violation drops back to safe defaults rather than rejecting the
+  profile.
+- `Profile` gained a `compaction: CompactionConfig` field with a
+  factory default. The profile parser picks up the new block via the
+  same type-tolerant pattern every other field uses.
+- `SuccessorChat._agent_budget()` now reads percentages from
+  `self.profile.compaction` and builds a `ContextBudget` by calling
+  `buffers_for_window(resolved_window)`. This is the sole seam
+  between static profile config and the runtime budget.
+- New `SuccessorChat._check_and_maybe_defer_for_autocompact()` at
+  the top of `_begin_agent_turn`. When usage crosses the threshold
+  and compaction is enabled, it spawns a compaction worker via the
+  shared `_spawn_compaction_worker()` helper and sets a
+  deferred-resume flag. `_poll_compaction_worker` re-enters
+  `_begin_agent_turn` after the worker succeeds (or fails, letting
+  reactive PTL recovery catch the failure case).
+- Per-turn guard `_autocompact_attempted_this_turn` prevents the
+  gate from firing twice for a single user message. In-flight
+  worker guard prevents stacking workers. Ctrl+G cancellation
+  clears the deferred-resume flag so a cancelled compaction doesn't
+  silently resume the deferred turn.
+- `src/successor/agent/compact.py` now checks that the new log is
+  at most 90% the size of the original. If not, it stamps a warning
+  on the `BoundaryMarker` and the log's boundary message picks up
+  an `underperformed` annotation. Non-fatal but visible.
+- Wizard gained a 10th step, `COMPACTION`, with four presets
+  (default, aggressive, lazy, off). Each preset is rendered with a
+  description and a live preview panel showing the resolved buffer
+  thresholds against a 200K reference window.
+- Config menu gained a `compaction` section with per-field editors.
+  Percentage fields are entered as percent (type `6.25` for 6.25%)
+  but stored as fractions internally; the conversion happens at
+  commit time.
+- New `docs/compaction.md` covers the schema, threshold math, gate
+  flow, and the failure modes the post-compact assertion catches.
+- Default profile ships with `bash` enabled so new users see the
+  agentic loop on turn one. `successor-dev` profile ships with the
+  aggressive compaction preset to keep dev sessions responsive at
+  the edge of the context window.
+- Scratch profile `compact-test.json` removed from the builtin
+  bundle.
+- `.gitignore` picks up media binaries (`*.mp4`, `*.gif`, `*.mp3`,
+  `*.wav`) so future recordings don't accidentally bloat the source
+  tree.
+
+### Tests
+
+881 to 974. 93 new tests across seven files:
+
+- `tests/test_compaction_config.py`: 33 tests for the dataclass,
+  validation, lenient JSON parsing, and profile integration
+- `tests/test_chat_compaction_scaling.py`: 12 tests for
+  `_agent_budget()` percentage math at 8K / 50K / 128K / 200K /
+  262K / 1M / 2M window sizes
+- `tests/test_compaction_assertion.py`: 10 tests for the post-compact
+  size assertion
+- `tests/test_chat_autocompact_gate.py`: 11 E2E tests for the
+  chat-layer gate including per-turn guard, in-flight guard,
+  deferred-resume wiring, and Ctrl+G cancel
+- `tests/test_chat_compaction_e2e.py`: 12 edge case E2E tests
+  covering tiny window floors, huge window state transitions,
+  disabled behavior, invalid JSON safe fallbacks, profile reload
+- `tests/test_wizard_compaction_snapshot.py`: 8 visual snapshot
+  tests for the new wizard step
+- `tests/test_config_menu_compaction_snapshot.py`: 7 visual
+  snapshot tests for the new config menu section
+
+### README rewrite
+
+README picked up an Inspirations section crediting Cheng Lou's
+Pretext (the prepare-once / cache-by-target-size pattern that
+powers `BrailleArt.layout` and `PreparedText.lines`), Hermes Agent
+and the open-source agent harness ecosystem (the continuation
+pattern + native chat-template tool calls), and the broader
+open-source AI community (llama.cpp, open-weight model families,
+the inference tooling that made local agentic chat buildable).
+
+Stripped every em dash from prose sections after the first draft.
+Updated wizard step count (10), test count (974), and added a
+Visuals section embedding the v0.1.3 release GIFs inline.
+
+### Media library
+
+Seven GIFs cropped from the walkthrough recordings, attached to the
+v0.1.3 GitHub release as assets:
+`intro_braille.gif`, `wizard_theme.gif`, `braille_red.gif`,
+`braille_blue.gif`, `tool_dispatch.gif`, `search_demo.gif`,
+`chat_streaming.gif`. The README embeds all six most striking ones
+inline via release-asset URLs, so the source tree stays clean
+while visitors see the harness in motion without downloading
+anything.
 
 ---
 
