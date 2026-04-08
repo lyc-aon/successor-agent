@@ -18,4 +18,31 @@ Per Section 4(d) of the License, this NOTICE file must be reproduced
 in any redistribution of this software, in source or binary form. If
 you fork or modify Successor, please retain this attribution.
 
-If you build something cool with Successor, I'd love to hear about it.
+
+Inspirations
+------------
+
+Successor stands on a lot of other people's ideas. The most direct
+debts:
+
+  Cheng Lou's Pretext  — the prepare-once / cache-by-target-size
+                         pattern that powers BrailleArt.layout() and
+                         PreparedText.lines() in the renderer.
+
+  Hermes Agent + the   — the agent loop's continuation pattern
+  open-source agent      (stream, detect tool call, execute, feed
+  harness ecosystem      result back, repeat) and the convergence on
+                         native chat-template tool calls.
+
+  The open-source AI   — llama.cpp's OpenAI-compatible HTTP surface,
+  community              the open-weight model families that make
+                         local agentic chat useful, and the inference
+                         tooling that turned this from a cloud-only
+                         toy into something a single developer can
+                         run on a laptop.
+
+If your project deserves credit and is missing here, open an issue
+on the repo. I would rather over-credit than under-credit.
+
+If you build something cool with Successor, I would love to hear
+about it.

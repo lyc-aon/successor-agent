@@ -3,6 +3,69 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
+## v0.1.3 — 2026-04-07
+
+Configurable autocompactor + first-launch polish.
+
+### Configurable autocompactor
+
+The chat now ships an end-to-end autocompact gate at
+`SuccessorChat._begin_agent_turn`. Before each agent turn the gate
+checks the current token count against percentage-based thresholds
+derived from the active profile's new `compaction` block, and (when
+the threshold is crossed) defers the turn behind a background
+compaction worker that resumes the turn against the freshly compacted
+log when it finishes.
+
+- New `CompactionConfig` frozen dataclass with 9 fields:
+  `warning_pct` / `autocompact_pct` / `blocking_pct` (each a fraction
+  of the resolved context window), matching `*_floor` token minimums
+  so tiny windows still get usable headroom, plus `enabled`,
+  `keep_recent_rounds`, and `summary_max_tokens`. Validation enforces
+  the threshold ordering invariant + range checks at construction
+  time.
+- The wizard has a new `compaction` step (now 10 steps total) with
+  four presets: **default** (12.5% / 6.25% / 1.5%), **aggressive**
+  (25% / 12.5% / 3%), **lazy** (5% / 2% / 0.5%), **off**. Each preset
+  is rendered with a description and a live preview panel showing
+  the resolved buffer thresholds against a 200K reference window.
+- The config menu (`Ctrl+,`) has a new `compaction` section with
+  per-field editors for all 9 knobs. Percentages are entered and
+  displayed as percent (e.g. type `6.25` for 6.25%); the conversion
+  to fraction happens at commit time.
+- Profile JSON gained a `compaction` block. Lenient parsing applies:
+  missing fields use defaults, partial fields merge with defaults,
+  malformed values silently fall back so the profile still loads.
+- New post-compact size assertion: if the new log is at least 90% of
+  the original size, `compact()` stamps a `warning` field on the
+  `BoundaryMarker` and the boundary message in the chat picks up a
+  `⚠ underperformed` annotation. Non-fatal, but visible.
+- Per-turn guard prevents the gate from firing twice on the same
+  user message. In-flight worker guard prevents stacking workers.
+  `Ctrl+G` cancellation clears the deferred-resume flag so a
+  cancelled compaction does not silently resume the deferred turn.
+- New `docs/compaction.md` covers the full schema, threshold math,
+  the gate flow, and the failure modes the post-compact assertion
+  catches.
+
+### Profile + default behavior
+
+- The bundled `default` profile now ships with `bash` enabled out of
+  the box. New users see the agentic loop on their very first turn.
+- Both `default` and `successor-dev` ship with explicit `compaction`
+  blocks so the JSON files document the configuration surface.
+  `successor-dev` ships with the **aggressive** preset to keep dev
+  sessions responsive at the edge of the context window.
+
+### Tests
+
+881 → 974. New coverage for `CompactionConfig` (33 tests),
+percentage scaling at multiple window sizes (12 tests), the
+post-compact assertion (10 tests), the chat-layer autocompact gate
+(11 tests), the edge cases (12 tests), the wizard compaction step
+visual rendering (8 snapshot tests), and the config menu compaction
+section visual rendering (7 snapshot tests).
+
 ## v0.1.2 — 2026-04-07
 
 Usage clarity pass. Every touch point a new user hits now points

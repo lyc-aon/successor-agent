@@ -50,4 +50,23 @@ desktop.ini
 *.pem
 secrets/
 credentials/
+
+# ─── Scratch / local-only — kept out of the public repo ───
+# Scripted demo recorder (lives in the local working tree only;
+# the recordings it produces feed the media library at
+# ~/Videos/successor-media/, which is also intentionally outside
+# the repo). Keep one canonical copy at ~/successor-promo-videos/.
 scripts/walkthrough_demo.py
+
+# Media binaries — don't ship a hundred MB of GIFs in the source
+# tree. The README links to externally-hosted versions instead.
+*.mp4
+*.mov
+*.webm
+*.gif
+*.mp3
+*.wav
+
+# Generated artifacts from local fiddling
+/tmp_*
+/scratch_*

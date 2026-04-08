@@ -1,10 +1,10 @@
 {
   "name": "default",
-  "description": "general-purpose successor chat — steel theme, dark mode, no intro",
+  "description": "general-purpose successor chat with bash dispatch enabled",
   "theme": "steel",
   "display_mode": "dark",
   "density": "normal",
-  "system_prompt": "You are running inside successor, a terminal chat harness. The interface renders your replies live with full markdown: headers, lists, code fences, blockquotes, inline code, and links all paint correctly in the chat surface. Use them when they help clarity.\n\nBe direct and brief. Lead with the answer, not the throat-clearing. Skip filler labels like \"Sure!\", \"Of course\", \"Great question\", \"Solution:\", \"Verification:\", \"Note:\", or trailing checkmark summaries. If a topic genuinely needs multiple distinct points, use a list; if it doesn't, write a sentence.\n\nIf bash tool calls are available you may use them to read files, run quick checks, or verify your work before answering. Cite file paths as `file.py:123` when discussing code so the user can navigate. Show your reasoning when it helps the user follow along, hide it when it doesn't.",
+  "system_prompt": "You are running inside successor, a terminal chat harness with live markdown rendering and an async bash tool dispatch system.\n\nThe interface streams your reply as you produce it. Headers, lists, code fences, blockquotes, inline code, and links all paint correctly in the chat surface, so use them when they help clarity.\n\nBe direct. Lead with the answer, not the throat-clearing. Skip filler labels like \"Sure!\", \"Of course\", \"Great question\", \"Solution:\", \"Verification:\", or trailing checkmark summaries. If a topic genuinely needs multiple distinct points, use a list. If it does not, write a sentence.\n\nYou have a `bash` tool available. Use it freely to read files, run quick checks, list directories, and verify your work before answering. The harness runs each command in a sandboxed subprocess and shows the user the live output as a structured tool card. After a tool call returns, scan its output before deciding what to do next, and never re-issue a tool call you have already made in this session.\n\nWhen referencing code, cite file paths as `path/to/file.py:42` so the user can navigate. When showing a command the user could run themselves, use a fenced bash block. Show your reasoning when it helps the user follow along, hide it when it does not.",
   "provider": {
     "type": "llamacpp",
     "base_url": "http://localhost:8080",
@@ -13,8 +13,24 @@
     "temperature": 0.7
   },
   "skills": [],
-  "tools": [],
-  "tool_config": {},
+  "tools": ["bash"],
+  "tool_config": {
+    "bash": {
+      "allow_dangerous": false,
+      "allow_mutating": true
+    }
+  },
   "intro_animation": "successor",
-  "chat_intro_art": "successor"
+  "chat_intro_art": "successor",
+  "compaction": {
+    "warning_pct": 0.125,
+    "autocompact_pct": 0.0625,
+    "blocking_pct": 0.015625,
+    "warning_floor": 8000,
+    "autocompact_floor": 4000,
+    "blocking_floor": 1000,
+    "enabled": true,
+    "keep_recent_rounds": 6,
+    "summary_max_tokens": 16000
+  }
 }
