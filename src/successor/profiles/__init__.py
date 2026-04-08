@@ -25,6 +25,7 @@ Public surface:
 
 from .profile import (
     PROFILE_REGISTRY,
+    CompactionConfig,
     Profile,
     all_profiles,
     get_active_profile,
@@ -36,6 +37,7 @@ from .profile import (
 
 __all__ = [
     "PROFILE_REGISTRY",
+    "CompactionConfig",
     "Profile",
     "all_profiles",
     "get_active_profile",

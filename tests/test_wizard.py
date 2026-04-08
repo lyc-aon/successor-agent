@@ -341,6 +341,10 @@ def test_full_save_flow_writes_json_file(temp_config_dir: Path) -> None:
 
     # Accept the default tool selection (bash enabled)
     wizard._handle_tools(KeyEvent(key=Key.ENTER))
+    assert wizard.current_step == Step.COMPACTION
+
+    # Accept the default compaction preset
+    wizard._handle_compaction(KeyEvent(key=Key.ENTER))
     assert wizard.current_step == Step.REVIEW
 
     # Save
@@ -358,6 +362,10 @@ def test_full_save_flow_writes_json_file(temp_config_dir: Path) -> None:
     assert payload["theme"] == "steel"
     assert payload["display_mode"] == "dark"
     assert payload["tools"] == ["bash"]
+    # Compaction defaults round-trip
+    assert "compaction" in payload
+    assert payload["compaction"]["enabled"] is True
+    assert payload["compaction"]["autocompact_pct"] == 0.0625  # default
 
     # active_profile was persisted to chat.json
     chat_cfg = json.loads((temp_config_dir / "chat.json").read_text())
@@ -395,7 +403,7 @@ def test_snapshot_welcome_renders(temp_config_dir: Path) -> None:
     plain = render_grid_to_plain(g)
     assert "successor · setup" in plain
     assert "welcome" in plain
-    assert "step 1 of 9" in plain
+    assert "step 1 of 10" in plain
 
 
 def test_snapshot_name_step_shows_input_field(temp_config_dir: Path) -> None:
@@ -405,7 +413,7 @@ def test_snapshot_name_step_shows_input_field(temp_config_dir: Path) -> None:
     plain = render_grid_to_plain(g)
     assert "test-name" in plain
     assert "name for your new profile" in plain
-    assert "step 2 of 9" in plain
+    assert "step 2 of 10" in plain
 
 
 def test_snapshot_theme_step_shows_live_preview(temp_config_dir: Path) -> None:
@@ -461,9 +469,9 @@ def test_handle_tools_toggle_flow(temp_config_dir: Path) -> None:
     wizard._handle_tools(KeyEvent(char=" "))
     assert "bash" in wizard.state.enabled_tools
 
-    # Enter advances to REVIEW
+    # Enter advances to COMPACTION (then REVIEW after one more advance)
     wizard._handle_tools(KeyEvent(key=Key.ENTER))
-    assert wizard.current_step == Step.REVIEW
+    assert wizard.current_step == Step.COMPACTION
 
 
 def test_wizard_state_chat_only_roundtrip(temp_config_dir: Path) -> None:

@@ -43,10 +43,16 @@ from typing import Literal
 # Invariant: warning_buf > autocompact_buf > blocking_buf (we want each
 # threshold to trip at progressively more "used" tokens).
 #
-# Default numbers are scaled from free-code's (13K autocompact buffer
-# at ~200K window) by the same ratio for a 262K default window, then
-# adjusted down a bit because llama.cpp is local and cheap so we can
-# compact more aggressively.
+# IN PRODUCTION, ContextBudget is constructed by chat._agent_budget()
+# which reads percentages from the active profile's CompactionConfig
+# and applies them to the resolved context window. The dataclass
+# defaults below are ONLY used by:
+#   - tests that import ContextBudget directly with no args
+#   - the example construction in loop.py's docstring
+# They're chosen so that ContextBudget() with no args produces values
+# arithmetically equivalent to CompactionConfig.buffers_for_window(262144)
+# at the default 1/8, 1/16, 1/64 percentages, so unit tests using
+# either path observe the same numbers.
 
 ThresholdState = Literal["ok", "warning", "autocompact", "blocking"]
 
@@ -57,12 +63,16 @@ class ContextBudget:
 
     Frozen because the budget is set once per session (from the
     profile) and never mutated. Mutable state lives in BudgetTracker.
+
+    Construct via `chat._agent_budget()` in production. The defaults
+    below match `CompactionConfig().buffers_for_window(262_144)` so
+    tests using either construction path see identical numbers.
     """
 
     window: int = 262_144
-    warning_buffer: int = 32_000
-    autocompact_buffer: int = 16_000
-    blocking_buffer: int = 4_000
+    warning_buffer: int = 32_768          # = int(262_144 * 0.125)
+    autocompact_buffer: int = 16_384      # = int(262_144 * 0.0625)
+    blocking_buffer: int = 4_096          # = int(262_144 * 0.015625)
 
     def __post_init__(self) -> None:
         # Sanity check the invariant — fail loud at construction time

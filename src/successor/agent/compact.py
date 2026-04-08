@@ -365,20 +365,52 @@ def compact(
     # Refresh token estimates and finalize the boundary's post-compact count
     counter.refresh_round_estimates(new_log)
     post_tokens = counter.count_log(new_log)
-    final_boundary = replace(boundary, post_compact_tokens=post_tokens)
+
+    # ─── Post-compact size assertion ───
+    #
+    # If the new log is >= 90% of the original size, the compaction
+    # failed to shrink anything meaningful. The most common causes are:
+    #   1. The model produced a verbose summary (large summary_max_tokens
+    #      + a chatty model)
+    #   2. keep_recent_rounds was too large for the log size — most
+    #      rounds got preserved verbatim, only a tiny prefix summarized
+    #   3. The log was already short and mostly recent rounds
+    #
+    # We do NOT raise — the new log is still the right thing to use,
+    # it's just less effective than expected. We attach a `warning`
+    # string to the boundary marker so the chat can surface it (and
+    # so the recompact-chain detector in BudgetTracker has visible
+    # signal to act on).
+    warning = ""
+    if pre_tokens > 0 and post_tokens >= pre_tokens * 0.9:
+        reduction = 100.0 * (1.0 - post_tokens / pre_tokens)
+        warning = (
+            f"compaction underperformed: {pre_tokens} → {post_tokens} "
+            f"tokens (only {reduction:.1f}% reduction). The summary may "
+            f"be too long, or keep_recent_rounds may be too large."
+        )
+
+    final_boundary = replace(
+        boundary,
+        post_compact_tokens=post_tokens,
+        warning=warning,
+    )
 
     # The boundary message in the log holds older metadata; rebuild
     # the boundary marker round's first message to use the final stats.
     if new_log.rounds and new_log.rounds[0].messages:
         old_msg = new_log.rounds[0].messages[0]
         if old_msg.is_boundary:
+            content = (
+                f"[compaction · {final_boundary.rounds_summarized} rounds · "
+                f"{final_boundary.pre_compact_tokens} → "
+                f"{final_boundary.post_compact_tokens} tokens]"
+            )
+            if warning:
+                content += " ⚠ underperformed"
             new_log.rounds[0].messages[0] = LogMessage(
                 role="system",
-                content=(
-                    f"[compaction · {final_boundary.rounds_summarized} rounds · "
-                    f"{final_boundary.pre_compact_tokens} → "
-                    f"{final_boundary.post_compact_tokens} tokens]"
-                ),
+                content=content,
                 created_at=final_boundary.happened_at,
                 is_boundary=True,
             )

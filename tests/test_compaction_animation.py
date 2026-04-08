@@ -746,8 +746,12 @@ def test_submit_cancels_in_flight_warmer(temp_config_dir: Path) -> None:
 
     # The warmer should be canceled (close() was called)
     assert chat._cache_warmer is None
-    # The original warmer should be marked done after the close
-    deadline = time.monotonic() + 1.0
+    # The original warmer should be marked done after the close. The
+    # _SlowWarmingClient sleeps 2s before its stream_chat returns —
+    # close() can't interrupt that sleep, so we need to wait the full
+    # delay before the warmer's run loop sees the stop event and
+    # exits. Add headroom for scheduling slop.
+    deadline = time.monotonic() + 3.0
     while not saved_warmer.is_done() and time.monotonic() < deadline:
         time.sleep(0.05)
     assert saved_warmer.is_done()

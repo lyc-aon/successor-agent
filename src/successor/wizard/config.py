@@ -275,6 +275,36 @@ _SETTINGS_TREE: tuple[_SettingField, ...] = (
         name="bash_max_output_bytes", label="max output bytes", section="",
         kind=FieldKind.NUMBER, number_kind="int",
     ),
+    # ── Compaction (autocompactor thresholds + behavior) ────────────
+    # All percentages are fractions of the resolved context window.
+    # The chat builds the runtime ContextBudget by multiplying each
+    # pct by the actual window size, with the corresponding floor as
+    # a hard minimum so tiny windows still get usable headroom.
+    _SettingField(
+        name="compaction_enabled", label="enabled", section="compaction",
+        kind=FieldKind.TOGGLE,
+        options_getter=lambda: [True, False],
+    ),
+    _SettingField(
+        name="compaction_warning_pct", label="warning %", section="",
+        kind=FieldKind.NUMBER, number_kind="float",
+    ),
+    _SettingField(
+        name="compaction_autocompact_pct", label="autocompact %", section="",
+        kind=FieldKind.NUMBER, number_kind="float",
+    ),
+    _SettingField(
+        name="compaction_blocking_pct", label="blocking %", section="",
+        kind=FieldKind.NUMBER, number_kind="float",
+    ),
+    _SettingField(
+        name="compaction_keep_recent_rounds", label="keep recent rounds", section="",
+        kind=FieldKind.NUMBER, number_kind="int",
+    ),
+    _SettingField(
+        name="compaction_summary_max_tokens", label="summary max tokens", section="",
+        kind=FieldKind.NUMBER, number_kind="int",
+    ),
 )
 
 # Indices into _SETTINGS_TREE that ARE editable (used for cursor jumps)
@@ -622,6 +652,21 @@ class SuccessorConfig(App):
                 return "(default)"
             return str(raw)
 
+        if field.name.startswith("compaction_"):
+            raw = self._profile_value_for_field_raw(profile, field)
+            if field.name == "compaction_enabled":
+                return "on (autocompact)" if raw else "off (manual only)"
+            if field.name.endswith("_pct"):
+                # Display as a percentage with 2 decimal places.
+                # The user enters and edits as a percent (e.g. 6.25
+                # for 6.25%) but the underlying value is a fraction.
+                if isinstance(raw, (int, float)):
+                    return f"{raw * 100:.2f}%"
+                return "(default)"
+            if isinstance(raw, (int, float)):
+                return str(raw)
+            return "(default)"
+
         raw = self._profile_value_for_field_raw(profile, field)
 
         # SECRET masks the value for display
@@ -672,6 +717,25 @@ class SuccessorConfig(App):
             new_provider = dict(old_profile.provider) if old_profile.provider else {}
             new_provider[key] = new_value
             new_profile = replace(old_profile, provider=new_provider)
+        elif field.name.startswith("compaction_"):
+            # Build a new CompactionConfig with the updated field. The
+            # config is itself a frozen dataclass so we use replace().
+            # If the new value violates the invariant (e.g. autocompact_pct
+            # set higher than warning_pct), CompactionConfig.__post_init__
+            # raises ValueError — we catch it and surface as a toast so
+            # the user sees the rejection without crashing the menu.
+            from ..profiles import CompactionConfig
+            key = field.name.removeprefix("compaction_")
+            try:
+                new_compaction = replace(old_profile.compaction, **{key: new_value})
+            except ValueError as exc:
+                self._toast = _Toast(
+                    f"invalid compaction value: {exc}",
+                    self.elapsed,
+                    kind="warn",
+                )
+                return
+            new_profile = replace(old_profile, compaction=new_compaction)
         else:
             return  # not editable
 
@@ -738,6 +802,10 @@ class SuccessorConfig(App):
             if profile.provider:
                 return profile.provider.get(key)
             return None
+        if field.name.startswith("compaction_"):
+            key = field.name.removeprefix("compaction_")
+            cfg = profile.compaction
+            return getattr(cfg, key, None)
         return None
 
     def _is_dirty(self, profile_name: str, field_name: str | None = None) -> bool:
@@ -1176,7 +1244,17 @@ class SuccessorConfig(App):
         if field.kind in (FieldKind.TEXT, FieldKind.NUMBER, FieldKind.SECRET):
             # Inline single-line text editor in the row itself
             current_raw = self._profile_value_for_field_raw(self._current_profile(), field)
-            buffer = "" if current_raw is None else str(current_raw)
+            # Compaction pct fields are stored as fractions (0.0625) but
+            # the user edits them as percentages (6.25). Convert here so
+            # the buffer matches what the user sees in the row label.
+            if (
+                current_raw is not None
+                and field.name.startswith("compaction_")
+                and field.name.endswith("_pct")
+            ):
+                buffer = f"{float(current_raw) * 100:g}"
+            else:
+                buffer = "" if current_raw is None else str(current_raw)
             self._inline_text_edit = _InlineTextEdit(
                 field_idx=self._settings_cursor,
                 buffer=buffer,
@@ -1240,6 +1318,11 @@ class SuccessorConfig(App):
                         kind="warn",
                     )
                     return
+                # Compaction pct fields: user enters a percent (6.25)
+                # which we convert to a fraction (0.0625) before
+                # writing to the underlying CompactionConfig.
+                if field.name.startswith("compaction_") and field.name.endswith("_pct"):
+                    parsed = float(parsed) / 100.0
                 self._set_field_on_profile(self._profile_cursor, field, parsed)
             else:
                 # TEXT or SECRET — save the buffer as-is
@@ -2411,6 +2494,8 @@ def _profile_to_json_dict(profile: Profile) -> dict:
         "tools": list(profile.tools),
         "tool_config": dict(profile.tool_config),
         "intro_animation": profile.intro_animation,
+        "chat_intro_art": profile.chat_intro_art,
+        "compaction": profile.compaction.to_dict(),
     }
 
 

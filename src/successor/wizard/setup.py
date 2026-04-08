@@ -200,8 +200,9 @@ class Step(Enum):
     INTRO = 5
     PROVIDER = 6
     TOOLS = 7
-    REVIEW = 8
-    SAVED = 9  # terminal screen — auto-advances into the chat
+    COMPACTION = 8
+    REVIEW = 9
+    SAVED = 10  # terminal screen — auto-advances into the chat
 
 
 # Display labels for the sidebar
@@ -214,6 +215,7 @@ _STEP_LABELS: dict[Step, str] = {
     Step.INTRO: "intro",
     Step.PROVIDER: "provider",
     Step.TOOLS: "tools",
+    Step.COMPACTION: "compact",
     Step.REVIEW: "review",
     Step.SAVED: "saved",
 }
@@ -228,6 +230,7 @@ _SIDEBAR_STEPS: tuple[Step, ...] = (
     Step.INTRO,
     Step.PROVIDER,
     Step.TOOLS,
+    Step.COMPACTION,
     Step.REVIEW,
 )
 
@@ -242,6 +245,50 @@ _INTRO_OPTIONS: tuple[tuple[str | None, str], ...] = (
     (None, "(none) — chat opens immediately"),
     ("successor", "successor emergence — braille portrait (~5s)"),
 )
+
+# Compaction presets shown in the COMPACTION step. Each tuple is
+# (key, label, description, CompactionConfig instance).
+#
+# The "default" preset matches CompactionConfig() defaults exactly so
+# users who pick it get the same behavior as users on profiles created
+# before this step existed.
+#
+# "aggressive" compacts much earlier — useful for slow models or for
+# preserving headroom on tight context windows.
+#
+# "lazy" defers compaction until the very last moment — useful when
+# you'd rather lose context history than pay the compaction cost early.
+#
+# "off" disables proactive compaction entirely. Reactive PTL recovery
+# still saves you from API rejections, but the chat will run hot.
+def _compaction_presets():
+    """Lazy import + construction so the module imports cheaply."""
+    from ..profiles import CompactionConfig
+    return (
+        ("default", "default — 12.5% / 6.25% / 1.5%",
+         "fire warning at ~12% headroom, autocompact at ~6%, refuse API at ~1.5%",
+         CompactionConfig()),
+        ("aggressive", "aggressive — 25% / 12.5% / 3%",
+         "compact early so you never feel the slow-down at the edge of the window",
+         CompactionConfig(
+            warning_pct=0.25,
+            autocompact_pct=0.125,
+            blocking_pct=0.03,
+         )),
+        ("lazy", "lazy — 5% / 2% / 0.5%",
+         "defer compaction as long as possible, keeping more verbatim history in flight",
+         CompactionConfig(
+            warning_pct=0.05,
+            autocompact_pct=0.02,
+            blocking_pct=0.005,
+            warning_floor=2_000,
+            autocompact_floor=1_000,
+            blocking_floor=500,
+         )),
+        ("off", "off — never autocompact",
+         "no proactive compaction; reactive PTL recovery still catches API limits",
+         CompactionConfig(enabled=False)),
+    )
 
 
 # ─── Wizard state ───
@@ -281,6 +328,11 @@ class _WizardState:
     provider_kind: str = "llamacpp"
     provider_api_key: str = ""
     provider_model: str = "openai/gpt-oss-20b:free"
+    # Selected compaction preset key — one of:
+    #   "default" / "aggressive" / "lazy" / "off"
+    # The preset is resolved to a real CompactionConfig at to_profile()
+    # time via _compaction_presets().
+    compaction_preset: str = "default"
 
     def _build_provider_dict(self) -> dict:
         """Construct the provider config dict from the wizard state.
@@ -311,6 +363,15 @@ class _WizardState:
             }
         return dict(_DEFAULT_PROVIDER)
 
+    def _resolve_compaction(self):
+        """Look up the user's selected preset and return its config."""
+        for key, _label, _desc, cfg in _compaction_presets():
+            if key == self.compaction_preset:
+                return cfg
+        # Unknown preset name — fall back to default
+        from ..profiles import CompactionConfig
+        return CompactionConfig()
+
     def to_profile(self) -> Profile:
         """Build the final Profile dataclass from the user's choices."""
         return Profile(
@@ -326,6 +387,7 @@ class _WizardState:
             tool_config={},
             intro_animation=self.intro_animation,
             chat_intro_art=self.chat_intro_art,
+            compaction=self._resolve_compaction(),
         )
 
     def to_json_dict(self) -> dict:
@@ -343,6 +405,7 @@ class _WizardState:
             "tool_config": {},
             "intro_animation": self.intro_animation,
             "chat_intro_art": self.chat_intro_art,
+            "compaction": self._resolve_compaction().to_dict(),
         }
 
 
@@ -423,6 +486,7 @@ class SuccessorSetup(App):
             Step.INTRO: 1,    # default to "successor" — matches state default
             Step.PROVIDER: 0,  # 0 = type toggle, 1 = api_key, 2 = model
             Step.TOOLS: 0,
+            Step.COMPACTION: 0,  # default to "default" preset
         }
 
         # ─── Animation state ───
@@ -646,6 +710,7 @@ class SuccessorSetup(App):
             Step.INTRO: self._handle_intro,
             Step.PROVIDER: self._handle_provider,
             Step.TOOLS: self._handle_tools,
+            Step.COMPACTION: self._handle_compaction,
             Step.REVIEW: self._handle_review,
         }
         handler = handler_map.get(self.current_step)
@@ -794,6 +859,37 @@ class SuccessorSetup(App):
             cursor = 1 - cursor
             self._cursors[Step.INTRO] = cursor
             self.state.intro_animation = _INTRO_OPTIONS[cursor][0]
+
+    def _handle_compaction(self, event: KeyEvent) -> None:
+        """Compaction step: cycle through the four presets.
+
+        ↑↓ moves the cursor through (default, aggressive, lazy, off).
+        Space also cycles. → / Enter advances to REVIEW. ← retreats
+        to TOOLS.
+        """
+        presets = _compaction_presets()
+        cursor = self._cursors[Step.COMPACTION]
+        if event.key == Key.UP:
+            cursor = (cursor - 1) % len(presets)
+            self._cursors[Step.COMPACTION] = cursor
+            self.state.compaction_preset = presets[cursor][0]
+            return
+        if event.key == Key.DOWN:
+            cursor = (cursor + 1) % len(presets)
+            self._cursors[Step.COMPACTION] = cursor
+            self.state.compaction_preset = presets[cursor][0]
+            return
+        if event.is_char and event.char == " ":
+            cursor = (cursor + 1) % len(presets)
+            self._cursors[Step.COMPACTION] = cursor
+            self.state.compaction_preset = presets[cursor][0]
+            return
+        if event.key == Key.ENTER or event.key == Key.RIGHT:
+            self._advance_step()
+            return
+        if event.key == Key.LEFT:
+            self._retreat_step()
+            return
 
     def _handle_provider(self, event: KeyEvent) -> None:
         """Provider step: pick local llama.cpp, OpenAI, or OpenRouter.
@@ -1198,6 +1294,8 @@ class SuccessorSetup(App):
             self._paint_provider(grid, theme, body_left, body_top, body_right, body_bottom)
         elif self.current_step == Step.TOOLS:
             self._paint_tools(grid, theme, body_left, body_top, body_right, body_bottom)
+        elif self.current_step == Step.COMPACTION:
+            self._paint_compaction(grid, theme, body_left, body_top, body_right, body_bottom)
         elif self.current_step == Step.REVIEW:
             self._paint_review(grid, theme, body_left, body_top, body_right, body_bottom)
         elif self.current_step == Step.SAVED:
@@ -1213,6 +1311,7 @@ class SuccessorSetup(App):
             Step.INTRO: "intro animation",
             Step.PROVIDER: "model provider",
             Step.TOOLS: "enable tools",
+            Step.COMPACTION: "autocompact behavior",
             Step.REVIEW: "review and save",
             Step.SAVED: "saved",
         }[self.current_step]
@@ -1837,6 +1936,127 @@ class SuccessorSetup(App):
             paint_text(
                 grid, summary, left, summary_y,
                 style=Style(fg=summary_color, bg=theme.bg, attrs=ATTR_BOLD),
+            )
+
+    def _paint_compaction(
+        self,
+        grid: Grid,
+        theme: ThemeVariant,
+        left: int,
+        top: int,
+        right: int,
+        bottom: int,
+    ) -> None:
+        """Compaction preset picker.
+
+        Lists the four presets (default, aggressive, lazy, off) with
+        a one-line description of each. Below the list, a small "live
+        preview" panel shows the resolved buffer thresholds the
+        currently-selected preset would produce against a 200K window
+        — gives the user a concrete feel for what they're picking.
+        """
+        prompt = "when should the harness compact your conversation?"
+        paint_text(grid, prompt, left, top, style=Style(fg=theme.fg, bg=theme.bg))
+        helper = "↑↓ or space to cycle · → to confirm · the chat's /budget command shows live thresholds"
+        paint_text(
+            grid, helper, left, top + 1,
+            style=Style(fg=theme.fg_dim, bg=theme.bg, attrs=ATTR_DIM | ATTR_ITALIC),
+        )
+
+        presets = _compaction_presets()
+        cursor = self._cursors[Step.COMPACTION]
+
+        # Each preset gets two rows: the label, then the description.
+        list_top = top + 3
+        for i, (key, label, desc, _cfg) in enumerate(presets):
+            row_y = list_top + i * 3
+            if row_y >= bottom - 1:
+                break
+            is_selected = i == cursor
+            glyph = "▸" if is_selected else " "
+            line = f"{glyph}  {label}"
+            line_style = Style(
+                fg=theme.accent if is_selected else theme.fg,
+                bg=theme.bg,
+                attrs=ATTR_BOLD if is_selected else 0,
+            )
+            paint_text(grid, line, left, row_y, style=line_style)
+            if row_y + 1 < bottom:
+                desc_style = Style(
+                    fg=theme.fg_dim if is_selected else theme.fg_subtle,
+                    bg=theme.bg,
+                    attrs=ATTR_ITALIC if is_selected else ATTR_DIM | ATTR_ITALIC,
+                )
+                paint_text(grid, f"   {desc}", left, row_y + 1, style=desc_style)
+
+        # Live preview panel — sits at the bottom of the body, shows
+        # what the selected preset's buffers would look like against
+        # a representative 200K window.
+        if cursor < len(presets):
+            _key, _label, _desc, cfg = presets[cursor]
+            preview_y = list_top + len(presets) * 3 + 1
+            if preview_y < bottom - 2:
+                self._paint_compaction_preview(
+                    grid, theme, cfg, left, preview_y, right - left,
+                )
+
+    def _paint_compaction_preview(
+        self,
+        grid: Grid,
+        theme: ThemeVariant,
+        cfg,            # CompactionConfig
+        x: int,
+        y: int,
+        w: int,
+    ) -> None:
+        """Render the resolved-buffer preview for a CompactionConfig.
+
+        Shows three lines computed against a 200K reference window:
+            warning fires at      X tokens (Y%)
+            autocompact fires at  X tokens (Y%)
+            blocking refusal at   X tokens (Y%)
+
+        This gives the user a concrete sense of what each preset
+        does without making them do the math.
+        """
+        REF_WINDOW = 200_000
+        warning_buf, autocompact_buf, blocking_buf = cfg.buffers_for_window(REF_WINDOW)
+        warning_at = REF_WINDOW - warning_buf
+        autocompact_at = REF_WINDOW - autocompact_buf
+        blocking_at = REF_WINDOW - blocking_buf
+
+        title = f"on a {REF_WINDOW // 1000}K context window:"
+        paint_text(
+            grid, title, x, y,
+            style=Style(fg=theme.fg_dim, bg=theme.bg, attrs=ATTR_DIM),
+        )
+
+        if not cfg.enabled:
+            line = "  autocompact disabled — only blocking refusal applies"
+            paint_text(
+                grid, line, x, y + 1,
+                style=Style(fg=theme.accent_warm, bg=theme.bg, attrs=ATTR_ITALIC),
+            )
+            line2 = f"  blocking refusal at {blocking_at:,} tokens"
+            paint_text(
+                grid, line2, x, y + 2,
+                style=Style(fg=theme.fg_dim, bg=theme.bg),
+            )
+            return
+
+        warning_pct = 100 * warning_at / REF_WINDOW
+        auto_pct = 100 * autocompact_at / REF_WINDOW
+        block_pct = 100 * blocking_at / REF_WINDOW
+        rows = [
+            ("warning at",     warning_at, warning_pct),
+            ("autocompact at", autocompact_at, auto_pct),
+            ("blocking at",    blocking_at, block_pct),
+        ]
+        for i, (label, val, pct) in enumerate(rows):
+            line = f"  {label:<16} {val:>9,} tokens  ({pct:.1f}% full)"
+            paint_text(
+                grid, line, x, y + 1 + i,
+                style=Style(fg=theme.fg_dim, bg=theme.bg),
             )
 
     def _paint_review(

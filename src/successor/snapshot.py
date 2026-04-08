@@ -259,6 +259,7 @@ def wizard_demo_snapshot(
     density: str = "normal",
     intro_animation: str | None = None,
     enabled_tools: tuple[str, ...] | None = None,
+    compaction_preset: str = "default",
     elapsed: float = 0.5,
 ) -> Grid:
     """Build a Grid showing the setup wizard at a chosen step.
@@ -300,8 +301,18 @@ def wizard_demo_snapshot(
         density=density,
         intro_animation=intro_animation,
         enabled_tools=tools_tuple,
+        compaction_preset=compaction_preset,
     )
     wizard._sync_preview_to_state()
+
+    # Sync the compaction-step cursor to the chosen preset so the
+    # snapshot reflects what the user would see after picking it.
+    from .wizard.setup import _compaction_presets
+    presets = _compaction_presets()
+    for i, (key, _label, _desc, _cfg) in enumerate(presets):
+        if key == compaction_preset:
+            wizard._cursors[Step.COMPACTION] = i
+            break
 
     # Resolve the step name to its enum value
     step_lookup = {s.name.lower(): s for s in Step}

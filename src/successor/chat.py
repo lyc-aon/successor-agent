@@ -1641,6 +1641,23 @@ class SuccessorChat(App):
         # WAITING → MATERIALIZE.
         self._compaction_worker: _CompactionWorker | None = None
 
+        # Pending agent-turn after autocompact. Set when the autocompact
+        # gate at the start of `_begin_agent_turn` decides to defer the
+        # turn so compaction can run first. The compaction worker poll
+        # checks this flag on success and re-enters `_begin_agent_turn`
+        # so the user's message gets sent after the log shrinks.
+        # Cleared on success, on compaction failure (the turn is still
+        # attempted — reactive PTL recovery may save it), and on cancel.
+        self._pending_agent_turn_after_compact: bool = False
+
+        # Per-turn flag to prevent autocompact from firing twice for
+        # the same user message. Set when the autocompact gate fires;
+        # cleared at the start of every new `_submit`. This is the
+        # chat-layer equivalent of agent.budget.RecompactChain — it
+        # stops the loop "compact → still over → compact again" if
+        # the model produces a huge summary.
+        self._autocompact_attempted_this_turn: bool = False
+
         # Cache pre-warming worker — fires after compaction completes
         # to populate llama.cpp's KV cache with the post-compact prefix.
         # Without this, the next user message after compaction pays a
@@ -1920,6 +1937,12 @@ class SuccessorChat(App):
                 self._compaction_worker.close()
                 self._compaction_worker = None
                 self._compaction_anim = None
+                # If this was an autocompact deferral, clear the
+                # pending-resume flag too — the user explicitly
+                # cancelled, so don't continue the deferred turn.
+                # The user message stays in self.messages; they can
+                # press Enter again or modify it.
+                self._pending_agent_turn_after_compact = False
                 self.messages.append(_Message(
                     "successor",
                     "compaction cancelled.",
@@ -2789,6 +2812,10 @@ class SuccessorChat(App):
         self.messages.append(_Message("user", text))
         self._scroll_to_bottom()
         self._agent_turn = 0
+        # Reset the per-turn autocompact guard so a new user message
+        # gets exactly one autocompact attempt before falling through
+        # to the API (which may then trip reactive PTL recovery).
+        self._autocompact_attempted_this_turn = False
         self._begin_agent_turn()
 
     def _begin_agent_turn(self) -> None:
@@ -2807,7 +2834,19 @@ class SuccessorChat(App):
         needs to re-run it for each turn against the updated
         `self.messages` (which now contains the last turn's tool
         cards serialized as assistant-role history).
+
+        AUTOCOMPACT GATE: before opening the stream, check whether
+        the active profile's CompactionConfig says we should compact
+        proactively. If yes, defer the turn — `_check_and_maybe_defer_for_autocompact()`
+        spawns the compaction worker and returns True; the worker's
+        poll callback re-enters this function after compaction
+        succeeds. If compaction fails, the turn falls through anyway
+        and reactive PTL recovery in the streaming layer catches it.
         """
+        # Autocompact gate. Returns True if the turn was deferred.
+        if self._check_and_maybe_defer_for_autocompact():
+            return
+
         self._agent_turn += 1
         if self._agent_turn > MAX_AGENT_TURNS:
             self.messages.append(_Message(
@@ -3190,19 +3229,29 @@ class SuccessorChat(App):
         return window
 
     def _agent_budget(self) -> ContextBudget:
-        """Build a ContextBudget from the resolved context window.
+        """Build a ContextBudget from the resolved context window AND
+        the active profile's CompactionConfig.
 
         Window comes from _resolve_context_window() which consults the
         profile override first, then probes the provider, then falls
-        back to the hardcoded default. Headroom buffers are static for
-        now — they could move into the profile later.
+        back to the hardcoded default. Headroom buffers come from
+        `self.profile.compaction.buffers_for_window(window)` which
+        applies the configured percentages with the configured floors.
+
+        This is the SOLE seam between profile configuration and the
+        runtime budget. Both the /budget command and the loop's
+        autocompact gate read through this function, so changing a
+        profile's compaction config and re-resolving the budget is
+        the only thing needed for the new thresholds to take effect.
         """
         window = self._resolve_context_window()
+        cfg = self.profile.compaction
+        warning_buf, autocompact_buf, blocking_buf = cfg.buffers_for_window(window)
         return ContextBudget(
             window=window,
-            warning_buffer=max(8_000, window // 16),
-            autocompact_buffer=max(4_000, window // 32),
-            blocking_buffer=max(1_000, window // 128),
+            warning_buffer=warning_buf,
+            autocompact_buffer=autocompact_buf,
+            blocking_buffer=blocking_buf,
         )
 
     # ─── Token count caching ───
@@ -3449,6 +3498,117 @@ class SuccessorChat(App):
 
     # ─── /compact ───
 
+    def _check_and_maybe_defer_for_autocompact(self) -> bool:
+        """Decide whether the upcoming agent turn should be preceded
+        by an automatic compaction.
+
+        Returns True if the turn was deferred (compaction worker
+        spawned, `_pending_agent_turn_after_compact` set). The caller
+        must return immediately so the worker has the floor.
+
+        Returns False if the turn should proceed normally.
+
+        Decision rules (all must be true to defer):
+          1. The active profile's `compaction.enabled` is True.
+          2. No compaction worker is already running. (If one is,
+             we're either in mid-compact or in the deferred-resume
+             window; either way the autocompact gate is satisfied.)
+          3. We have NOT already attempted autocompact for this
+             user message. The `_autocompact_attempted_this_turn`
+             flag (reset in `_submit`) prevents the loop "compact
+             → still over → compact again" if a single compaction
+             didn't shrink the log enough.
+          4. The current token count is at or above the autocompact
+             threshold derived from `_agent_budget()`.
+          5. The log has at least `MIN_ROUNDS_TO_COMPACT` rounds.
+             A handful of rounds isn't worth compacting.
+
+        On a deferral, this method spawns the compaction worker via
+        the same path as the manual /compact command (reusing the
+        animation + worker plumbing) but tagged with reason="auto".
+        """
+        # Rule 1: profile's compaction must be enabled
+        if not self.profile.compaction.enabled:
+            return False
+
+        # Rule 2: no in-flight worker
+        if self._compaction_worker is not None:
+            return False
+
+        # Rule 3: don't loop on the same user message
+        if self._autocompact_attempted_this_turn:
+            return False
+
+        # Rule 4 + 5 require building the budget and counting tokens.
+        # These are cheap (cached) so the common-case "no compact
+        # needed" path adds essentially zero overhead per turn.
+        from .agent.compact import MIN_ROUNDS_TO_COMPACT
+        counter = self._agent_token_counter()
+        log = self._to_agent_log()
+        if log.round_count < MIN_ROUNDS_TO_COMPACT:
+            return False
+
+        budget = self._agent_budget()
+        used = counter.count_log(log)
+        if not budget.should_autocompact(used):
+            return False
+
+        # All gates passed — fire compaction. Mirrors `_handle_compact_cmd`
+        # but with reason="auto" and the deferred-resume flag set so
+        # `_poll_compaction_worker` knows to re-enter `_begin_agent_turn`
+        # after success.
+        self._autocompact_attempted_this_turn = True
+        self._pending_agent_turn_after_compact = True
+        self._spawn_compaction_worker(log=log, counter=counter, reason="auto")
+        return True
+
+    def _spawn_compaction_worker(
+        self,
+        *,
+        log,           # agent.MessageLog
+        counter,       # TokenCounter
+        reason: str,   # "manual" | "auto"
+    ) -> None:
+        """Spawn the compaction worker thread + arm the animation.
+
+        Shared between manual /compact and the autocompact gate. The
+        only difference between callers is the reason tag (which gets
+        attached to the boundary marker for diagnostics) and what
+        happens after the worker returns — manual just commits the
+        new log; auto re-enters `_begin_agent_turn`.
+        """
+        from .agent.compact import DEFAULT_KEEP_RECENT_ROUNDS
+        pre_tokens = counter.count_log(log)
+        keep_n = min(
+            self.profile.compaction.keep_recent_rounds,
+            max(1, log.round_count // 2),
+        )
+        rounds_to_summarize = log.round_count - keep_n
+
+        # Snapshot for the fold animation
+        snapshot = list(self.messages)
+        snapshot_count = len(snapshot)
+
+        self._compaction_anim = _CompactionAnimation(
+            started_at=time.monotonic(),
+            pre_compact_snapshot=snapshot,
+            pre_compact_count=snapshot_count,
+            boundary=None,
+            summary_text="",
+            reason=reason,
+            pre_compact_tokens=pre_tokens,
+            rounds_summarized=rounds_to_summarize,
+        )
+
+        self._compaction_worker = _CompactionWorker(
+            log=log,
+            client=self.client,
+            counter=counter,
+            reason=reason,
+        )
+        self._compaction_worker.start()
+        self._scroll_to_bottom()
+
     def _handle_compact_cmd(self) -> None:
         """Trigger compaction asynchronously.
 
@@ -3474,55 +3634,25 @@ class SuccessorChat(App):
             ))
             return
 
+        from .agent.compact import MIN_ROUNDS_TO_COMPACT
         counter = self._agent_token_counter()
         log = self._to_agent_log()
-        if log.round_count < 4:
+        if log.round_count < MIN_ROUNDS_TO_COMPACT:
             self.messages.append(_Message(
                 "successor",
-                f"need at least 4 rounds to compact, have {log.round_count}. "
-                f"Run /burn first to inflate the context.",
+                f"need at least {MIN_ROUNDS_TO_COMPACT} rounds to compact, "
+                f"have {log.round_count}. Run /burn first to inflate the context.",
                 synthetic=True,
             ))
             return
 
-        # Pre-compute token count + rounds-to-summarize so the spinner
-        # can show "compacting N rounds (X tokens)" right away.
-        pre_tokens = counter.count_log(log)
-        from .agent.compact import DEFAULT_KEEP_RECENT_ROUNDS
-        keep_n = min(DEFAULT_KEEP_RECENT_ROUNDS, max(1, log.round_count // 2))
-        rounds_to_summarize = log.round_count - keep_n
-
-        # Snapshot the messages BEFORE running compaction so the fold
-        # phase can paint them dimming out. The chat retains its
-        # current view during anticipation+fold; after fold, the
-        # waiting phase shows the spinner.
-        snapshot = list(self.messages)
-        snapshot_count = len(snapshot)
-
-        # Arm the animation IMMEDIATELY — phases begin now. The
-        # waiting phase activates automatically when fold ends if the
-        # worker hasn't returned yet.
-        self._compaction_anim = _CompactionAnimation(
-            started_at=time.monotonic(),
-            pre_compact_snapshot=snapshot,
-            pre_compact_count=snapshot_count,
-            boundary=None,  # filled in by _poll_compaction_worker
-            summary_text="",
-            reason="manual",
-            pre_compact_tokens=pre_tokens,
-            rounds_summarized=rounds_to_summarize,
-        )
-
-        # Spawn the worker. It runs compact() against the live client
-        # in a daemon thread; on_tick polls it every frame.
-        self._compaction_worker = _CompactionWorker(
+        # Spawn the worker via the shared helper. The autocompact gate
+        # uses the same path with reason="auto".
+        self._spawn_compaction_worker(
             log=log,
-            client=self.client,
             counter=counter,
             reason="manual",
         )
-        self._compaction_worker.start()
-        self._scroll_to_bottom()
 
     def _poll_compaction_worker(self) -> None:
         """Check whether the compaction worker has finished and apply
@@ -3544,6 +3674,15 @@ class SuccessorChat(App):
         # Worker finished
         self._compaction_worker = None
 
+        # Capture the deferred-resume flag BEFORE clearing it. The
+        # flag is consumed exactly once: either we resume the agent
+        # turn after a successful compaction, or we resume after a
+        # FAILED compaction (the user is still waiting on their
+        # message — reactive PTL recovery in the streaming layer
+        # will catch the failure case downstream).
+        was_pending_resume = self._pending_agent_turn_after_compact
+        self._pending_agent_turn_after_compact = False
+
         if result.error is not None:
             # Failure — drop the animation and report
             self._compaction_anim = None
@@ -3552,6 +3691,14 @@ class SuccessorChat(App):
                 f"compaction failed: {result.error}",
                 synthetic=True,
             ))
+            # If this compaction was an autocompact deferral, the
+            # user's message is still in self.messages waiting for a
+            # response. Try to send it anyway — reactive PTL recovery
+            # may save us, or the user gets a clear error from the
+            # API. The `_autocompact_attempted_this_turn` guard
+            # prevents the gate from re-firing infinitely.
+            if was_pending_resume:
+                self._begin_agent_turn()
             return
 
         # Success — apply the new log + transition animation to materialize
@@ -3559,6 +3706,8 @@ class SuccessorChat(App):
             # The animation was somehow cleared (e.g. cancel) — apply
             # the log silently and skip the visible transition
             self._from_agent_log(result.new_log, boundary_meta=result.boundary)
+            if was_pending_resume:
+                self._begin_agent_turn()
             return
 
         self._from_agent_log(result.new_log, boundary_meta=result.boundary)
@@ -3568,6 +3717,14 @@ class SuccessorChat(App):
         self._compaction_anim.boundary = result.boundary
         self._compaction_anim.summary_text = result.boundary.summary_text
         self._compaction_anim.result_arrived_at = time.monotonic()
+
+        # If this compaction was an autocompact deferral, the user's
+        # message is still in self.messages waiting for a response.
+        # Re-enter `_begin_agent_turn` so the model gets the prompt
+        # against the freshly-compacted history. The animation
+        # continues painting underneath while the new stream opens.
+        if was_pending_resume:
+            self._begin_agent_turn()
 
         # Fire cache pre-warming for the post-compact prefix. This
         # populates llama.cpp's KV cache so the next user message

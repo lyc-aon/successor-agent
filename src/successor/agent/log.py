@@ -167,6 +167,7 @@ class BoundaryMarker:
     rounds_summarized: int
     summary_text: str  # the actual summary the model produced
     reason: str = "auto"  # "auto" | "manual" | "reactive" (PTL recovery)
+    warning: str = ""    # non-empty if post-compact size assertion fired
 
     @property
     def reduction_pct(self) -> float:
@@ -174,6 +175,20 @@ class BoundaryMarker:
         if self.pre_compact_tokens == 0:
             return 0.0
         return 100.0 * (1.0 - self.post_compact_tokens / self.pre_compact_tokens)
+
+    @property
+    def underperformed(self) -> bool:
+        """True if this compaction failed to shrink the log meaningfully.
+
+        Defined as: post-compact size >= 90% of pre-compact size.
+        Indicates one of:
+          - the model produced an oversized summary
+          - keep_recent_rounds was too large
+          - the log was already mostly recent rounds (nothing to compact)
+        """
+        if self.pre_compact_tokens == 0:
+            return False
+        return self.post_compact_tokens >= self.pre_compact_tokens * 0.9
 
 
 # ─── An API round — the indivisible compaction unit ───

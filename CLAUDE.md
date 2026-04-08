@@ -239,9 +239,14 @@ reference implementation. Where we diverged:
   in background threads, the chat tick loop pumps them.
 - FallbackTriggeredError → SKIPPED. We have one provider.
 - Reactive compact on prompt-too-long → KEPT.
-- Token thresholds → scaled for llama.cpp's larger contexts:
-  `autocompact_buffer = max(4_000, window // 32)` (vs free-code's
-  flat 13K).
+- Token thresholds → percentage-based per profile via
+  `CompactionConfig.warning_pct / autocompact_pct / blocking_pct`,
+  with hard floors. Defaults are 12.5% / 6.25% / 1.5625% with 8K / 4K
+  / 1K floors. The chat's `_agent_budget()` constructs a
+  `ContextBudget` from `profile.compaction.buffers_for_window(window)`
+  on every read so swapping profiles or changing percentages takes
+  effect immediately. See `docs/compaction.md` for the full reference
+  and the JSON schema.
 
 ## Things deliberately deferred
 
