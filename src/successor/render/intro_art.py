@@ -11,8 +11,11 @@ Resolution order:
   1. Absolute path → load directly. Lets users reference any file on
      their system without registering it.
   2. Built-in name → look in `src/successor/builtin/intros/<name>/`
-     for `10-title.txt` (the convention used by the bundled
-     `successor` intro animation — the final title frame).
+     for the canonical hero file. The lookup preference is:
+       (a) `hero.txt` — the dedicated empty-state hero art (preferred)
+       (b) `10-title.txt` — fallback for legacy intros that don't ship
+           a hero.txt (the bundled successor intro had this convention
+           before hero.txt landed)
   3. User dir → look in `~/.config/successor/art/<name>.txt` for a
      bare braille frame.
   4. Built-in single-file → look in
@@ -57,8 +60,14 @@ def load_intro_art(name_or_path: str | None) -> BrailleArt | None:
         return _try_load(path)
 
     # 2. Built-in name with full animation directory (e.g. "successor")
+    # Prefer the dedicated hero.txt if it exists, fall back to the
+    # legacy 10-title.txt convention for any older intro directory
+    # that hasn't been updated yet.
     from ..loader import builtin_root, config_dir
     builtin_dir = builtin_root() / "intros" / name
+    hero_path = builtin_dir / "hero.txt"
+    if hero_path.exists():
+        return _try_load(hero_path)
     title_path = builtin_dir / "10-title.txt"
     if title_path.exists():
         return _try_load(title_path)

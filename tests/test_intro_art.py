@@ -30,13 +30,115 @@ from successor.snapshot import render_grid_to_plain
 
 
 def test_load_intro_art_resolves_bundled_successor() -> None:
-    """The bundled `successor` name resolves to the title portrait
-    via the intros/<name>/10-title.txt convention."""
+    """The bundled `successor` name resolves via the
+    intros/<name>/hero.txt convention. hero.txt holds the soldier
+    portrait without the SUCCESSOR title text overlaid; legacy
+    fallback was 10-title.txt before hero.txt landed."""
     art = load_intro_art("successor")
     assert art is not None
     # Source is loaded — the parsed dot grid should have content
     assert art.dot_h > 0
     assert art.dot_w > 0
+
+
+def test_load_intro_art_prefers_hero_over_title_when_both_exist(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """If a builtin intro directory ships both hero.txt and 10-title.txt,
+    the loader picks hero.txt. The fallback path only kicks in for
+    legacy intros that haven't added hero.txt yet."""
+    from successor.render import intro_art as ia_mod
+
+    # Build a fake builtin intros directory with both files. hero.txt
+    # is one row of '⠿' (filled braille blocks), 10-title.txt is one
+    # row of '⠁' (single-dot blocks). The loaded BrailleArt's dot
+    # density tells us which file was read.
+    fake_builtin = tmp_path / "builtin"
+    intros_dir = fake_builtin / "intros" / "fake-anim"
+    intros_dir.mkdir(parents=True)
+    (intros_dir / "hero.txt").write_text("⠿⠿⠿⠿\n⠿⠿⠿⠿\n")
+    (intros_dir / "10-title.txt").write_text("⠁⠁⠁⠁\n⠁⠁⠁⠁\n")
+
+    # Patch builtin_root to point at our fake tree
+    monkeypatch.setattr(
+        "successor.loader.builtin_root",
+        lambda: fake_builtin,
+    )
+
+    art = ia_mod.load_intro_art("fake-anim")
+    assert art is not None
+    # hero.txt is dense (8 dots per cell, '⠿'), title is sparse
+    # (1 dot per cell, '⠁'). Count the on-bits in the parsed dot
+    # bitmap to confirm we got the dense file.
+    on_bits = sum(1 for row in art.dots for px in row if px)
+    # 4 cells × 2 rows × 8 dots/cell = 64 dots if dense, 8 if sparse
+    assert on_bits > 32, f"expected dense hero.txt, got {on_bits} on-bits"
+
+
+def test_load_intro_art_falls_back_to_title_when_no_hero(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A legacy intro directory that ships only 10-title.txt still
+    resolves correctly via the fallback path."""
+    from successor.render import intro_art as ia_mod
+
+    fake_builtin = tmp_path / "builtin"
+    intros_dir = fake_builtin / "intros" / "legacy-anim"
+    intros_dir.mkdir(parents=True)
+    # Only ship 10-title.txt, no hero.txt
+    (intros_dir / "10-title.txt").write_text("⠿⠿\n⠿⠿\n")
+
+    monkeypatch.setattr(
+        "successor.loader.builtin_root",
+        lambda: fake_builtin,
+    )
+
+    art = ia_mod.load_intro_art("legacy-anim")
+    assert art is not None
+    on_bits = sum(1 for row in art.dots for px in row if px)
+    assert on_bits > 0
+
+
+def test_bundled_successor_hero_has_no_title_text() -> None:
+    """The bundled successor hero (hero.txt) should NOT contain the
+    SUCCESSOR title text painted across the top. The title text shows
+    up in 10-title.txt only; hero.txt is the soldier-without-text
+    variant.
+
+    We detect 'has title text' by comparing the on-bit density of
+    the top quarter of hero.txt to 10-title.txt directly. The title
+    text adds ~190 dots to the top region (1420 → 1610 measured),
+    so any threshold under 1500 catches the no-title hero and any
+    threshold above 1550 would also catch the with-title legacy.
+    """
+    from pathlib import Path
+    from successor.loader import builtin_root
+    from successor.render.braille import BrailleArt, load_frame
+
+    art = load_intro_art("successor")
+    assert art is not None
+    top = art.dots[: len(art.dots) // 4]
+    hero_top_on = sum(1 for row in top for px in row if px)
+
+    # Sanity-check against the actual files: hero.txt < 10-title.txt
+    base = builtin_root() / "intros" / "successor"
+    title_art = BrailleArt(load_frame(base / "10-title.txt"))
+    title_top = title_art.dots[: len(title_art.dots) // 4]
+    title_top_on = sum(1 for row in title_top for px in row if px)
+
+    assert hero_top_on < title_top_on, (
+        f"hero (no title) should be sparser at top than 10-title: "
+        f"hero={hero_top_on} title={title_top_on}"
+    )
+    # And the loader should resolve the SAME file as hero.txt directly
+    direct_hero = BrailleArt(load_frame(base / "hero.txt"))
+    direct_top = direct_hero.dots[: len(direct_hero.dots) // 4]
+    direct_top_on = sum(1 for row in direct_top for px in row if px)
+    assert hero_top_on == direct_top_on, (
+        f"loader should resolve to hero.txt: loader={hero_top_on} direct={direct_top_on}"
+    )
 
 
 def test_load_intro_art_returns_none_for_unknown_name() -> None:
