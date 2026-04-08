@@ -53,3 +53,47 @@ def test_doctor_reports_llama_runtime_capabilities(
     out = capsys.readouterr().out
     assert "slots       4 total (/slots on)" in out
     assert "tool calls  parallel supported" in out
+
+
+def test_doctor_reports_holonet_and_browser_status(
+    monkeypatch,
+    capsys,
+) -> None:
+    profile = Profile(
+        name="doctor-web",
+        provider={
+            "type": "llamacpp",
+            "base_url": "http://localhost:8080",
+            "model": "local",
+        },
+        tools=("holonet", "browser"),
+        tool_config={
+            "holonet": {
+                "default_provider": "auto",
+                "brave_enabled": False,
+                "firecrawl_enabled": False,
+                "europe_pmc_enabled": True,
+                "clinicaltrials_enabled": True,
+                "biomedical_enabled": True,
+            },
+            "browser": {"channel": "chrome"},
+        },
+    )
+    monkeypatch.setattr(
+        "successor.profiles.get_active_profile",
+        lambda: profile,
+    )
+    monkeypatch.setattr(
+        "successor.providers.make_provider",
+        lambda cfg: _FakeClient(),
+    )
+    monkeypatch.setattr(
+        "successor.web.browser.playwright_available",
+        lambda: True,
+    )
+
+    assert cmd_doctor(argparse.Namespace()) == 0
+    out = capsys.readouterr().out
+    assert "holonet     default=auto" in out
+    assert "holonet ok  europe_pmc, clinicaltrials, biomedical_research" in out
+    assert "browser     playwright ready" in out

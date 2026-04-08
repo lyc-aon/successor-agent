@@ -301,6 +301,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     try:
         from .profiles import get_active_profile
         from .providers import make_provider
+        from .web import (
+            available_provider_status,
+            browser_runtime_status,
+            resolve_browser_config,
+            resolve_holonet_config,
+        )
         profile = get_active_profile()
         print(f"    name        {profile.name}")
         provider_cfg = profile.provider or {}
@@ -377,6 +383,34 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     "    tool calls  "
                     + ("parallel supported" if parallel_tools else "serial only")
                 )
+
+        tools = tuple(profile.tools or ())
+        if "holonet" in tools:
+            holo_cfg = resolve_holonet_config(profile)
+            holo_status = available_provider_status(holo_cfg)
+            enabled = [name for name, ok in holo_status.items() if ok]
+            disabled = [name for name, ok in holo_status.items() if not ok]
+            print(f"    holonet     default={holo_cfg.default_provider}")
+            print(
+                "    holonet ok  "
+                + (", ".join(enabled) if enabled else "none")
+            )
+            if disabled:
+                print(
+                    "    holonet off "
+                    + ", ".join(disabled)
+                )
+        if "browser" in tools:
+            browser_cfg = resolve_browser_config(profile)
+            browser_status = browser_runtime_status(profile.name, browser_cfg)
+            print(
+                "    browser     "
+                + ("playwright ready" if browser_status.package_available else "playwright missing")
+            )
+            print(f"    browser ch  {browser_status.channel or '(default chromium)'}")
+            if browser_status.executable_path:
+                print(f"    browser exe {browser_status.executable_path}")
+            print(f"    browser dir {browser_status.user_data_dir}")
     except Exception as exc:  # noqa: BLE001
         print(f"    error: could not load active profile ({exc})")
     return 0

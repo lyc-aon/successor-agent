@@ -7,9 +7,9 @@ orientation; the deeper architectural docs live in `docs/`.
 ## What is Successor
 
 Custom Python agent harness for local models and OpenAI-compatible
-endpoints. Pure Python 3.11+, zero runtime dependencies. The renderer
-is a five-layer cell-based pipeline where one module owns the screen
-end to end.
+endpoints. The base install is pure Python 3.11+ with zero runtime
+dependencies. The renderer is a five-layer cell-based pipeline where
+one module owns the screen end to end.
 
 ## The One Rule (read before touching the renderer)
 
@@ -47,11 +47,16 @@ src/successor/render/        the rendering engine
 
 src/successor/loader.py      generic Registry[T] pattern shared by every kind
 src/successor/config.py      ~/.config/successor/chat.json load/save + v1→v2 migration
+src/successor/tool_runner.py generic native-tool runner for non-bash tools
 
 src/successor/profiles/      Profile dataclass + JSON loader + active-profile resolver
 src/successor/providers/     ChatProvider protocol + factory + llamacpp/openai_compat
 src/successor/skills/        Skill dataclass + frontmatter parser + registry
 src/successor/tools/         @tool decorator + ToolRegistry (Python imports, gated user dir)
+src/successor/web/           optional API/web tooling
+  config.py              holonet/browser profile config resolution
+  holonet.py             API-backed web routes (Brave, Firecrawl, Europe PMC, ClinicalTrials)
+  browser.py             Playwright browser manager + native browser actions
 src/successor/bash/          bash-masking subsystem — parse model bash → structured cards
   cards.py               ToolCard frozen dataclass (verb/params/risk/raw/output/exit_code)
   parser.py              @bash_parser registry, parse_bash(), clip_at_operators
@@ -89,7 +94,7 @@ src/successor/session_trace.py normal chat runtime JSONL traces for postmortem d
 src/successor/cli.py         argparse subcommand dispatch (`successor` binary)
 src/successor/__main__.py    `python -m successor` entry point
 
-tests/                       pytest suite  1079+ tests, hermetic via SUCCESSOR_CONFIG_DIR
+tests/                       pytest suite  1097+ tests, hermetic via SUCCESSOR_CONFIG_DIR
 
 scripts/                     manual-run scripts (no auto-execution)
   e2e_chat_driver.py     scripted scenarios that drive a real chat against
@@ -100,6 +105,7 @@ docs/                        architectural docs (read these)
   rendering-plan.md          original five-layer architecture decisions
   concepts.md                features enabled by the architecture
   llamacpp-protocol.md       what we send / what we get back from llama.cpp
+  web-tools.md               holonet + Playwright browser install/config guide
   changelog.md               per-phase notes
 ```
 
@@ -139,7 +145,7 @@ successor setup        profile creation wizard with live preview
 successor config       three-pane profile config menu
 successor doctor       terminal capabilities + measure samples
 successor skills       list loaded skills
-successor tools        list registered tools
+successor tools        list import-registered Python tools
 successor snapshot     headless render of a chat scenario
 successor record       record an input session to JSONL
 successor replay       replay a recorded session
@@ -152,6 +158,16 @@ Background subagents now have two paths:
 - model-visible `subagent`, which requires the tool to be enabled in
   the profile's tool list and also requires `subagents.notify_on_finish`
   so the parent chat receives the later completion event
+
+Holonet and the Playwright browser are now real model-visible tools too,
+but only when explicitly enabled on the active profile. `holonet` is the
+API-backed path for search/research retrieval; `browser` is the live
+page path for local apps, clicks, screenshots, and JS-heavy pages.
+
+`successor tools` is separate from the native profile tool picker. It
+lists Python import-registered tools from `src/successor/tools/`, not
+the built-in native tool surface (`bash`, `subagent`, `holonet`,
+`browser`).
 
 Subagent scheduling is now profile-driven: `serial` keeps one
 background model lane, `slots` uses llama.cpp slot capacity with one

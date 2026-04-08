@@ -3,6 +3,53 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
+## v0.1.13 — 2026-04-08
+
+Holonet web research plus an optional Playwright browser tool.
+
+### What changed
+
+- added a native `holonet` tool for API-backed retrieval across:
+  Brave Search, Brave News, Firecrawl search, Firecrawl scrape,
+  Europe PMC, ClinicalTrials.gov, and the combined
+  `biomedical_research` route
+- added a native `browser` tool backed by an optional Playwright
+  session with persistent per-profile state and actions for `open`,
+  `click`, `type`, `wait_for`, `extract_text`, `screenshot`, and
+  `console_errors`
+- wired both tools into the existing native tool-call loop, tool-card
+  rendering, tracing, and chat shutdown paths without overloading the
+  bash parser
+- the setup wizard's tool step now auto-surfaces `holonet` and
+  `browser`, and `/config` gains tool-specific sections for provider
+  keys, browser channel / executable path, viewport, timeout, and
+  screenshot-on-error
+- `successor doctor` now reports holonet provider readiness and browser
+  Playwright/runtime status when those tools are enabled
+- packaging now exposes an optional `browser` extra
+  (`pip install -e ".[browser]"`) and the docs now spell out the
+  difference between Playwright's Python package and browser binaries
+- added [`docs/web-tools.md`](docs/web-tools.md) as the install/config
+  reference for holonet and the Playwright browser path
+
+### Verification
+
+- focused integration slice: `201 passed`
+- full local suite: `1097 passed`
+- live local llama.cpp/Qwopus E2E:
+  - `scripts/e2e_chat_driver.py --scenario holonet_biomedical`
+  - `scripts/e2e_chat_driver.py --scenario browser_local_fixture`
+- direct live provider checks:
+  - keyless `biomedical_research` returned real Europe PMC papers plus
+    ClinicalTrials.gov studies
+  - keyed `firecrawl_search` returned live results against the local
+    Firecrawl API key
+- visual transcript review confirmed:
+  - holonet cards render as semantic `paper-search` / `trial-search`
+    tool cards
+  - browser cards render as `browser-open` / `browser-type` /
+    `browser-click` cards with the expected final visible page text
+
 ## v0.1.12 — 2026-04-08
 
 Runtime trace logging plus a fix for misleading comment-prefixed bash cards.

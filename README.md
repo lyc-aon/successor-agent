@@ -24,9 +24,26 @@ successor setup
 ```
 
 The install provides `successor` and the `sx` two-letter alias in the
-current environment's `bin` directory. Python 3.11 or newer. Zero third-party runtime
-dependencies. The renderer, the chat surface, the bash dispatch, the
-autocompactor, and the wizard are all pure stdlib.
+current environment's `bin` directory. Python 3.11 or newer. The base
+install has zero third-party runtime dependencies. The renderer, the
+chat surface, the bash dispatch, the autocompactor, and the wizard are
+all pure stdlib.
+
+If you also want the optional Playwright browser tool, install the
+extra instead:
+
+```bash
+pip install -e ".[browser]"
+```
+
+That only adds the Python package. You can either point Successor at an
+existing browser install through the profile's `browser.channel` or
+`browser.executable_path` settings, or install Playwright-managed
+browsers with:
+
+```bash
+python -m playwright install chromium
+```
 
 `successor setup` plays the SUCCESSOR emergence animation and walks
 you through 10 interactive wizard steps with a live preview pane:
@@ -46,6 +63,11 @@ chat. The context window is auto-detected from the provider on first
 use, so the autocompactor's percentage thresholds resolve to actual
 token counts without you having to set anything manually.
 
+The tools step auto-discovers the built-in tool registry. `bash` is on
+by default; `subagent`, `holonet`, and `browser` are opt-in. If you want
+bare chat, uncheck everything. If you want API-backed web research or a
+live browser session, enable them there or later in `/config`.
+
 If you skip the wizard and run `successor chat` directly on a fresh install, you get the
 bundled default profile pointed at `http://localhost:8080`. Bash is
 enabled by default, so the model can read files, run quick checks,
@@ -54,6 +76,11 @@ reports `[no server at http://localhost:8080]`, the local server
 is not running yet. The hint message lists three concrete remediation
 paths: start a local server, run `successor setup` to switch
 providers, or open `/config` to edit the profile inline.
+
+The bundled default profile does not enable `holonet` or `browser` for
+the model automatically. Those tools are included in the harness, but
+they only appear in the runtime when you opt in through the wizard's
+tools step or the config menu.
 
 ## Visuals
 
@@ -117,6 +144,42 @@ as a background-task notification. The bundled `successor-dev` profile
 ships with the model-visible tool on; the plain `default` profile keeps
 manual `/fork` available but leaves model delegation off by default.
 
+## Web And Browser Tools
+
+Successor now ships two more built-in tool families alongside `bash`
+and `subagent`.
+
+`holonet` is the API-backed web and research path. It stays in the
+same zero-dependency stdlib runtime as the rest of the harness and is
+the first choice when you need search or retrieval but do not need a
+live page session. The current providers are:
+
+- `brave_search`
+- `brave_news`
+- `firecrawl_search`
+- `firecrawl_scrape`
+- `europe_pmc`
+- `clinicaltrials`
+- `biomedical_research`
+
+Brave and Firecrawl need API keys. Europe PMC and ClinicalTrials.gov
+work keyless. The composite `biomedical_research` route fans out to the
+paper and trial APIs together and merges the result into one tool call.
+
+`browser` is the live Playwright path. It is intentionally optional and
+does not vendor its own browser bundle into the base install. When the
+tool is enabled, Successor uses the Playwright Python package plus the
+profile's configured `channel` or `executable_path` to attach to a real
+Chromium-family browser. One persistent session is kept per profile so
+local app verification, login state, clicks, typing, screenshots, and
+console-error checks all happen in one place.
+
+Both tools are configured under `/config` once enabled. `holonet` has
+per-provider toggles plus inline key / key-file fields. `browser` has
+`headless`, `channel`, `executable_path`, `user_data_dir`, viewport,
+timeout, and `screenshot_on_error`. The full reference is in
+[`docs/web-tools.md`](docs/web-tools.md).
+
 `/budget` shows the live token fill, the warning / autocompact /
 blocking thresholds derived from the active profile, and the round
 count. `/burn N` injects synthetic context for stress-testing the
@@ -149,6 +212,18 @@ chats. Manual `/fork` and the model-visible `subagent` tool both
 create background tasks with transcript files, a title-bar task badge,
 an inline spawn card, and a later completion notification injected back
 into the parent chat.
+
+Holonet adds deterministic API-backed web retrieval without opening a
+browser. The harness resolves an explicit or inferred provider, renders
+the call as a native tool card, and returns structured text for general
+search, news, article scraping, biomedical papers, clinical studies, or
+the combined biomedical route.
+
+The optional Playwright browser tool handles the opposite case: work
+that actually needs a real page session. A persistent browser manager
+owns one session per profile and exposes navigation, clicking, typing,
+waiting, text extraction, screenshots, and console-error checks through
+the same native tool-call path the rest of the chat already uses.
 
 Background scheduling is now explicit per profile: `serial` keeps one
 background model lane, `slots` uses llama.cpp's reported slot count
@@ -202,7 +277,7 @@ successor setup           10-step profile creation wizard
 successor config          three-pane profile config menu
 successor doctor          terminal + active profile health check
 successor skills          list loaded skills
-successor tools           list registered tools
+successor tools           list import-registered Python tools
 successor snapshot        headless render of a chat scenario
 successor record          record an input session to JSONL
 successor replay          replay a recorded session
@@ -214,7 +289,14 @@ terminal capabilities, lists the active profile's provider and model,
 probes the configured `base_url` to see if it is reachable, and
 reports the resolved context window. On llama.cpp it also reports the
 visible slot count and whether the server advertises parallel tool-call
-support. Run it first when something is not working.
+support. When `holonet` or `browser` are enabled on the active profile,
+doctor also reports the enabled provider set, Playwright package
+readiness, the browser channel/executable path, and the persistent user
+data directory. Run it first when something is not working.
+
+`successor tools` is a different registry: it lists Python
+import-registered tools from `src/successor/tools/`, not the native
+profile tool picker (`bash`, `subagent`, `holonet`, `browser`).
 
 Normal `successor chat` sessions also leave a bounded local runtime
 trace under `~/.config/successor/logs/`. These JSONL files record user

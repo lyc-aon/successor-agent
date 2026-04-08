@@ -11,6 +11,140 @@ unit on top of phase 0.
 
 ---
 
+## v0.1.13, holonet + optional Playwright browser (2026-04-08)
+
+This pass adds the first real non-bash web capability set to Successor.
+The important architectural choice was not to jam search and browsering
+into the bash path. Instead, the native tool system now has two new
+capabilities:
+
+- `holonet`: deterministic API-backed web and research retrieval
+- `browser`: optional live Playwright browser control
+
+That keeps the existing bash parser cheap, lets the model choose the
+right tool surface for the job, and preserves the renderer's structured
+tool-card flow.
+
+### What landed
+
+- New `src/successor/tool_runner.py`:
+  - generic native-tool runner for non-bash tools
+  - same lifecycle shape as `BashRunner`, but without shell-specific
+    assumptions
+- New `src/successor/web/config.py`:
+  - `HolonetConfig` and `BrowserConfig`
+  - profile `tool_config` resolution
+  - API key precedence: inline value -> key file -> environment
+  - browser runtime settings: headless, channel, executable path,
+    user-data dir, viewport, timeout, screenshot-on-error
+- New `src/successor/web/holonet.py`:
+  - Brave Search / Brave News routes
+  - Firecrawl search and scrape routes
+  - Europe PMC route
+  - ClinicalTrials.gov route
+  - `biomedical_research` composite route using concurrent fan-out
+  - provider auto-selection heuristics
+  - native preview-card metadata for semantic tool-card headers
+- New `src/successor/web/browser.py`:
+  - optional Playwright presence check
+  - persistent per-profile browser manager on a worker thread
+  - actions:
+    - `open`
+    - `click`
+    - `type`
+    - `wait_for`
+    - `extract_text`
+    - `screenshot`
+    - `console_errors`
+  - screenshot-on-error path for browser failures
+- `src/successor/bash/cards.py` now carries generic native-tool metadata:
+  - `tool_name`
+  - `tool_arguments`
+  - `raw_label_prefix`
+- `src/successor/bash/render.py` now uses that metadata so non-bash
+  cards can show the correct raw-label prefix (`≈` for holonet, `◉` for
+  browser) without duplicating the card renderer
+- `src/successor/bash/verbclass.py` gained semantic verbs for the new
+  card families (`paper-search`, `trial-search`, `browser-open`, etc.)
+- `src/successor/tools_registry.py` now declares the native schemas and
+  model guidance for `holonet` and `browser`
+- `src/successor/chat.py` now:
+  - filters `browser` out of the enabled tool list when Playwright is
+    unavailable
+  - dispatches `holonet` and `browser` through the same native
+    tool-call loop as `subagent`
+  - owns one browser manager per profile and closes it on profile swap
+    and chat shutdown
+  - emits the correct trace summaries and final tool cards for these
+    new runners
+- `src/successor/wizard/config.py` now exposes:
+  - holonet default provider + per-provider toggles + key fields
+  - browser headless/channel/executable/path/viewport/timeout settings
+  - conditional visibility based on whether the tool is enabled on the
+    active profile
+- `src/successor/cli.py` doctor output now reports:
+  - holonet default provider
+  - which holonet routes are actually usable
+  - Playwright package readiness
+  - browser channel / executable path / user-data dir
+- `scripts/e2e_chat_driver.py` gained live scenarios for:
+  - `holonet_biomedical`
+  - `browser_local_fixture`
+  and now records native tool name/arguments in the saved message dump
+- New docs:
+  - `docs/web-tools.md`
+  - README sections for web/browser setup and usage
+
+### Why this shape
+
+HK13 was useful as a product reference, but not as something to copy
+blindly. The API-backed retrieval routes were worth porting; the
+Selenium-heavy browser monolith was not. Successor's local-first shape
+is:
+
+- use `holonet` first when APIs are enough
+- keep the browser optional and explicit
+- let the profile decide whether the model even sees those tools
+- keep the renderer showing one coherent tool-card language no matter
+  which backend executed the work
+
+The browser packaging choice follows that same rule: base Successor
+stays stdlib-only, and Playwright is an optional extra. Users can point
+the profile at an existing browser install through `channel` or
+`executable_path`, or install Playwright-managed Chromium separately.
+
+### Verification
+
+- Focused integration slice:
+  - `tests/test_chat_subagents.py`
+  - `tests/test_bash_render.py`
+  - `tests/test_config_menu.py`
+  - `tests/test_config_menu_web.py`
+  - `tests/test_cli_doctor.py`
+  - `tests/test_wizard.py`
+  - `tests/test_chat_web_tools.py`
+  - `tests/test_holonet.py`
+  - `tests/test_web_config.py`
+  - `tests/test_browser_tool.py`
+  - result: `201 passed in 0.60s`
+- Full local suite: `1097 passed in 12.03s`
+- Direct live checks:
+  - keyless biomedical probe succeeded through Europe PMC +
+    ClinicalTrials.gov
+  - Firecrawl search succeeded against the local Firecrawl API key
+  - direct Playwright probe succeeded against a local fixture page
+- Live llama.cpp/Qwopus E2E:
+  - `browser_local_fixture` passed with 3 real browser actions and the
+    final page text `Applied: successor browser test`
+  - `holonet_biomedical` passed with Europe PMC + ClinicalTrials cards
+    and a correct paper/trial answer
+- Visual artifact review:
+  - `/tmp/successor-e2e/browser_local_fixture/turn_01_plain.txt`
+  - `/tmp/successor-e2e/holonet_biomedical/turn_01_plain.txt`
+  confirmed the browser and holonet cards render cleanly on the final
+  tree
+
+
 ## v0.1.12, session traces + comment-prefixed bash fix (2026-04-08)
 
 The user hit a real debugging blind spot: a live bash runner hung, the

@@ -256,6 +256,19 @@ def _verb_glyph_for_card(card: ToolCard) -> str:
     return glyph_for_class(cls) + " "
 
 
+def _raw_label(card: ToolCard) -> str:
+    """Bottom-border label for the raw tool invocation summary."""
+    prefix = (card.raw_label_prefix or "").strip()
+    raw_first, extra_line_count = _first_line_of_raw_command(card.raw_command)
+    if prefix:
+        label = f" {prefix} {raw_first}"
+    else:
+        label = f" {raw_first}"
+    if extra_line_count > 0:
+        return f"{label}  (+{extra_line_count} lines) "
+    return f"{label} "
+
+
 # ─── Height computation ───
 
 
@@ -407,11 +420,7 @@ def paint_tool_card(
     # cause paint_text to bleed into rows BELOW the card box,
     # breaking the layout. Clip to the first physical line, then
     # append a "+N lines" hint if the command was multi-line.
-    raw_first, extra_line_count = _first_line_of_raw_command(card.raw_command)
-    if extra_line_count > 0:
-        raw_label = f" $ {raw_first}  (+{extra_line_count} lines) "
-    else:
-        raw_label = f" $ {raw_first} "
+    raw_label = _raw_label(card)
     max_raw = box_w - 4
     if len(raw_label) > max_raw:
         raw_label = raw_label[: max(0, max_raw - 1)] + "…"
@@ -678,11 +687,7 @@ def paint_tool_card_running(
             )
 
     # ─── Raw command on the bottom border ───
-    raw_first, extra_line_count = _first_line_of_raw_command(preview_card.raw_command)
-    if extra_line_count > 0:
-        raw_label = f" $ {raw_first}  (+{extra_line_count} lines) "
-    else:
-        raw_label = f" $ {raw_first} "
+    raw_label = _raw_label(preview_card)
     max_raw = box_w - 4
     if len(raw_label) > max_raw:
         raw_label = raw_label[: max(0, max_raw - 1)] + "…"

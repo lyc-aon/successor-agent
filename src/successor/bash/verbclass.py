@@ -136,6 +136,21 @@ _VERB_TO_CLASS: dict[str, VerbClass] = {
     "git-cherry-pick": VerbClass.MUTATE,
     "git-revert": VerbClass.MUTATE,
     "git-clean": VerbClass.MUTATE,
+    # holonet
+    "web-search": VerbClass.SEARCH,
+    "news-search": VerbClass.SEARCH,
+    "page-scrape": VerbClass.READ,
+    "paper-search": VerbClass.SEARCH,
+    "trial-search": VerbClass.SEARCH,
+    "biomedical-search": VerbClass.SEARCH,
+    # browser
+    "browser-open": VerbClass.INSPECT,
+    "browser-click": VerbClass.EXEC,
+    "browser-type": VerbClass.MUTATE,
+    "browser-wait": VerbClass.INSPECT,
+    "browser-read": VerbClass.READ,
+    "browser-screenshot": VerbClass.INSPECT,
+    "browser-console": VerbClass.INSPECT,
     # generic fallback
     "bash": VerbClass.UNKNOWN,
     "(empty)": VerbClass.UNKNOWN,

@@ -23,9 +23,9 @@ user-installed tools (the @tool decorator path), we merge them into a
 copy of the dict at chat startup.
 
 A "tool" in this context is BIGGER than a single bash command parser.
-It's an entire capability the model can invoke — today `bash` plus
-the background-worker `subagent` tool. Later we might add
-"web_search", "read_file", "git_diff", etc as separate tools.
+It's an entire capability the model can invoke — today `bash`,
+`subagent`, `holonet`, and `browser`. Later we might add
+"git_diff", "db_query", or user-installed tools as separate entries.
 
 Per-tool configuration (timeout, max output, allow_dangerous, etc.)
 lives in `Profile.tool_config` keyed by tool name. The registry just
@@ -288,6 +288,212 @@ _SUBAGENT_TOOL_SCHEMA: dict[str, Any] = {
     },
 }
 
+HOLONET_DOC = """\
+### holonet — API-backed web research
+
+Use `holonet` for structured web retrieval that does NOT require a
+live browser. It covers general search, article extraction, biomedical
+papers, and clinical-study lookup while keeping the main chat fast and
+deterministic.
+
+### Providers
+
+- `brave_search` — general web search
+- `brave_news` — current-news search
+- `firecrawl_search` — search plus article summaries / excerpts
+- `firecrawl_scrape` — scrape a specific article/page URL
+- `europe_pmc` — biomedical papers
+- `clinicaltrials` — ClinicalTrials.gov study registry
+- `biomedical_research` — Europe PMC + ClinicalTrials.gov together
+
+### How to invoke
+
+Choose a provider explicitly when possible. Pass `query` for search
+routes or `url` for `firecrawl_scrape`.
+
+Example — general search:
+
+    {"provider": "brave_search", "query": "llama.cpp slots endpoint", "count": 5}
+
+Example — scrape one article:
+
+    {"provider": "firecrawl_scrape", "url": "https://example.com/article"}
+
+### Critical rules
+
+- Prefer `holonet` over the live browser when API-backed retrieval is
+  enough.
+- Use `biomedical_research`, `europe_pmc`, or `clinicaltrials` for
+  papers and registered studies instead of generic web search.
+- When the user gives you a concrete article URL and wants the content,
+  use `firecrawl_scrape`.
+"""
+
+HOLONET_MODEL_GUIDANCE = """\
+## Using holonet
+
+`holonet` is the first choice for web research when you do not need a
+live page session. Prefer it over the browser for search, article
+extraction, news, biomedical papers, and clinical-study lookup because
+it is faster, cleaner, and easier to verify.
+
+Choose a provider explicitly when the task is obvious:
+
+- `brave_search` / `brave_news` for general web and news lookup
+- `firecrawl_search` for article discovery with summaries
+- `firecrawl_scrape` for a specific page URL
+- `europe_pmc` / `clinicaltrials` / `biomedical_research` for medical and research tasks
+"""
+
+_HOLONET_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "holonet",
+        "description": (
+            "Query API-backed web and research providers without opening "
+            "a live browser. Supports Brave Search, Firecrawl, Europe PMC, "
+            "ClinicalTrials.gov, and a combined biomedical route."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "enum": [
+                        "auto",
+                        "brave_search",
+                        "brave_news",
+                        "firecrawl_search",
+                        "firecrawl_scrape",
+                        "europe_pmc",
+                        "clinicaltrials",
+                        "biomedical_research",
+                    ],
+                    "description": "Provider / route to use. Choose explicitly when possible.",
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Search query for search-style routes.",
+                },
+                "url": {
+                    "type": "string",
+                    "description": "Concrete article/page URL for `firecrawl_scrape`.",
+                },
+                "count": {
+                    "type": "integer",
+                    "description": "Requested result count. Typical useful range is 3-8.",
+                },
+            },
+        },
+    },
+}
+
+BROWSER_DOC = """\
+### browser — live Playwright browser control
+
+Use `browser` when the task needs a real interactive page session:
+navigation, clicks, form entry, JS-heavy local pages, login state, or
+visual/browser-only verification. The browser session is persistent for
+the current chat.
+
+### Actions
+
+- `open` — navigate to a URL
+- `click` — click a visible target
+- `type` — fill an input or textarea
+- `wait_for` — wait until a target is visible
+- `extract_text` — read visible text from the page or a target
+- `screenshot` — capture a screenshot to disk
+- `console_errors` — read recent console/page errors
+
+### How to invoke
+
+Prefer text/label targets when possible; use `target_kind="selector"`
+only when the visible text is not distinctive enough.
+
+Example — open a page:
+
+    {"action": "open", "url": "http://127.0.0.1:4173"}
+
+Example — click a visible button:
+
+    {"action": "click", "target": "Launch", "target_kind": "text"}
+
+### Critical rules
+
+- Prefer `holonet` for web research and article retrieval; use the
+  live browser only when interactivity or real page execution matters.
+- Reuse the existing session. Do not repeatedly open the same page if
+  you can continue from the current one.
+- After interactive actions, read the returned snapshot before deciding
+  what to do next.
+"""
+
+BROWSER_MODEL_GUIDANCE = """\
+## Using the browser tool
+
+Use the Playwright browser only for tasks that genuinely need a live
+page session: local app verification, clicks, typing, login state,
+console errors, screenshots, or JS-rendered pages. For search and
+content retrieval, prefer `holonet`.
+"""
+
+_BROWSER_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "browser",
+        "description": (
+            "Control a persistent Playwright browser session for live "
+            "navigation, clicking, typing, extraction, screenshots, and "
+            "console-error checks."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "open",
+                        "click",
+                        "type",
+                        "wait_for",
+                        "extract_text",
+                        "screenshot",
+                        "console_errors",
+                    ],
+                    "description": "Browser action to perform.",
+                },
+                "url": {
+                    "type": "string",
+                    "description": "URL for `open`.",
+                },
+                "target": {
+                    "type": "string",
+                    "description": "Visible text, label, placeholder, or selector target.",
+                },
+                "target_kind": {
+                    "type": "string",
+                    "enum": ["auto", "text", "label", "placeholder", "selector"],
+                    "description": "How to interpret `target`. Omit for auto-detection.",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "Text payload for `type`.",
+                },
+                "press_enter": {
+                    "type": "boolean",
+                    "description": "Press Enter after typing.",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Optional output path for `screenshot`.",
+                },
+            },
+            "required": ["action"],
+        },
+    },
+}
+
 
 AVAILABLE_TOOLS: Mapping[str, ToolDescriptor] = {
     "bash": ToolDescriptor(
@@ -306,6 +512,24 @@ AVAILABLE_TOOLS: Mapping[str, ToolDescriptor] = {
         schema=_SUBAGENT_TOOL_SCHEMA,
         system_prompt_doc=SUBAGENT_DOC,
         model_guidance=SUBAGENT_MODEL_GUIDANCE,
+    ),
+    "holonet": ToolDescriptor(
+        name="holonet",
+        label="holonet",
+        description="API-backed web research via Brave, Firecrawl, Europe PMC, and ClinicalTrials.",
+        default_enabled=False,
+        schema=_HOLONET_TOOL_SCHEMA,
+        system_prompt_doc=HOLONET_DOC,
+        model_guidance=HOLONET_MODEL_GUIDANCE,
+    ),
+    "browser": ToolDescriptor(
+        name="browser",
+        label="browser",
+        description="Optional Playwright browser session for live navigation and page interaction.",
+        default_enabled=False,
+        schema=_BROWSER_TOOL_SCHEMA,
+        system_prompt_doc=BROWSER_DOC,
+        model_guidance=BROWSER_MODEL_GUIDANCE,
     ),
 }
 

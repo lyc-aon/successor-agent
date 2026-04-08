@@ -282,12 +282,13 @@ class Profile:
                         to use the chat's default LlamaCppClient
       skills            ordered tuple of skill names (loaded and
                         listed, but not yet injected into prompts)
-      tools             ordered tuple of enabled tool names. Currently
-                        this controls model-visible native tools
-                        (`bash`, `subagent`) plus the tool docs
-                        injected into the system prompt
-      tool_config       per-tool configuration dict. `bash` reads this
-                        live today; future tools can do the same
+      tools             ordered tuple of enabled tool names. This
+                        controls model-visible native tools plus the
+                        tool docs injected into the system prompt
+                        (`bash`, `subagent`, `holonet`, `browser`)
+      tool_config       per-tool configuration dict. `bash`,
+                        `holonet`, and `browser` all read this live;
+                        future tools can do the same
       intro_animation   name of an intro animation to play before chat,
                         or None to skip. "successor" plays the bundled
                         braille emergence sequence for ~5 seconds.

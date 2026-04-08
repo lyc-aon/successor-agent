@@ -21,6 +21,7 @@ in via dataclasses.replace(); it never mutates an existing card.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 from typing import Literal
 
 from .diff_artifact import ChangeArtifact
@@ -83,6 +84,18 @@ class ToolCard:
                         NOT substituted into the model-facing tool
                         result message; stdout/stderr remain the source
                         of truth for API history.
+        tool_name       native tool name that produced this card. Bash
+                        cards keep the historical default `"bash"`;
+                        non-bash native tools (holonet, browser) use
+                        the same visual card pipeline without needing a
+                        second card type.
+        tool_arguments  canonical argument payload sent to / received
+                        from the native tool schema. This is what the
+                        API history serializer uses to reconstruct
+                        assistant `tool_calls` for non-bash tools.
+        raw_label_prefix short prefix shown on the card's bottom border
+                        before raw_command. Bash uses `$`; API tools
+                        can use a plain label marker instead.
     """
 
     verb: str
@@ -97,6 +110,9 @@ class ToolCard:
     duration_ms: float | None = None
     truncated: bool = False
     change_artifact: ChangeArtifact | None = None
+    tool_name: str = "bash"
+    tool_arguments: dict[str, Any] = field(default_factory=dict)
+    raw_label_prefix: str = "$"
     # Tool-call linkage for native Qwen tool calling. When the model
     # emits a structured tool_call, the harness propagates the model's
     # call id here so the corresponding `role: "tool"` message can

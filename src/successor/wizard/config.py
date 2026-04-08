@@ -121,6 +121,7 @@ from ..render.theme import (
 )
 from ..subagents.config import SUBAGENT_STRATEGIES
 from ..tools_registry import AVAILABLE_TOOLS
+from ..web.config import HOLO_DEFAULT_PROVIDER_OPTIONS
 from .prompt_editor import PromptEditor
 
 
@@ -282,6 +283,88 @@ _SETTINGS_TREE: tuple[_SettingField, ...] = (
         name="bash_max_output_bytes", label="max output bytes", section="",
         kind=FieldKind.NUMBER, number_kind="int",
     ),
+    # ── Holonet API routes ──────────────────────────────────────────
+    _SettingField(
+        name="holonet_default_provider", label="default provider", section="holonet",
+        kind=FieldKind.CYCLE,
+        options_getter=lambda: list(HOLO_DEFAULT_PROVIDER_OPTIONS),
+    ),
+    _SettingField(
+        name="holonet_brave_enabled", label="brave enabled", section="",
+        kind=FieldKind.TOGGLE,
+        options_getter=lambda: [True, False],
+    ),
+    _SettingField(
+        name="holonet_brave_api_key", label="brave api key", section="",
+        kind=FieldKind.SECRET,
+    ),
+    _SettingField(
+        name="holonet_brave_api_key_file", label="brave key file", section="",
+        kind=FieldKind.TEXT,
+    ),
+    _SettingField(
+        name="holonet_firecrawl_enabled", label="firecrawl enabled", section="",
+        kind=FieldKind.TOGGLE,
+        options_getter=lambda: [True, False],
+    ),
+    _SettingField(
+        name="holonet_firecrawl_api_key", label="firecrawl api key", section="",
+        kind=FieldKind.SECRET,
+    ),
+    _SettingField(
+        name="holonet_firecrawl_api_key_file", label="firecrawl key file", section="",
+        kind=FieldKind.TEXT,
+    ),
+    _SettingField(
+        name="holonet_europe_pmc_enabled", label="europe pmc", section="",
+        kind=FieldKind.TOGGLE,
+        options_getter=lambda: [True, False],
+    ),
+    _SettingField(
+        name="holonet_clinicaltrials_enabled", label="clinicaltrials", section="",
+        kind=FieldKind.TOGGLE,
+        options_getter=lambda: [True, False],
+    ),
+    _SettingField(
+        name="holonet_biomedical_enabled", label="biomedical combo", section="",
+        kind=FieldKind.TOGGLE,
+        options_getter=lambda: [True, False],
+    ),
+    # ── Browser / Playwright ────────────────────────────────────────
+    _SettingField(
+        name="browser_headless", label="headless", section="browser",
+        kind=FieldKind.TOGGLE,
+        options_getter=lambda: [True, False],
+    ),
+    _SettingField(
+        name="browser_channel", label="channel", section="",
+        kind=FieldKind.TEXT,
+    ),
+    _SettingField(
+        name="browser_executable_path", label="executable", section="",
+        kind=FieldKind.TEXT,
+    ),
+    _SettingField(
+        name="browser_user_data_dir", label="user data dir", section="",
+        kind=FieldKind.TEXT,
+    ),
+    _SettingField(
+        name="browser_viewport_width", label="viewport width", section="",
+        kind=FieldKind.NUMBER, number_kind="int",
+    ),
+    _SettingField(
+        name="browser_viewport_height", label="viewport height", section="",
+        kind=FieldKind.NUMBER, number_kind="int",
+    ),
+    _SettingField(
+        name="browser_timeout_s", label="timeout (s)", section="",
+        kind=FieldKind.NUMBER, number_kind="float",
+    ),
+    _SettingField(
+        name="browser_screenshot_on_error", label="shot on error", section="",
+        kind=FieldKind.TOGGLE,
+        options_getter=lambda: [True, False],
+    ),
     # ── Compaction (autocompactor thresholds + behavior) ────────────
     # All percentages are fractions of the resolved context window.
     # The chat builds the runtime ContextBudget by multiplying each
@@ -355,6 +438,10 @@ def _field_visible_for_profile(profile: Profile, field: _SettingField) -> bool:
     """
     if field.name.startswith("bash_"):
         return "bash" in (profile.tools or ())
+    if field.name.startswith("holonet_"):
+        return "holonet" in (profile.tools or ())
+    if field.name.startswith("browser_"):
+        return "browser" in (profile.tools or ())
     return True
 
 
@@ -698,6 +785,26 @@ class SuccessorConfig(App):
                 return str(raw)
             return "(default)"
 
+        if field.name.startswith("holonet_"):
+            raw = self._profile_value_for_field_raw(profile, field)
+            if field.name.endswith("_enabled"):
+                return "on" if raw else "off"
+            if field.kind == FieldKind.SECRET:
+                if raw is None or raw == "":
+                    return "(not set)"
+                return "•" * min(len(str(raw)), 16)
+            if raw in (None, ""):
+                return "(default)"
+            return str(raw)
+
+        if field.name.startswith("browser_"):
+            raw = self._profile_value_for_field_raw(profile, field)
+            if field.name in {"browser_headless", "browser_screenshot_on_error"}:
+                return "on" if raw else "off"
+            if raw in (None, ""):
+                return "(default)"
+            return str(raw)
+
         if field.name.startswith("subagents_"):
             raw = self._profile_value_for_field_raw(profile, field)
             if field.name == "subagents_enabled":
@@ -760,6 +867,26 @@ class SuccessorConfig(App):
             bash_cfg = dict(new_tool_config.get("bash") or {})
             bash_cfg[key] = new_value
             new_tool_config["bash"] = bash_cfg
+            new_profile = replace(old_profile, tool_config=new_tool_config)
+        elif field.name.startswith("holonet_"):
+            key = field.name.removeprefix("holonet_")
+            new_tool_config = {
+                k: dict(v) if isinstance(v, dict) else v
+                for k, v in (old_profile.tool_config or {}).items()
+            }
+            holonet_cfg = dict(new_tool_config.get("holonet") or {})
+            holonet_cfg[key] = new_value
+            new_tool_config["holonet"] = holonet_cfg
+            new_profile = replace(old_profile, tool_config=new_tool_config)
+        elif field.name.startswith("browser_"):
+            key = field.name.removeprefix("browser_")
+            new_tool_config = {
+                k: dict(v) if isinstance(v, dict) else v
+                for k, v in (old_profile.tool_config or {}).items()
+            }
+            browser_cfg = dict(new_tool_config.get("browser") or {})
+            browser_cfg[key] = new_value
+            new_tool_config["browser"] = browser_cfg
             new_profile = replace(old_profile, tool_config=new_tool_config)
         elif field.name.startswith("provider_"):
             key = field.name.removeprefix("provider_")
@@ -863,6 +990,36 @@ class SuccessorConfig(App):
             if profile.provider:
                 return profile.provider.get(key)
             return None
+        if field.name.startswith("holonet_"):
+            holonet_cfg = (profile.tool_config or {}).get("holonet") or {}
+            key = field.name.removeprefix("holonet_")
+            defaults = {
+                "default_provider": "auto",
+                "brave_enabled": True,
+                "brave_api_key": "",
+                "brave_api_key_file": "",
+                "firecrawl_enabled": True,
+                "firecrawl_api_key": "",
+                "firecrawl_api_key_file": "",
+                "europe_pmc_enabled": True,
+                "clinicaltrials_enabled": True,
+                "biomedical_enabled": True,
+            }
+            return holonet_cfg.get(key, defaults.get(key))
+        if field.name.startswith("browser_"):
+            browser_cfg = (profile.tool_config or {}).get("browser") or {}
+            key = field.name.removeprefix("browser_")
+            defaults = {
+                "headless": True,
+                "channel": "chrome",
+                "executable_path": "",
+                "user_data_dir": "",
+                "viewport_width": 1440,
+                "viewport_height": 960,
+                "timeout_s": 20.0,
+                "screenshot_on_error": True,
+            }
+            return browser_cfg.get(key, defaults.get(key))
         if field.name.startswith("compaction_"):
             key = field.name.removeprefix("compaction_")
             cfg = profile.compaction

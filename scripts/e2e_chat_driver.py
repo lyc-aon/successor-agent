@@ -53,7 +53,7 @@ _REPO_SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_REPO_SRC) not in sys.path:
     sys.path.insert(0, str(_REPO_SRC))
 
-from successor.chat import SuccessorChat  # noqa: E402
+from successor.chat import SuccessorChat, _Message  # noqa: E402
 from successor import __version__ as SUCCESSOR_VERSION  # noqa: E402
 from successor.subagents.cards import SubagentToolCard  # noqa: E402
 from successor.profiles import Profile  # noqa: E402
@@ -428,6 +428,8 @@ def dump_snapshots(
                 "output_len": len(card.output or ""),
                 "stderr_len": len(card.stderr or ""),
                 "truncated": card.truncated,
+                "tool_name": card.tool_name,
+                "tool_arguments": dict(card.tool_arguments),
                 "raw_command_preview": (card.raw_command or "")[:200],
                 "params": list(card.params),
             }
@@ -947,6 +949,81 @@ def _enable_subagent_tool(chat: SuccessorChat) -> None:
     chat.client = make_provider(profile.provider)
 
 
+def _enable_holonet_tool(chat: SuccessorChat) -> None:
+    profile = replace(
+        chat.profile,
+        tools=("holonet",),
+        tool_config={
+            "holonet": {
+                "default_provider": "auto",
+            }
+        },
+    )
+    chat.profile = profile
+    chat.system_prompt = (
+        "You are successor — a focused, brief assistant. "
+        "This test session exposes only the holonet tool. "
+        "When the user asks for holonet, call it directly and do not "
+        "invent bash commands or alternate tools. After the tool returns, "
+        "answer in one short paragraph."
+    )
+    chat.client = make_provider(profile.provider)
+
+
+def _enable_browser_tool_with_fixture(chat: SuccessorChat) -> None:
+    workspace = Path(
+        ((chat.profile.tool_config or {}).get("bash") or {}).get("working_directory") or "."
+    )
+    fixture = workspace / "browser-fixture.html"
+    fixture.write_text(
+        """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Browser Fixture</title>
+  <style>
+    body { font-family: sans-serif; padding: 24px; }
+    label, button, p { display: block; margin: 12px 0; }
+  </style>
+</head>
+<body>
+  <h1>Browser Fixture</h1>
+  <label for="message">Message</label>
+  <input id="message" placeholder="Type here">
+  <button id="apply" onclick="document.getElementById('result').textContent = 'Applied: ' + document.getElementById('message').value;">Apply</button>
+  <p id="result">Applied: (empty)</p>
+</body>
+</html>
+""",
+        encoding="utf-8",
+    )
+    profile = replace(
+        chat.profile,
+        tools=("browser",),
+        tool_config={
+            "browser": {
+                "headless": True,
+                "channel": "chrome",
+                "timeout_s": 20.0,
+                "viewport_width": 1280,
+                "viewport_height": 900,
+            }
+        },
+    )
+    chat.profile = profile
+    chat.system_prompt = (
+        "You are successor — a focused, brief assistant. "
+        "This test session exposes only the browser tool. "
+        "Use it for live page navigation, typing, clicking, and text extraction. "
+        "Do not invent bash commands or alternate tools. "
+        "After the tool returns, answer in one short paragraph."
+    )
+    chat.client = make_provider(profile.provider)
+    chat.messages = [
+        _Message("user", f"Local browser fixture URL: {fixture.as_uri()}")
+    ]
+
+
 SCENARIOS: dict[str, Scenario] = {
     "write_html": Scenario(
         name="write_html",
@@ -1153,6 +1230,32 @@ SCENARIOS: dict[str, Scenario] = {
         assert_min_text_in_final=[SUCCESSOR_VERSION],
         assert_each_settles=True,
         allow_synthetic_final=True,
+    ),
+    "holonet_biomedical": Scenario(
+        name="holonet_biomedical",
+        description="Use the holonet tool against live biomedical APIs",
+        pre_setup=_enable_holonet_tool,
+        prompts=[
+            "Use the holonet tool, not bash. Find one semaglutide obesity paper and one registered clinical trial, then tell me one trial ID and the paper title.",
+        ],
+        assert_min_text_in_final=["semaglutide"],
+        assert_turn_plain_contains={
+            1: ["paper-search", "trial-search", "clinicaltrials"],
+        },
+        assert_each_settles=True,
+    ),
+    "browser_local_fixture": Scenario(
+        name="browser_local_fixture",
+        description="Use the Playwright browser tool on a local interactive fixture page",
+        pre_setup=_enable_browser_tool_with_fixture,
+        prompts=[
+            "Use the browser tool, not bash. Open the local browser fixture URL already in context, type 'successor browser test' into the Message field, click Apply, then tell me the final visible result text.",
+        ],
+        assert_min_text_in_final=["successor browser test"],
+        assert_turn_plain_contains={
+            1: ["browser-open", "browser-type", "browser-click"],
+        },
+        assert_each_settles=True,
     ),
     "model_subagent_version_audit": Scenario(
         name="model_subagent_version_audit",

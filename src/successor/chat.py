@@ -126,16 +126,13 @@ from .bash.render import (
 )
 from .bash.runner import (
     BashRunner,
-    OutputLine as RunnerOutputLine,
-    RunnerCompleted,
     RunnerErrored,
     RunnerStarted,
 )
+from .tool_runner import CallableToolRunner
 from .tools_registry import (
-    AVAILABLE_TOOLS,
     build_model_tool_guidance,
     build_native_tool_schemas,
-    default_enabled_tools,
     filter_known,
 )
 from .subagents.cards import SubagentToolCard
@@ -153,6 +150,17 @@ from .subagents.prompt import (
 from .subagents.render import (
     measure_subagent_card_height,
     paint_subagent_card,
+)
+from .web import (
+    PlaywrightBrowserManager,
+    browser_preview_card,
+    holonet_preview_card,
+    playwright_available,
+    resolve_browser_config,
+    resolve_holonet_config,
+    resolve_route as resolve_holonet_route,
+    run_browser_action,
+    run_holonet,
 )
 from .session_trace import SessionTrace, clip_text as _trace_clip_text
 from .render.markdown import (
@@ -818,6 +826,18 @@ def _tool_preview_text(name: str, raw_args: str) -> str:
         return _extract_command_tail(raw_args)
     if name == "subagent":
         return _extract_json_string_field(raw_args, "prompt")
+    if name == "holonet":
+        provider = _extract_json_string_field(raw_args, "provider")
+        query = _extract_json_string_field(raw_args, "query")
+        url = _extract_json_string_field(raw_args, "url")
+        bits = [bit for bit in (provider, query or url) if bit]
+        return " ".join(bits) if bits else raw_args
+    if name == "browser":
+        action = _extract_json_string_field(raw_args, "action")
+        target = _extract_json_string_field(raw_args, "target")
+        url = _extract_json_string_field(raw_args, "url")
+        bits = [bit for bit in (action, target or url) if bit]
+        return " ".join(bits) if bits else raw_args
     return raw_args
 
 
@@ -840,7 +860,7 @@ def _api_role_for_message(msg: "_Message") -> str:
 
 
 def _tool_name_for_card(card: ToolArtifact) -> str:
-    return "subagent" if isinstance(card, SubagentToolCard) else "bash"
+    return "subagent" if isinstance(card, SubagentToolCard) else card.tool_name
 
 
 def _tool_arguments_for_card(card: ToolArtifact) -> dict[str, str]:
@@ -849,6 +869,8 @@ def _tool_arguments_for_card(card: ToolArtifact) -> dict[str, str]:
         if card.name:
             payload["name"] = card.name
         return payload
+    if card.tool_arguments:
+        return dict(card.tool_arguments)
     return {"command": card.raw_command}
 
 
@@ -882,6 +904,18 @@ def _trace_tool_call_summary(tc: dict[str, Any]) -> dict[str, object]:
         label = str(args.get("name") or "")
         if label:
             entry["task_name"] = label
+    elif name == "holonet" and isinstance(args, dict):
+        entry["provider"] = str(args.get("provider") or "")
+        entry["query_excerpt"] = _trace_clip_text(
+            str(args.get("query") or args.get("url") or ""),
+            limit=320,
+        )
+    elif name == "browser" and isinstance(args, dict):
+        entry["action"] = str(args.get("action") or "")
+        entry["target_excerpt"] = _trace_clip_text(
+            str(args.get("target") or args.get("url") or ""),
+            limit=320,
+        )
     elif args:
         entry["arguments_excerpt"] = _trace_clip_text(str(args), limit=320)
     return entry
@@ -1565,6 +1599,7 @@ class SuccessorChat(App):
         # prompts so a "successor-dev" persona behaves differently from
         # "default" without changing any code.
         self.system_prompt: str = profile.system_prompt
+        self._browser_manager: PlaywrightBrowserManager | None = None
 
         # ─── Session trace ───
         # Normal chat sessions write a small JSONL trace to the user's
@@ -1936,6 +1971,12 @@ class SuccessorChat(App):
             except Exception:
                 pass
             self._cache_warmer = None
+        if self._browser_manager is not None:
+            try:
+                self._browser_manager.close()
+            except Exception:
+                pass
+            self._browser_manager = None
 
     # ─── Input handling ───
 
@@ -2521,6 +2562,13 @@ class SuccessorChat(App):
         if new_profile.name == self.profile.name:
             return
 
+        if self._browser_manager is not None:
+            try:
+                self._browser_manager.close()
+            except Exception:
+                pass
+            self._browser_manager = None
+
         self.profile = new_profile
 
         # Apply theme — uses the existing transition machinery
@@ -2886,6 +2934,34 @@ class SuccessorChat(App):
             return detect()
         except Exception:
             return None
+
+    def _enabled_tools_for_turn(self) -> list[str]:
+        """Runtime-enabled native tools for the current turn.
+
+        Profiles can remember tool toggles that are temporarily unusable
+        at runtime, like `browser` when Playwright is not installed.
+        Filter those here so the model only sees tools the current chat
+        can actually execute.
+        """
+        enabled_tools = list(filter_known(self.profile.tools or ()))
+        if (
+            not self.profile.subagents.enabled
+            or not self.profile.subagents.notify_on_finish
+        ):
+            enabled_tools = [name for name in enabled_tools if name != "subagent"]
+        if "browser" in enabled_tools and not playwright_available():
+            enabled_tools = [name for name in enabled_tools if name != "browser"]
+        return enabled_tools
+
+    def _browser_manager_for_profile(self) -> PlaywrightBrowserManager:
+        if self._browser_manager is not None:
+            return self._browser_manager
+        cfg = resolve_browser_config(self.profile)
+        self._browser_manager = PlaywrightBrowserManager(
+            profile_name=self.profile.name,
+            config=cfg,
+        )
+        return self._browser_manager
 
     def _subagent_scheduler_summary(self) -> str:
         cfg = self.profile.subagents
@@ -3490,12 +3566,7 @@ class SuccessorChat(App):
         # Resolve which tools are enabled for THIS turn from the active
         # profile. filter_known() drops any unrecognized names so a
         # stale profile referencing a future tool doesn't crash us.
-        enabled_tools = list(filter_known(self.profile.tools or ()))
-        if (
-            not self.profile.subagents.enabled
-            or not self.profile.subagents.notify_on_finish
-        ):
-            enabled_tools = [name for name in enabled_tools if name != "subagent"]
+        enabled_tools = self._enabled_tools_for_turn()
 
         # Build the system prompt for THIS turn. When `tools=` is sent
         # to the model, Qwen's chat template auto-injects its OWN
@@ -4899,6 +4970,132 @@ class SuccessorChat(App):
         self._scroll_to_bottom()
         return True
 
+    def _tool_error_card(
+        self,
+        *,
+        tool_name: str,
+        verb: str,
+        raw_command: str,
+        tool_call_id: str,
+        params: tuple[tuple[str, str], ...],
+        tool_arguments: dict[str, Any],
+        raw_label_prefix: str,
+        message: str,
+    ) -> ToolCard:
+        return ToolCard(
+            verb=verb,
+            params=params,
+            risk="safe",
+            raw_command=raw_command,
+            confidence=1.0,
+            parser_name=f"native-{tool_name}",
+            stderr=message,
+            exit_code=1,
+            duration_ms=0.0,
+            tool_name=tool_name,
+            tool_arguments=tool_arguments,
+            raw_label_prefix=raw_label_prefix,
+            tool_call_id=tool_call_id,
+        )
+
+    def _spawn_holonet_runner(
+        self,
+        arguments: dict[str, Any],
+        *,
+        tool_call_id: str | None = None,
+    ) -> bool:
+        from .bash.exec import _new_tool_call_id  # noqa: PLC0415
+
+        resolved_call_id = tool_call_id or _new_tool_call_id()
+        cfg = resolve_holonet_config(self.profile)
+        try:
+            route = resolve_holonet_route(arguments, cfg)
+        except Exception as exc:
+            card = self._tool_error_card(
+                tool_name="holonet",
+                verb="web-search",
+                raw_command="holonet",
+                tool_call_id=resolved_call_id,
+                params=(),
+                tool_arguments=dict(arguments),
+                raw_label_prefix="≈",
+                message=str(exc),
+            )
+            self.messages.append(_Message("tool", "", tool_card=card))
+            return False
+
+        preview = holonet_preview_card(route, tool_call_id=resolved_call_id)
+        runner = CallableToolRunner(
+            tool_call_id=resolved_call_id,
+            worker=lambda progress: run_holonet(route, cfg, progress),
+        )
+        msg = _Message("tool", "", tool_card=preview, running_tool=runner)
+        self.messages.append(msg)
+        self._running_tools.append(msg)
+        self._trace_event(
+            "tool_spawn",
+            tool_name="holonet",
+            tool_call_id=resolved_call_id,
+            provider=route.provider,
+            query=route.query,
+            url=route.url,
+            count=route.count,
+        )
+        runner.start()
+        self._scroll_to_bottom()
+        return True
+
+    def _spawn_browser_runner(
+        self,
+        arguments: dict[str, Any],
+        *,
+        tool_call_id: str | None = None,
+    ) -> bool:
+        from .bash.exec import _new_tool_call_id  # noqa: PLC0415
+
+        resolved_call_id = tool_call_id or _new_tool_call_id()
+        preview = browser_preview_card(arguments, tool_call_id=resolved_call_id)
+        if not playwright_available():
+            card = self._tool_error_card(
+                tool_name="browser",
+                verb=preview.verb,
+                raw_command=preview.raw_command,
+                tool_call_id=resolved_call_id,
+                params=preview.params,
+                tool_arguments=preview.tool_arguments,
+                raw_label_prefix=preview.raw_label_prefix,
+                message=(
+                    "Playwright is not installed. Install with "
+                    "`pip install 'successor[browser]'` or switch to a "
+                    "profile/environment where Playwright is available."
+                ),
+            )
+            self.messages.append(_Message("tool", "", tool_card=card))
+            return False
+
+        manager = self._browser_manager_for_profile()
+        runner = CallableToolRunner(
+            tool_call_id=resolved_call_id,
+            worker=lambda progress: run_browser_action(
+                arguments,
+                manager=manager,
+                progress=progress,
+            ),
+        )
+        msg = _Message("tool", "", tool_card=preview, running_tool=runner)
+        self.messages.append(msg)
+        self._running_tools.append(msg)
+        self._trace_event(
+            "tool_spawn",
+            tool_name="browser",
+            tool_call_id=resolved_call_id,
+            action=str(arguments.get("action") or ""),
+            target=str(arguments.get("target") or arguments.get("url") or ""),
+        )
+        runner.start()
+        self._scroll_to_bottom()
+        return True
+
     def _dispatch_native_tool_calls(self, tool_calls: list[dict]) -> bool:
         """Spawn a BashRunner for each native tool_call from the
         model's structured `delta.tool_calls` stream. Mirrors the
@@ -4927,9 +5124,23 @@ class SuccessorChat(App):
                     ):
                         any_ran = True
                     continue
+                if name == "holonet":
+                    if isinstance(args, dict) and self._spawn_holonet_runner(
+                        dict(args),
+                        tool_call_id=call_id,
+                    ):
+                        any_ran = True
+                    continue
+                if name == "browser":
+                    if isinstance(args, dict) and self._spawn_browser_runner(
+                        dict(args),
+                        tool_call_id=call_id,
+                    ):
+                        any_ran = True
+                    continue
                 self.messages.append(_Message(
                     "successor",
-                    f"unknown tool {name!r} — only `bash` and `subagent` are supported",
+                    f"unknown tool {name!r} — supported tools are bash, subagent, holonet, and browser",
                     synthetic=True,
                 ))
                 continue
@@ -4975,14 +5186,24 @@ class SuccessorChat(App):
             # (e.g., per-line fade-in animations).
             for ev in runner.drain():
                 if isinstance(ev, RunnerStarted):
-                    self._trace_event(
-                        "bash_runner_started",
-                        tool_call_id=runner.tool_call_id,
-                        pid=runner.pid,
-                    )
+                    tool_name = getattr(msg.tool_card, "tool_name", "bash")
+                    if tool_name == "bash":
+                        self._trace_event(
+                            "bash_runner_started",
+                            tool_call_id=runner.tool_call_id,
+                            pid=runner.pid,
+                        )
+                    else:
+                        self._trace_event(
+                            "tool_runner_started",
+                            tool_name=tool_name,
+                            tool_call_id=runner.tool_call_id,
+                        )
                 elif isinstance(ev, RunnerErrored):
+                    tool_name = getattr(msg.tool_card, "tool_name", "bash")
                     self._trace_event(
-                        "bash_runner_errored",
+                        "tool_runner_errored" if tool_name != "bash" else "bash_runner_errored",
+                        tool_name=tool_name,
                         tool_call_id=runner.tool_call_id,
                         message=ev.message,
                     )
@@ -5023,43 +5244,50 @@ class SuccessorChat(App):
         preview = msg.tool_card
         if runner is None or preview is None:
             return
-        stdout = runner.stdout
-        stderr = runner.stderr
-        # If the worker errored before Popen succeeded (FileNotFoundError
-        # etc.), exit_code may be None — surface as -1.
-        exit_code = runner.exit_code if runner.exit_code is not None else -1
-        # Cancellation / timeout → preserve the error in stderr so the
-        # next model turn can read what happened.
-        if runner.error:
-            if stderr and not stderr.endswith("\n"):
-                stderr = stderr + "\n"
-            stderr = (stderr or "") + f"[{runner.error}]"
-        final_card = _replace(
-            preview,
-            output=stdout,
-            stderr=stderr,
-            exit_code=exit_code,
-            duration_ms=runner.elapsed() * 1000.0,
-            truncated=runner.truncated,
-        )
-        change_artifact = finalize_change_capture(
-            getattr(runner, "change_capture", None),
-        )
-        if change_artifact is not None:
-            final_card = _replace(final_card, change_artifact=change_artifact)
+        build_final = getattr(runner, "build_final_card", None)
+        if callable(build_final):
+            final_card = build_final(preview)
+        else:
+            stdout = runner.stdout
+            stderr = runner.stderr
+            # If the worker errored before Popen succeeded (FileNotFoundError
+            # etc.), exit_code may be None — surface as -1.
+            exit_code = runner.exit_code if runner.exit_code is not None else -1
+            # Cancellation / timeout → preserve the error in stderr so the
+            # next model turn can read what happened.
+            if runner.error:
+                if stderr and not stderr.endswith("\n"):
+                    stderr = stderr + "\n"
+                stderr = (stderr or "") + f"[{runner.error}]"
+            final_card = _replace(
+                preview,
+                output=stdout,
+                stderr=stderr,
+                exit_code=exit_code,
+                duration_ms=runner.elapsed() * 1000.0,
+                truncated=runner.truncated,
+            )
+            change_artifact = finalize_change_capture(
+                getattr(runner, "change_capture", None),
+            )
+            if change_artifact is not None:
+                final_card = _replace(final_card, change_artifact=change_artifact)
         msg.tool_card = final_card
         msg.running_tool = None
         msg._card_rows_cache_key = None
         msg._card_rows_cache = None
+        tool_name = getattr(final_card, "tool_name", "bash")
+        event_name = "bash_runner_finished" if tool_name == "bash" else "tool_runner_finished"
         self._trace_event(
-            "bash_runner_finished",
+            event_name,
+            tool_name=tool_name,
             tool_call_id=runner.tool_call_id,
-            exit_code=exit_code,
+            exit_code=final_card.exit_code,
             error=runner.error,
             duration_ms=round(runner.elapsed() * 1000.0, 3),
-            stdout_excerpt=_trace_clip_text(stdout, limit=320),
-            stderr_excerpt=_trace_clip_text(stderr, limit=320),
-            truncated=runner.truncated,
+            stdout_excerpt=_trace_clip_text(final_card.output, limit=320),
+            stderr_excerpt=_trace_clip_text(final_card.stderr, limit=320),
+            truncated=final_card.truncated,
         )
 
     def _cancel_running_tools(self) -> None:
