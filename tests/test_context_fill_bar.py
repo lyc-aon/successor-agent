@@ -11,7 +11,6 @@ The bar:
 
 from __future__ import annotations
 
-from copy import replace
 from dataclasses import replace as dc_replace
 from pathlib import Path
 
