@@ -1566,11 +1566,11 @@ class SuccessorChat(App):
         self._density_t0: float = 0.0
 
         # ─── Mouse state ───
-        # Mouse reporting is ON by default so wheel scrolling and title-
-        # bar widgets work out of the box. Users can still opt out with
-        # /mouse off if they prefer native click-drag selection without
-        # holding Shift.
-        self._mouse_enabled: bool = bool(self._config.get("mouse", True))
+        # Mouse reporting is opt-in. When off, the terminal owns wheel
+        # scrolling and text selection. When on, Successor owns wheel
+        # scroll + clickable widgets, and Shift restores native drag
+        # selection in terminals that support the override.
+        self._mouse_enabled: bool = bool(self._config.get("mouse", False))
         # Hit boxes recorded each frame by the painters. Cleared at
         # the start of on_tick and refilled as widgets are painted.
         self._hit_boxes: list[_HitBox] = []
@@ -3231,8 +3231,9 @@ class SuccessorChat(App):
             if len(parts) == 1:
                 state = "on" if self._mouse_enabled else "off"
                 hint = (
-                    f"mouse: {state}. With mouse on, wheel scrolling and "
-                    f"clickable widgets work in-chat; hold Shift to drag-select text."
+                    f"mouse: {state}. Off means the terminal owns wheel/selection. "
+                    f"On enables in-chat wheel scrolling and clickable widgets; "
+                    f"hold Shift to drag-select text."
                 )
                 self.messages.append(_Message("successor", hint, synthetic=True))
                 return
@@ -3254,8 +3255,8 @@ class SuccessorChat(App):
                 self.messages.append(
                     _Message(
                         "successor",
-                        "mouse off. Wheel scrolling and clickable widgets are disabled; "
-                        "native click-drag selection works again.",
+                        "mouse off. The terminal owns wheel scrolling and native "
+                        "click-drag selection again; clickable widgets are disabled.",
                         synthetic=True,
                     )
                 )

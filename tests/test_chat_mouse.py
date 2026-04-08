@@ -11,19 +11,33 @@ from successor.profiles import Profile
 from successor.render.cells import Grid
 
 
-def test_chat_defaults_mouse_on_when_config_missing(temp_config_dir: Path) -> None:
+def test_chat_defaults_mouse_off_when_config_missing(temp_config_dir: Path) -> None:
     chat = SuccessorChat(profile=Profile(name="mouse-test"))
-    assert chat._mouse_enabled is True
-    assert chat.term.mouse_reporting is True
+    assert chat._mouse_enabled is False
+    assert chat.term.mouse_reporting is False
 
 
-def test_chat_upgrades_v2_mouse_false_to_on(temp_config_dir: Path) -> None:
+def test_chat_preserves_v2_mouse_false(temp_config_dir: Path) -> None:
     (temp_config_dir / "chat.json").write_text(json.dumps({
         "version": 2,
         "theme": "steel",
         "display_mode": "light",
         "density": "normal",
         "mouse": False,
+    }))
+
+    chat = SuccessorChat(profile=Profile(name="mouse-test"))
+    assert chat._mouse_enabled is False
+    assert chat.term.mouse_reporting is False
+
+
+def test_chat_preserves_v2_mouse_true(temp_config_dir: Path) -> None:
+    (temp_config_dir / "chat.json").write_text(json.dumps({
+        "version": 2,
+        "theme": "steel",
+        "display_mode": "light",
+        "density": "normal",
+        "mouse": True,
     }))
 
     chat = SuccessorChat(profile=Profile(name="mouse-test"))

@@ -3,9 +3,31 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
+## v0.1.11 — 2026-04-08
+
+Corrective follow-up for mouse ownership semantics.
+
+### What changed
+
+- `mouse off` is restored to the intended behavior:
+  the terminal owns wheel scrolling and native click-drag selection
+- `mouse on` still enables Successor-owned wheel scrolling plus
+  clickable title-bar widgets
+- `src/successor/config.py` still uses schema v3, but v2 → v3 now
+  preserves the stored `mouse` value instead of forcing old installs
+  into mouse-on behavior
+
+### Verification
+
+- focused regressions: `116 passed`
+- full local suite: `1074 passed`
+- real local config probe confirmed the existing
+  `~/.config/successor/chat.json` now starts with `mouse: false`
+  and `term.mouse_reporting = False`
+
 ## v0.1.10 — 2026-04-08
 
-Tool-card light-theme cleanup plus mouse-wheel usability fix.
+Tool-card light-theme cleanup plus mouse ownership fix.
 
 ### What changed
 
@@ -13,12 +35,12 @@ Tool-card light-theme cleanup plus mouse-wheel usability fix.
   settled and running tool-card output/status rows, which removes the
   leaked default-black side rails and footer tails that were visible in
   light themes
-- chat mouse reporting now defaults on for fresh sessions, and
-  `src/successor/config.py` upgrades older v2 configs to the new
-  `mouse: true` default on load so wheel scrolling works without
-  knowing about `/mouse on`
-- `/mouse off` still remains a real opt-out for users who want native
-  click-drag selection back without holding Shift
+- the mouse split is restored to the intended behavior:
+  `mouse off` leaves wheel/selection to the terminal, `mouse on`
+  gives Successor clickable widgets plus in-chat wheel scroll
+- `src/successor/config.py` still stamps v3, but v2 → v3 now preserves
+  the stored `mouse` value exactly instead of forcing old installs into
+  mouse-on behavior
 
 ### Verification
 
@@ -27,8 +49,8 @@ Tool-card light-theme cleanup plus mouse-wheel usability fix.
 - direct light-theme render probe confirmed output/status row edges now
   carry theme backgrounds instead of default black cells
 - real local config probe confirmed the existing
-  `~/.config/successor/chat.json` now upgrades to `mouse: true` in
-  memory and enables terminal mouse reporting on startup
+  `~/.config/successor/chat.json` now preserves `mouse: false` at
+  startup, so terminal-native mouse ownership is restored
 
 ## v0.1.9 — 2026-04-08
 

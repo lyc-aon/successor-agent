@@ -24,10 +24,10 @@ V2 fields (added 2026-04-06 with the theme refactor):
   active_profile    str — registered profile name (added in phase 3,
                           slot reserved here)
 
-V3 fields (added 2026-04-08 for mouse usability):
+V3 fields (added 2026-04-08 as a compatibility stamp):
 
-  same shape as v2; version bump only changes the default behavior
-  around mouse reporting
+  same shape as v2; version bump reserved the mouse preference split
+  without changing persisted semantics
 
 V1 → V2 fixup (one-shot, idempotent, runs on every load):
 
@@ -45,11 +45,10 @@ V1 → V2 fixup (one-shot, idempotent, runs on every load):
 
 V2 → V3 fixup (one-shot, idempotent, runs on every load):
 
-  Earlier builds defaulted `mouse` to off, which meant wheel scrolling
-  silently did nothing unless the user already knew about `/mouse on`.
-  V3 flips the default to on. Existing v2 configs are upgraded to
-  `mouse: true` once on load; users can still opt out explicitly with
-  `/mouse off`, and future saves persist that v3 choice.
+  Compatibility-only. Preserve the existing `mouse` value exactly. The
+  intended split remains:
+    - mouse off  → terminal owns wheel/selection
+    - mouse on   → Successor owns wheel/clicks
 """
 
 from __future__ import annotations
@@ -172,16 +171,13 @@ def _migrate_v1_to_v2(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _migrate_v2_to_v3(data: dict[str, Any]) -> dict[str, Any]:
-    """Flip the historical mouse default from off to on.
+    """Compatibility-only v2 → v3 migration.
 
-    v2's `mouse: false` overwhelmingly meant "old default" rather than
-    an intentional preference. Upgrade to `true` once so wheel scroll
-    works out of the box on older installs. Users can still toggle it
-    back off and future v3 saves preserve that explicit choice.
+    Preserve the existing mouse preference exactly. V3 exists so future
+    releases can reason about post-v2 configs without clobbering the
+    user's terminal-vs-app mouse ownership choice.
     """
-    out = dict(data)
-    out["mouse"] = True
-    return out
+    return dict(data)
 
 
 def save_chat_config(data: dict[str, Any]) -> bool:
