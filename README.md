@@ -82,9 +82,10 @@ browser session, or screenshot-based visual
 inspection, enable them there or later in `/config`.
 
 If you skip the wizard and run `successor chat` directly on a fresh install, you get the
-bundled default profile pointed at `http://localhost:8080`. Bash is
-enabled by default, so the model can read files, run quick checks,
-and verify its work as part of any reply. If your first message
+bundled default profile pointed at `http://localhost:8080`. The default
+tool surface includes native `read_file`, `write_file`, `edit_file`,
+and `bash`, so the model can inspect files, make controlled edits, run
+quick shell checks, and verify its work as part of any reply. If your first message
 reports `[no server at http://localhost:8080]`, the local server
 is not running yet. The hint message lists three concrete remediation
 paths: start a local server, run `successor setup` to switch
