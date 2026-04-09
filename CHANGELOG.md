@@ -3,7 +3,13 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
-## Unreleased
+## v0.1.24 — 2026-04-09
+
+This release combines the new frontend-backed recordings manager and
+session reviewer with a follow-up runtime hardening pass for local-model
+file work and browser verification.
+
+### Loop hardening follow-up
 
 Hardened the core local-model loop in the two places the recorded E2E
 runs exposed most clearly: repeated file re-reads and browser input
@@ -43,7 +49,7 @@ realism.
 - fresh-config `successor doctor` check confirming new installs expose
   `read`, `write`, `edit`, and `bash` by default
 
-## v0.1.24 — 2026-04-09
+### Recordings Manager And Session Reviewer
 
 Rebuilt the recordings surface as a real frontend-backed recordings
 manager plus session reviewer instead of continuing to pile style work

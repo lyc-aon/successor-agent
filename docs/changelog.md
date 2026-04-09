@@ -11,7 +11,13 @@ unit on top of phase 0.
 
 ---
 
-## Unreleased, loop hardening from free-code + Hermes synthesis (2026-04-09)
+## v0.1.24, frontend-backed recordings manager + loop hardening (2026-04-09)
+
+This release pairs a new frontend-backed recordings manager and session
+reviewer with a runtime hardening pass for local-model file work and
+browser verification.
+
+### Loop hardening from free-code + Hermes synthesis
 
 This pass does not try to copy either reference wholesale.
 
@@ -78,7 +84,7 @@ The synthesis is:
   - `SUCCESSOR_CONFIG_DIR=$(mktemp -d) PYTHONPATH=src python3 -m successor.cli doctor`
   - reports default tools as `read, write, edit, bash`
 
-## v0.1.24, frontend-backed recordings manager + shared reviewer app (2026-04-09)
+### Frontend-backed recordings manager + shared reviewer app
 
 The old bundle reviewer kept failing for the same reason: it was still a
 single generated HTML page that we kept trying to "fix with styling."
