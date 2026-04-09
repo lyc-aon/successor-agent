@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "successor"
-version = "0.1.23"
+version = "0.1.24"
 description = "Terminal harness for local LLMs and OpenAI-compatible endpoints. Five-layer cell renderer, async tools, API-backed research, optional browser and vision tools, recording bundles with a session reviewer, configurable autocompactor, and a live-preview setup wizard."
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -54,4 +54,5 @@ where = ["src"]
   "profiles/*.json",
   "skills/*.md",
   "intros/*/*.txt",
+  "reviewer_app/*",
 ]

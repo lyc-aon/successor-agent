@@ -1,6 +1,6 @@
 """Smoke + integration tests for the tier-1 polish pass:
 
-  1. The bundled `paper` and `cobalt` themes load via THEME_REGISTRY
+  1. The bundled `paper` and `steel` themes load via THEME_REGISTRY
      and parse all 9 oklch / hex color slots in both dark and light
      modes.
   2. A SuccessorChat constructed against either new theme actually
@@ -39,14 +39,14 @@ def test_paper_theme_loads(temp_config_dir: Path) -> None:
     assert THEME_REGISTRY.source_of("paper") == "builtin"
 
 
-def test_cobalt_theme_loads(temp_config_dir: Path) -> None:
+def test_steel_theme_loads(temp_config_dir: Path) -> None:
     THEME_REGISTRY.reload()
-    cobalt = THEME_REGISTRY.get("cobalt")
-    assert cobalt is not None
-    assert cobalt.name == "cobalt"
-    assert cobalt.icon
-    assert cobalt.description
-    assert THEME_REGISTRY.source_of("cobalt") == "builtin"
+    steel = THEME_REGISTRY.get("steel")
+    assert steel is not None
+    assert steel.name == "steel"
+    assert steel.icon
+    assert steel.description
+    assert THEME_REGISTRY.source_of("steel") == "builtin"
 
 
 def test_paper_theme_has_full_palette(temp_config_dir: Path) -> None:
@@ -66,12 +66,12 @@ def test_paper_theme_has_full_palette(temp_config_dir: Path) -> None:
         assert variant.accent_warn is not None
 
 
-def test_cobalt_theme_has_full_palette(temp_config_dir: Path) -> None:
+def test_steel_theme_has_full_palette(temp_config_dir: Path) -> None:
     THEME_REGISTRY.reload()
-    cobalt = THEME_REGISTRY.get("cobalt")
-    assert cobalt is not None
-    for variant_name, variant in (("dark", cobalt.dark), ("light", cobalt.light)):
-        assert variant.bg is not None, f"cobalt.{variant_name}.bg missing"
+    steel = THEME_REGISTRY.get("steel")
+    assert steel is not None
+    for variant_name, variant in (("dark", steel.dark), ("light", steel.light)):
+        assert variant.bg is not None, f"steel.{variant_name}.bg missing"
         assert variant.bg_input is not None
         assert variant.bg_footer is not None
         assert variant.fg is not None
@@ -83,15 +83,15 @@ def test_cobalt_theme_has_full_palette(temp_config_dir: Path) -> None:
 
 
 def test_themes_are_distinct(temp_config_dir: Path) -> None:
-    """The four bundled themes should produce different bg colors so
+    """The two bundled themes should produce different bg colors so
     a user cycling through them sees actual visual variety."""
     THEME_REGISTRY.reload()
     bgs = set()
-    for name in ("steel", "forge", "paper", "cobalt"):
+    for name in ("steel", "paper"):
         theme = THEME_REGISTRY.get(name)
         assert theme is not None, f"missing theme {name}"
         bgs.add(theme.dark.bg)
-    assert len(bgs) == 4, "all four themes should have distinct dark bg colors"
+    assert len(bgs) == 2, "paper and steel should have distinct dark bg colors"
 
 
 def test_chat_constructs_with_paper_theme(temp_config_dir: Path) -> None:
@@ -107,25 +107,27 @@ def test_chat_constructs_with_paper_theme(temp_config_dir: Path) -> None:
     assert variant is not None
 
 
-def test_chat_constructs_with_cobalt_theme(temp_config_dir: Path) -> None:
-    """A chat with the cobalt theme builds end-to-end."""
+def test_chat_constructs_with_steel_theme(temp_config_dir: Path) -> None:
+    """A chat with the steel theme builds end-to-end."""
     from successor.chat import SuccessorChat
 
     THEME_REGISTRY.reload()
-    profile = Profile(name="cobalt-test", theme="cobalt")
+    profile = Profile(name="steel-test", theme="steel")
     chat = SuccessorChat(profile=profile)
-    assert chat.theme.name == "cobalt"
+    assert chat.theme.name == "steel"
     variant = chat._current_variant()
     assert variant is not None
 
 
-def test_find_theme_or_fallback_resolves_new_themes(temp_config_dir: Path) -> None:
+def test_find_theme_or_fallback_resolves_supported_themes(temp_config_dir: Path) -> None:
     THEME_REGISTRY.reload()
     assert find_theme_or_fallback("paper").name == "paper"
-    assert find_theme_or_fallback("cobalt").name == "cobalt"
+    assert find_theme_or_fallback("steel").name == "steel"
+    assert find_theme_or_fallback("forge").name == "paper"
+    assert find_theme_or_fallback("cobalt").name == "steel"
     # Unknown name still resolves to a fallback (steel by default)
     fallback = find_theme_or_fallback("nonexistent-theme")
-    assert fallback.name in ("steel", "paper", "cobalt", "forge")
+    assert fallback.name in ("steel", "paper")
 
 
 # ─── pyproject description ───

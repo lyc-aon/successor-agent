@@ -62,10 +62,10 @@ def test_wizard_state_defaults() -> None:
 
 
 def test_wizard_state_to_profile_uses_name() -> None:
-    state = _WizardState(name="my-profile", theme_name="forge")
+    state = _WizardState(name="my-profile", theme_name="paper")
     profile = state.to_profile()
     assert profile.name == "my-profile"
-    assert profile.theme == "forge"
+    assert profile.theme == "paper"
 
 
 def test_wizard_state_lowercases_name_in_profile() -> None:

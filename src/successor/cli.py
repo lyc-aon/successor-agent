@@ -564,70 +564,24 @@ def cmd_replay(args: argparse.Namespace) -> int:
 
 def cmd_playback(args: argparse.Namespace) -> int:
     """Inspect or open a recording bundle reviewer."""
-    from .playback import latest_recording_bundle_dir, load_trace_events, write_playback_html
+    from .playback import prepare_recording_viewer
 
     requested = args.input.strip() if isinstance(args.input, str) else ""
-    path = Path(requested) if requested else latest_recording_bundle_dir()
-    if path is None:
-        print("successor: no recording bundles found", file=sys.stderr)
+    want_library = bool(getattr(args, "library", False)) or requested == "recordings"
+    try:
+        viewer_path, bundle_root, is_library = prepare_recording_viewer(
+            requested or None,
+            library=want_library,
+        )
+    except FileNotFoundError as exc:
+        print(f"successor: {exc}", file=sys.stderr)
         return 1
-    if not path.exists():
-        print(f"successor: no such path: {path}", file=sys.stderr)
-        return 1
-
-    viewer_path: Path
-    bundle_root: Path
-    if path.is_file() and path.suffix.lower() == ".html":
-        bundle_root = path.parent
-        viewer_path = path
-    else:
-        bundle_root = path if path.is_dir() else path.parent
-        viewer_path = bundle_root / "playback.html"
-        timeline_path = bundle_root / "timeline.json"
-        summary_path = bundle_root / "summary.json"
-        trace_json_path = bundle_root / "session_trace.json"
-        trace_jsonl_path = bundle_root / "session_trace.jsonl"
-        if not viewer_path.exists():
-            if not timeline_path.exists():
-                print(
-                    "successor: no playback reviewer found and no timeline.json to regenerate from",
-                    file=sys.stderr,
-                )
-                return 1
-            try:
-                frames = json.loads(timeline_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                print(f"successor: could not read {timeline_path}: {exc}", file=sys.stderr)
-                return 1
-            title = "Successor session playback"
-            description = "Recorded via `successor record`."
-            if summary_path.exists():
-                try:
-                    summary = json.loads(summary_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    summary = {}
-                if isinstance(summary, dict):
-                    title = str(summary.get("title") or title)
-                    description = str(summary.get("description") or description)
-            if trace_json_path.exists():
-                try:
-                    trace_events = json.loads(trace_json_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    trace_events = []
-            else:
-                trace_events = load_trace_events(trace_jsonl_path)
-            write_playback_html(
-                viewer_path,
-                title=title,
-                description=description,
-                frames=frames if isinstance(frames, list) else [],
-                trace_events=trace_events if isinstance(trace_events, list) else [],
-                bundle_root=bundle_root,
-            )
+    if is_library:
+        print(f"library   {viewer_path}")
     print(f"bundle    {bundle_root}")
     print(f"viewer    {viewer_path}")
     summary_path = bundle_root / "summary.json"
-    if summary_path.exists():
+    if not is_library and summary_path.exists():
         try:
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -897,6 +851,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="open the reviewer in the default browser",
     )
+    p_playback.add_argument(
+        "--library",
+        action="store_true",
+        help="open the recordings manager for the configured recordings root",
+    )
     p_playback.set_defaults(func=cmd_playback)
 
     p_review = sub.add_parser(
@@ -913,6 +872,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--open",
         action="store_true",
         help="launch the reviewer in the default browser after regeneration",
+    )
+    p_review.add_argument(
+        "--library",
+        action="store_true",
+        help="open the recordings manager for the configured recordings root",
     )
     p_review.set_defaults(func=cmd_playback)
 

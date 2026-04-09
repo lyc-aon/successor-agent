@@ -62,7 +62,7 @@ def test_parse_full_profile(tmp_path: Path) -> None:
     data = {
         "name": "full",
         "description": "the full monty",
-        "theme": "forge",
+        "theme": "paper",
         "display_mode": "light",
         "density": "spacious",
         "system_prompt": "be terse",
@@ -85,7 +85,7 @@ def test_parse_full_profile(tmp_path: Path) -> None:
     assert profile is not None
     assert profile.name == "full"
     assert profile.description == "the full monty"
-    assert profile.theme == "forge"
+    assert profile.theme == "paper"
     assert profile.display_mode == "light"
     assert profile.density == "spacious"
     assert profile.system_prompt == "be terse"
@@ -161,6 +161,8 @@ def test_default_profile_is_builtin(temp_config_dir: Path) -> None:
     default = get_profile("default")
     assert default is not None
     assert default.name == "default"
+    assert default.intro_animation == "successor"
+    assert default.chat_intro_art == "successor"
     assert PROFILE_REGISTRY.source_of("default") == "builtin"
 
 
@@ -180,14 +182,14 @@ def test_user_profile_overrides_builtin(temp_config_dir: Path) -> None:
     (user_dir / "default.json").write_text(json.dumps({
         "name": "default",
         "description": "user override",
-        "theme": "forge",
+        "theme": "paper",
     }))
 
     PROFILE_REGISTRY.reload()
     default = get_profile("default")
     assert default is not None
     assert default.description == "user override"
-    assert default.theme == "forge"
+    assert default.theme == "paper"
     assert PROFILE_REGISTRY.source_of("default") == "user"
 
 

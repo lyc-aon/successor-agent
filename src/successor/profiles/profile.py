@@ -28,6 +28,7 @@ from typing import Any
 
 from ..config import load_chat_config, save_chat_config
 from ..loader import Registry
+from ..render.theme import normalize_theme_name
 from ..subagents.config import SubagentConfig
 
 
@@ -277,7 +278,7 @@ class Profile:
     Fields:
       name              registered name (lowercase, used in slash command)
       description       human-readable one-liner for /profile listings
-      theme             registered theme name (e.g. "steel", "forge")
+      theme             registered theme name (`steel` or `paper`)
       display_mode      "dark" or "light"
       density           "compact", "normal", or "spacious"
       system_prompt     full system prompt sent to the model
@@ -379,7 +380,7 @@ def parse_profile_file(path: Path) -> Profile | None:
     if isinstance(data.get("description"), str):
         kwargs["description"] = data["description"]
     if isinstance(data.get("theme"), str):
-        kwargs["theme"] = data["theme"].strip().lower()
+        kwargs["theme"] = normalize_theme_name(data["theme"]) or data["theme"].strip().lower()
     if isinstance(data.get("display_mode"), str):
         # Defer normalization to the chat App so the saved value is
         # always exactly what the user wrote — easier to debug than

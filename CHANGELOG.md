@@ -3,6 +3,61 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
+## v0.1.24 — 2026-04-09
+
+Rebuilt the recordings surface as a real frontend-backed recordings
+manager plus session reviewer instead of continuing to pile style work
+onto the old generated scrubber.
+
+### What changed
+
+- added a new React + Vite reviewer app under `reviewer-app/`
+- vendored the built frontend into
+  `src/successor/builtin/reviewer_app/` and added
+  `src/successor/reviewer.py` as the Python-side shell generator
+- `successor playback --library` and `successor review --library` now
+  open a real recordings manager with:
+  - dense recordings grid
+  - inspector detail panel
+  - search
+  - theme + light/dark switching using the actual Successor theme
+    catalog
+- chat now exposes `/playback` and `/review`, so the recordings manager
+  and the current live session reviewer are reachable from inside the
+  normal slash-command palette instead of only through the CLI
+- rebuilt per-bundle playback pages on top of the same app, with:
+  - a bounded terminal artboard at the center of the review surface
+  - a dedicated trace/event dock under the viewport
+  - a distinct evidence/detail rail
+  - trace filtering + detail inspection
+  - grouped artifact sections
+  - theme parity with the harness
+- the recordings manager now refreshes stale per-bundle
+  `playback.html` files from `timeline.json` before opening them, so
+  older local recordings pick up the current reviewer automatically
+- updated docs so the new manager/reviewer paths and frontend build
+  workflow are explicit
+
+### Verification
+
+- focused playback + doctor regressions:
+  `11 passed in 0.10s`
+- full suite:
+  `1183 passed in 14.97s`
+- human-emulated browser verification on real local bundles:
+  - library search
+  - row selection + inspector update
+  - open into a regenerated bundle reviewer
+  - playback controls
+  - trace filter + detail inspection
+  - theme switch to dark
+- iterative screenshot critique through Gemini 2.5 Pro on the real
+  generated pages, with follow-up fixes applied to:
+  - recordings-grid width usage
+  - artboard sizing and framing
+  - artifact grouping
+  - stale-bundle navigation
+
 ## v0.1.23 — 2026-04-09
 
 Made long autonomous runs materially stronger: the control layer now

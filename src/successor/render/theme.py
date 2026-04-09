@@ -310,20 +310,61 @@ THEME_REGISTRY: Registry[Theme] = Registry[Theme](
 )
 
 
+SUPPORTED_THEME_NAMES: tuple[str, ...] = ("steel", "paper")
+_LEGACY_THEME_ALIASES: dict[str, str] = {
+    "dark": "steel",
+    "light": "steel",
+    "forge": "paper",
+    "cobalt": "steel",
+}
+
+
+def normalize_theme_name(name: object) -> str | None:
+    """Resolve a saved/requested theme name to a supported theme.
+
+    Successor now only exposes the built-in `steel` and `paper` themes.
+    Old built-in names (`forge`, `cobalt`) are mapped forward so saved
+    configs and profiles continue to land on a sensible palette.
+    """
+    if not isinstance(name, str):
+        return None
+    normalized = name.strip().lower()
+    if not normalized:
+        return None
+    normalized = _LEGACY_THEME_ALIASES.get(normalized, normalized)
+    if normalized in SUPPORTED_THEME_NAMES:
+        return normalized
+    return None
+
+
 def get_theme(name: str) -> Theme | None:
-    """Look up a theme by name. Triggers loader if not yet loaded."""
-    return THEME_REGISTRY.get(name)
+    """Look up a theme by name, mapping legacy built-ins forward.
+
+    The public catalog is restricted to paper/steel, but explicit user
+    theme names still resolve so local overrides remain possible.
+    """
+    normalized = normalize_theme_name(name)
+    if normalized is not None:
+        return THEME_REGISTRY.get(normalized)
+    if not isinstance(name, str):
+        return None
+    requested = name.strip().lower()
+    if not requested:
+        return None
+    return THEME_REGISTRY.get(requested)
 
 
 def all_themes() -> list[Theme]:
-    """Return every loaded theme. Triggers loader if not yet loaded."""
-    return THEME_REGISTRY.all()
+    """Return the supported theme catalog in stable product order."""
+    loaded = {theme.name: theme for theme in THEME_REGISTRY.all()}
+    return [loaded[name] for name in SUPPORTED_THEME_NAMES if name in loaded]
 
 
 def next_theme(current: Theme | None) -> Theme:
     """Cycle to the next theme in load order. Wraps around at the end.
 
-    If `current` is None or not in the registry, returns the first theme.
+    If `current` is None or not in the supported catalog, returns the
+    first supported theme.
     Falls back to a hardcoded steel-equivalent if the registry is empty
     (shouldn't happen — the package always ships at least one builtin).
     """
@@ -338,7 +379,7 @@ def next_theme(current: Theme | None) -> Theme:
     try:
         idx = themes.index(current)
     except ValueError:
-        # current isn't in the registry (e.g. user-provided test theme)
+        # current isn't in the supported catalog
         return themes[0]
     return themes[(idx + 1) % len(themes)]
 

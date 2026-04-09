@@ -240,7 +240,7 @@ def test_light_theme_diff_card_fills_edge_backgrounds(tmp_path) -> None:
         "cat > note.txt <<'EOF'\nalpha\nbeta\nEOF",
         cwd=str(tmp_path),
     )
-    theme = find_theme_or_fallback("forge").variant("light")
+    theme = find_theme_or_fallback("paper").variant("light")
     g = Grid(12, 80)
     paint_tool_card(g, card, x=0, y=0, w=80, theme=theme)
 

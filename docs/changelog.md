@@ -11,6 +11,90 @@ unit on top of phase 0.
 
 ---
 
+## v0.1.24, frontend-backed recordings manager + shared reviewer app (2026-04-09)
+
+The old bundle reviewer kept failing for the same reason: it was still a
+single generated HTML page that we kept trying to "fix with styling."
+This pass replaces that architecture with a small real frontend app
+while preserving the existing recording-bundle contract.
+
+### Deterministic references
+
+Local design / product references used directly:
+
+- `/home/lycaon/dev/skills/skills/design-system.md`
+  - token discipline, shell consistency, avoiding one-off chrome
+- `/home/lycaon/dev/skills/skills/frontend-patterns.md`
+  - workspace posture, inspector layout, card/list alternatives
+- `/home/lycaon/dev/skills/skills/pretext-typography.md`
+  - measured card copy and summary-line clamping
+- `/home/lycaon/dev/skills/skills/web-dev-critique.md`
+  - cut decorative noise, strengthen hierarchy, respect affordance
+- `/home/lycaon/dev/skills/skills/visual-iteration-loop.md`
+  - screenshot-first critique loop instead of "CSS by instinct"
+- `/home/lycaon/dev/skills/reference/awesome-design-md/design-md/miro/DESIGN.md`
+  - board/workspace stance
+- `/home/lycaon/dev/skills/reference/awesome-design-md/design-md/linear.app/DESIGN.md`
+  - dense detail handling and inspector discipline
+- `/home/lycaon/dev/skills/reference/awesome-design-md/design-md/warp/DESIGN.md`
+  - warmth/restraint so the surface does not turn into generic analytics UI
+- `/home/lycaon/dev/ai/copycat/README.md`
+  - artifact-first workspace posture for screenshots, evidence, and trace
+
+### What landed
+
+- new `reviewer-app/`
+  - React + Vite source for the recordings manager and session reviewer
+  - `@chenglou/pretext` used for measured card/title clamping
+  - builds directly into vendored package assets
+- new `src/successor/reviewer.py`
+  - exports the real Successor theme catalog to the frontend
+  - inlines the built app into generated HTML shells
+- `src/successor/playback.py`
+  - now emits `kind: "library"` and `kind: "session"` payloads
+  - adds recordings-library generation on top of bundle review
+  - refreshes stale per-bundle `playback.html` files from
+    `timeline.json` when generating the library, so manager links do
+    not strand users on obsolete viewer shells
+- `src/successor/cli.py`
+  - `successor playback --library`
+  - `successor review --library`
+  - existing playback flow still regenerates stale bundle viewers when
+    a timeline is present
+- `src/successor/chat.py`
+  - added `/playback` with `/review` alias
+  - `/playback recordings` opens the recordings manager
+  - bare `/playback` opens the current live session reviewer when a
+    recording bundle is active, otherwise the latest finished bundle
+- `tests/test_playback.py`
+  - added coverage for recordings-library generation and stale bundle
+    viewer refresh
+- docs
+  - updated `README.md`
+  - updated top-level `CHANGELOG.md`
+  - added a real `reviewer-app/README.md`
+
+### Verification
+
+- focused regression slice:
+  - `PYTHONPATH=src pytest -q tests/test_playback.py tests/test_cli_doctor.py`
+  - `11 passed in 0.10s`
+- build verification:
+  - `npm --prefix reviewer-app run build`
+- human-emulated browser verification with Playwright against real
+  local recording bundles:
+  - library search
+  - row selection + inspector update
+  - open row into reviewer
+  - playback controls
+  - trace filter + detail inspection
+  - theme switch
+- iterative screenshot critique with Gemini 2.5 Pro on the actual
+  generated pages
+- final full suite:
+  - `PYTHONPATH=src pytest -q`
+  - green before push
+
 ## v0.1.23, control-layer runtime controller + higher turn budgets + supervised studio showcase (2026-04-09)
 
 This pass moves the autonomy work out of "prompt encouragement" territory

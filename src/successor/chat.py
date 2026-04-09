@@ -680,7 +680,7 @@ class SlashCommand:
     aliases:        other names that match (e.g. "q" for "quit")
     description:    short one-line summary for the dropdown
     args_hint:      short hint shown after the description, e.g.
-                    "[dark|light|forge]" — empty if no args
+                    "[paper|steel|cycle]" — empty if no args
     complete_args:  optional callable taking a partial string,
                     returning a list of full arg matches. None means
                     the command takes no args.
@@ -695,13 +695,12 @@ class SlashCommand:
 def _theme_arg_completer(partial: str) -> list[str]:
     """Dynamic completer for /theme args.
 
-    Pulls names live from THEME_REGISTRY so newly-added user theme
-    files show up in autocomplete the next time the user opens the
-    dropdown — no chat restart needed. The "cycle" pseudo-arg always
-    appears at the end of the list.
+    Pulls names from the supported theme catalog so chat, wizard, and
+    reviewer all expose the same paper/steel choices. The "cycle"
+    pseudo-arg always appears at the end of the list.
     """
     p = partial.lower()
-    options = sorted(THEME_REGISTRY.names()) + ["cycle"]
+    options = [theme.name for theme in all_themes()] + ["cycle"]
     return [o for o in options if o.startswith(p)]
 
 
@@ -794,6 +793,13 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
         description="toggle local auto-record playback bundles",
         args_hint="[on|off|toggle]",
         complete_args=static_args("on", "off", "toggle"),
+    ),
+    SlashCommand(
+        name="playback",
+        aliases=("review",),
+        description="open the current reviewer or the recordings manager",
+        args_hint="[current|latest|recordings|<bundle>]",
+        complete_args=static_args("current", "latest", "recordings"),
     ),
 )
 
@@ -2972,6 +2978,89 @@ class SuccessorChat(App):
         self._config["autorecord"] = enabled
         save_chat_config(self._config)
 
+    def _open_viewer_path(self, viewer_path) -> bool:
+        import webbrowser
+
+        try:
+            return bool(webbrowser.open(viewer_path.resolve().as_uri()))
+        except Exception:
+            return False
+
+    def _open_playback_from_chat(self, arg_text: str) -> None:
+        from .playback import prepare_recording_viewer
+
+        arg = arg_text.strip()
+        lower = arg.lower()
+        if lower in {"", "current"} and hasattr(self._recorder, "refresh_viewer"):
+            front = getattr(self, "_front", None)
+            if front is not None and hasattr(self._recorder, "capture_frame"):
+                try:
+                    self._recorder.capture_frame(front, chat=self, force=True)
+                except Exception:
+                    pass
+            try:
+                self._recorder.refresh_viewer(trace_path=self.session_trace_path)
+            except Exception as exc:
+                self.messages.append(
+                    _Message(
+                        "successor",
+                        f"could not refresh the current session reviewer: {type(exc).__name__}: {exc}",
+                        synthetic=True,
+                    )
+                )
+                return
+            viewer_path = getattr(self._recorder, "viewer_path", None)
+            if viewer_path is None:
+                self.messages.append(
+                    _Message(
+                        "successor",
+                        "current session recorder has no viewer path.",
+                        synthetic=True,
+                    )
+                )
+                return
+            opened = self._open_viewer_path(viewer_path)
+            state = "opened" if opened else "prepared"
+            self.messages.append(
+                _Message(
+                    "successor",
+                    f"{state} current session reviewer at {viewer_path}.",
+                    synthetic=True,
+                )
+            )
+            return
+
+        target = None if lower in {"", "latest"} else arg
+        try:
+            viewer_path, _bundle_root, is_library = prepare_recording_viewer(
+                target,
+                library=lower == "recordings",
+            )
+        except FileNotFoundError as exc:
+            self.messages.append(
+                _Message("successor", str(exc), synthetic=True)
+            )
+            return
+        except Exception as exc:
+            self.messages.append(
+                _Message(
+                    "successor",
+                    f"could not prepare playback viewer: {type(exc).__name__}: {exc}",
+                    synthetic=True,
+                )
+            )
+            return
+        opened = self._open_viewer_path(viewer_path)
+        label = "recordings manager" if is_library else "recording reviewer"
+        state = "opened" if opened else "prepared"
+        self.messages.append(
+            _Message(
+                "successor",
+                f"{state} {label} at {viewer_path}.",
+                synthetic=True,
+            )
+        )
+
     # ─── Slash command autocomplete ───
 
     def _autocomplete_state(self) -> _AutocompleteState:
@@ -3785,10 +3874,10 @@ class SuccessorChat(App):
 
         # /theme       — show current theme and available options
         # /theme <name>— switch to a registered theme by name
-        # /theme cycle — cycle to next theme in registry order
+        # /theme cycle — cycle to next theme in the supported catalog
         if text.startswith("/theme"):
             parts = text.split(maxsplit=1)
-            available_names = sorted(THEME_REGISTRY.names())
+            available_names = [theme.name for theme in all_themes()]
             if len(parts) == 1:
                 names = ", ".join(available_names) or "(none loaded)"
                 hint = (
@@ -3904,6 +3993,12 @@ class SuccessorChat(App):
         # /recording on      — enable local auto-record bundles
         # /recording off     — disable
         # /recording toggle  — flip
+        if text.startswith("/playback") or text.startswith("/review"):
+            parts = text.split(maxsplit=1)
+            arg = parts[1].strip() if len(parts) > 1 else ""
+            self._open_playback_from_chat(arg)
+            return
+
         if text.startswith("/recording"):
             parts = text.split(maxsplit=1)
             if len(parts) == 1:

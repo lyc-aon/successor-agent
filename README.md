@@ -100,6 +100,7 @@ successor setup
 successor doctor
 successor chat
 successor record
+successor playback --library --open
 successor playback --open
 ```
 
@@ -110,6 +111,8 @@ successor playback --open
   a profile's web/vision configuration looks wrong.
 - `successor chat` is the normal interactive path once a profile is
   configured.
+- `successor playback --library --open` opens the recordings manager
+  for all accumulated local bundles.
 - `successor record` and `successor playback --open` are the normal
   debugging path when you want a durable, reviewable artifact instead
   of trying to remember what happened in a long session.
@@ -120,12 +123,12 @@ The braille intro animation that plays before the chat opens, and
 the SUCCESSOR emergence in the chat itself once the wizard saves a
 profile:
 
-| Custom braille intro | SUCCESSOR emergence (forge theme) |
+| Custom braille intro | SUCCESSOR emergence (paper theme) |
 |---|---|
-| ![intro animation](https://github.com/lyc-aon/successor-agent/releases/download/v0.1.3/intro_braille.gif) | ![SUCCESSOR braille in the forge theme](https://github.com/lyc-aon/successor-agent/releases/download/v0.1.3/braille_red.gif) |
+| ![intro animation](https://github.com/lyc-aon/successor-agent/releases/download/v0.1.3/intro_braille.gif) | ![SUCCESSOR braille in the paper theme](https://github.com/lyc-aon/successor-agent/releases/download/v0.1.3/braille_red.gif) |
 
 The 10-step setup wizard, with live theme cycling between steel and
-forge red, and the chat in agentic mode running multi-tool dispatch:
+paper, and the chat in agentic mode running multi-tool dispatch:
 
 | Wizard theme cycling | Multi-tool dispatch |
 |---|---|
@@ -139,7 +142,14 @@ dispatch:
 |---|---|
 | ![search demo](https://github.com/lyc-aon/successor-agent/releases/download/v0.1.3/search_demo.gif) | ![streaming chat](https://github.com/lyc-aon/successor-agent/releases/download/v0.1.3/chat_streaming.gif) |
 
-All seven GIFs are attached to the [v0.1.3 release](https://github.com/lyc-aon/successor-agent/releases/tag/v0.1.3)
+The new recordings surface, with the dense local recordings manager and
+the bounded terminal-artboard reviewer:
+
+| Session Manager Reveal | Session Manager Focus |
+|---|---|
+| ![session manager reveal](https://github.com/lyc-aon/successor-agent/releases/download/v0.1.3/session_manager_reveal.gif) | ![session manager focus](https://github.com/lyc-aon/successor-agent/releases/download/v0.1.3/session_manager_focus.gif) |
+
+All nine GIFs are attached to the [v0.1.3 release](https://github.com/lyc-aon/successor-agent/releases/tag/v0.1.3)
 as downloadable assets.
 
 ## Inside the chat
@@ -164,7 +174,7 @@ editing            scroll                 look & feel        commands
 ```
 
 Common runtime commands not shown in the compact grid:
-`/recording`, `/fork`, `/tasks`, and `/task-cancel`.
+`/recording`, `/playback`, `/fork`, `/tasks`, and `/task-cancel`.
 
 `/fork <directive>` spawns a background subagent against the current
 chat context. `/tasks` lists queued/running/completed background
@@ -450,6 +460,7 @@ Use it like this:
 ```bash
 successor record
 successor record ~/incoming/hang-debug
+successor playback --library --open
 successor playback
 successor playback ~/incoming/hang-debug --open
 successor review ~/incoming/hang-debug --open
@@ -483,10 +494,41 @@ and scrub frame-by-frame with trace events, turn summaries, artifact
 links, and event detail alongside it. Keyboard shortcuts are built in:
 Space play/pause, Left/Right step, Home/End jump.
 
+The current browser reviewer is shaped like a real workbench rather
+than a screenshot gallery: recorded terminal frames are centered on a
+bounded artboard, the event browser lives in a dedicated dock, and the
+right rail keeps evidence and payload detail out of the viewport.
+
+There is also a recordings manager on top of the per-bundle reviewer:
+
+- `successor playback --library --open`
+- `successor review --library --open`
+- `/playback recordings` from inside chat
+- `/playback` from inside chat to open the current live session reviewer
+  when auto-record is active, otherwise the latest finished bundle
+
+That manager regenerates stale bundle viewers from `timeline.json`
+before opening them, so older local recordings pick up the current
+reviewer instead of trapping you in obsolete `playback.html` shells.
+
+The manager itself is intentionally operational: one dense recordings
+grid, one inspector, real theme parity with the harness, and no
+separate "dashboard mode" to drift out of sync.
+
 Recorded traces now make the control layer visible too: browser
 verification interventions, progress-summary rows, and subagent
 follow-through events all appear in the same reviewer timeline as the
 rest of the runtime.
+
+The shipped reviewer UI is now frontend-backed. The source lives in
+[`reviewer-app/`](reviewer-app), and the built static assets are
+vendored into `src/successor/builtin/reviewer_app/` for packaging. If
+you edit the frontend, rebuild it from the repo root with:
+
+```bash
+npm --prefix reviewer-app install
+npm --prefix reviewer-app run build
+```
 
 If you want the old minimal repro path, pass a `.jsonl` output or use
 `--input-only`:

@@ -17,7 +17,7 @@ work without migration.
 V2 fields (added 2026-04-06 with the theme refactor):
 
   version           int — schema version, 2 for current, 1 for legacy
-  theme             str — registered theme name (e.g. "steel", "forge")
+  theme             str — registered theme name (`steel` or `paper`)
   display_mode      str — "dark" or "light"
   density           str — "compact" / "normal" / "spacious"
   mouse             bool — mouse reporting enabled
@@ -36,7 +36,7 @@ V1 → V2 fixup (one-shot, idempotent, runs on every load):
 
     {"theme": "dark"}   → {"theme": "steel", "display_mode": "dark"}
     {"theme": "light"}  → {"theme": "steel", "display_mode": "light"}
-    {"theme": "forge"}  → {"theme": "forge", "display_mode": "dark"}
+    {"theme": "forge"}  → {"theme": "paper", "display_mode": "dark"}
     {"theme": "<other>"}→ {"theme": "<other>", "display_mode": "dark"}
 
   The fixup is idempotent because it only runs when `version` is
@@ -59,6 +59,11 @@ V3 → V4 fixup (one-shot, idempotent, runs on every load):
 
   Missing `autorecord` defaults to True. Recording bundles are local-only
   debugging artifacts, stored outside the repo by default.
+
+V4 → V5 fixup (one-shot, idempotent, runs on every load):
+
+  Clamp saved theme names to the supported built-in catalog. Legacy
+  `forge` maps to `paper`; legacy `cobalt` maps to `steel`.
 """
 
 from __future__ import annotations
@@ -68,12 +73,14 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .render.theme import normalize_theme_name
+
 
 CONFIG_DIR_ENV = "SUCCESSOR_CONFIG_DIR"
 DEFAULT_CONFIG_DIR = Path.home() / ".config" / "successor"
 CHAT_CONFIG_FILE = "chat.json"
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 # Legacy v1 theme names → (v2 theme name, v2 display_mode). Anything not
 # in this map is passed through unchanged with display_mode defaulting
@@ -81,7 +88,8 @@ CURRENT_SCHEMA_VERSION = 4
 _V1_THEME_MAP: dict[str, tuple[str, str]] = {
     "dark": ("steel", "dark"),
     "light": ("steel", "light"),
-    "forge": ("forge", "dark"),
+    "forge": ("paper", "dark"),
+    "cobalt": ("steel", "dark"),
 }
 
 
@@ -168,10 +176,13 @@ def migrate_config(data: dict[str, Any]) -> dict[str, Any]:
         data = _migrate_v2_to_v3(data)
         data["version"] = 3
 
-    # Future migrations would chain here:
     if version < 4:
         data = _migrate_v3_to_v4(data)
         data["version"] = 4
+
+    if version < 5:
+        data = _migrate_v4_to_v5(data)
+        data["version"] = 5
 
     return data
 
@@ -182,7 +193,7 @@ def _migrate_v1_to_v2(data: dict[str, Any]) -> dict[str, Any]:
     The v1 schema had:
         theme:    "dark" | "light" | "forge"   (plus density, mouse)
     The v2 schema has:
-        theme:        registered theme name (e.g. "steel", "forge")
+        theme:        registered theme name (`steel` or `paper`)
         display_mode: "dark" | "light"
         plus the rest unchanged.
 
@@ -227,6 +238,15 @@ def _migrate_v3_to_v4(data: dict[str, Any]) -> dict[str, Any]:
     """Add the local autorecord preference with a safe default."""
     out = dict(data)
     out.setdefault("autorecord", True)
+    return out
+
+
+def _migrate_v4_to_v5(data: dict[str, Any]) -> dict[str, Any]:
+    """Clamp saved theme names to the supported paper/steel catalog."""
+    out = dict(data)
+    theme = normalize_theme_name(out.get("theme"))
+    if theme is not None:
+        out["theme"] = theme
     return out
 
 

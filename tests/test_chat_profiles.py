@@ -76,37 +76,17 @@ def test_saved_config_overrides_profile_defaults(temp_config_dir: Path) -> None:
     """User's manual theme/mode/density choices persist over profile defaults.
 
     Scenario: profile says theme=steel, mode=dark; but the user manually
-    Ctrl+T-cycled to forge and Alt+D'd to light during a previous session.
+    Ctrl+T-cycled to paper and Alt+D'd to light during a previous session.
     On restart, the saved values win — the user's last choice is what
     they expect to see.
     """
     from successor.chat import SuccessorChat
 
-    # Drop a forge theme into the user dir so it's available
-    user_themes = temp_config_dir / "themes"
-    user_themes.mkdir()
-    forge_data = {
-        "name": "forge",
-        "icon": "▲",
-        "description": "test forge",
-        "dark": {
-            "bg": "#10070A", "bg_input": "#070204", "bg_footer": "#1A0A0E",
-            "fg": "#E6D9B8", "fg_dim": "#6B5A4A", "fg_subtle": "#3A1418",
-            "accent": "#C1272D", "accent_warm": "#FF6347", "accent_warn": "#FFCC33",
-        },
-        "light": {
-            "bg": "#FAF3E8", "bg_input": "#FFFCF5", "bg_footer": "#F0E4D2",
-            "fg": "#1C0A06", "fg_dim": "#6B4A35", "fg_subtle": "#C4A687",
-            "accent": "#A82020", "accent_warm": "#C84416", "accent_warn": "#B8860B",
-        },
-    }
-    (user_themes / "forge.json").write_text(json.dumps(forge_data))
-
     # Saved config has the user's manual choices
     (temp_config_dir / "chat.json").write_text(json.dumps({
         "version": 2,
         "active_profile": "default",
-        "theme": "forge",
+        "theme": "paper",
         "display_mode": "light",
         "density": "spacious",
     }))
@@ -115,7 +95,7 @@ def test_saved_config_overrides_profile_defaults(temp_config_dir: Path) -> None:
 
     chat = SuccessorChat()
     assert chat.profile.name == "default"  # profile is still default
-    assert chat.theme.name == "forge"  # but the user's manual theme wins
+    assert chat.theme.name == "paper"  # but the user's manual theme wins
     assert chat.display_mode == "light"  # and their mode
     assert chat.density.name == "spacious"  # and their density
 

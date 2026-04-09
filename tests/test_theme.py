@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from successor.render.theme import (
+    SUPPORTED_THEME_NAMES,
     THEME_REGISTRY,
     Theme,
     ThemeVariant,
@@ -383,7 +384,7 @@ def test_user_theme_overrides_builtin(temp_config_dir: Path) -> None:
 
 
 def test_user_theme_loads_alongside_builtin(temp_config_dir: Path) -> None:
-    """User-only theme names appear in the registry alongside builtins."""
+    """User theme files still load into the raw registry."""
     user_themes = temp_config_dir / "themes"
     user_themes.mkdir()
 
@@ -427,6 +428,12 @@ def test_find_theme_or_fallback_returns_named() -> None:
     assert theme.name == "steel"
 
 
+def test_find_theme_or_fallback_maps_legacy_names() -> None:
+    THEME_REGISTRY.reload()
+    assert find_theme_or_fallback("forge").name == "paper"
+    assert find_theme_or_fallback("cobalt").name == "steel"
+
+
 def test_find_theme_or_fallback_unknown_name_returns_first() -> None:
     THEME_REGISTRY.reload()
     theme = find_theme_or_fallback("nonexistent")
@@ -441,10 +448,7 @@ def test_find_theme_or_fallback_none_returns_first() -> None:
 
 
 def test_next_theme_cycles(temp_config_dir: Path) -> None:
-    """next_theme walks the registry in order and wraps."""
-    # Add two user themes alongside the builtin so we have a stable
-    # cycle to test (sorted order: forge, sakura, steel — or whichever
-    # the loader produces).
+    """next_theme walks the supported catalog in order and wraps."""
     user_themes = temp_config_dir / "themes"
     user_themes.mkdir()
     for name in ("alpha", "beta"):
@@ -458,7 +462,7 @@ def test_next_theme_cycles(temp_config_dir: Path) -> None:
 
     THEME_REGISTRY.reload()
     themes = all_themes()
-    assert len(themes) >= 3  # steel + alpha + beta
+    assert [theme.name for theme in themes] == list(SUPPORTED_THEME_NAMES)
 
     # Cycle through every theme exactly once back to the start.
     seen = []

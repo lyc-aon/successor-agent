@@ -35,7 +35,7 @@ def test_load_returns_default_when_file_missing(temp_config_dir: Path) -> None:
 def test_save_then_load_roundtrip(temp_config_dir: Path) -> None:
     """A saved config loads back with all fields preserved."""
     payload = {
-        "theme": "forge",
+        "theme": "paper",
         "display_mode": "dark",
         "density": "spacious",
         "mouse": True,
@@ -43,7 +43,7 @@ def test_save_then_load_roundtrip(temp_config_dir: Path) -> None:
     assert save_chat_config(payload) is True
 
     cfg = load_chat_config()
-    assert cfg["theme"] == "forge"
+    assert cfg["theme"] == "paper"
     assert cfg["display_mode"] == "dark"
     assert cfg["density"] == "spacious"
     assert cfg["mouse"] is True
@@ -85,7 +85,7 @@ def test_save_is_atomic(temp_config_dir: Path) -> None:
     """save_chat_config writes via a temp file + rename so a partial
     write can never corrupt the existing config."""
     save_chat_config({"theme": "steel"})
-    save_chat_config({"theme": "forge"})
+    save_chat_config({"theme": "paper"})
 
     # No leftover .tmp file after a successful write
     tmp_files = list(temp_config_dir.glob("*.tmp"))
@@ -122,16 +122,22 @@ def test_migrate_v1_light() -> None:
 
 
 def test_migrate_v1_forge() -> None:
-    """v1 'forge' theme → v2 ('forge', 'dark') — current forge is dark-only."""
+    """v1 'forge' theme maps forward to paper dark."""
     result = migrate_config({"theme": "forge"})
-    assert result["theme"] == "forge"
+    assert result["theme"] == "paper"
+    assert result["display_mode"] == "dark"
+    assert result["version"] == CURRENT_SCHEMA_VERSION
+
+
+def test_migrate_v4_cobalt_maps_to_steel() -> None:
+    result = migrate_config({"version": 4, "theme": "cobalt", "display_mode": "dark"})
+    assert result["theme"] == "steel"
     assert result["display_mode"] == "dark"
     assert result["version"] == CURRENT_SCHEMA_VERSION
 
 
 def test_migrate_v1_unknown_theme_passes_through() -> None:
-    """A v1 user theme name that we don't recognize passes through with
-    display_mode defaulted to dark."""
+    """Unknown custom theme names survive migration unchanged."""
     result = migrate_config({"theme": "my_custom_theme"})
     assert result["theme"] == "my_custom_theme"
     assert result["display_mode"] == "dark"
@@ -184,7 +190,7 @@ def test_migrate_doesnt_clobber_explicit_display_mode() -> None:
     assert result["display_mode"] == "dark"
     # theme was NOT translated because the v1 fixup only fires when
     # display_mode is absent.
-    assert result["theme"] == "light"
+    assert result["theme"] == "steel"
 
 
 def test_migrate_empty_dict() -> None:
@@ -260,12 +266,12 @@ def test_save_then_load_does_not_re_migrate(temp_config_dir: Path) -> None:
     """Once saved as v2, future loads skip the migration entirely."""
     # Save with explicit v2 fields
     save_chat_config({
-        "theme": "forge",
+        "theme": "paper",
         "display_mode": "light",
     })
     cfg = load_chat_config()
     # The saved values are preserved exactly — no v1 fixup ran.
-    assert cfg["theme"] == "forge"
+    assert cfg["theme"] == "paper"
     assert cfg["display_mode"] == "light"
     assert cfg["autorecord"] is True
 

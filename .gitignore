@@ -6,6 +6,7 @@ __pycache__/
 *.egg
 dist/
 build/
+node_modules/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -70,6 +71,7 @@ scripts/walkthrough_demo.py
 # Generated artifacts from local fiddling
 /tmp_*
 /scratch_*
+.codex-artifacts/
 
 # Local planning / private notes — keep internal scratch out of the repo
 /plans/

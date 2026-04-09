@@ -8,13 +8,16 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from successor.chat import SuccessorChat
+from successor.chat import SuccessorChat, find_slash_command
 from successor.cli import build_parser, cmd_playback, cmd_record
 from successor.config import load_chat_config, save_chat_config
 from successor.playback import (
     RecordingBundle,
+    build_recordings_library_payload,
     ensure_bundle_is_gitignored,
+    recordings_library_path,
     write_playback_html,
+    write_recordings_html,
 )
 from successor.render.cells import Cell, Grid
 
@@ -75,8 +78,8 @@ def test_playback_html_escapes_embedded_script_terminators(tmp_path: Path) -> No
     assert html.count("</script>") == 2
     assert "\\u003c/script\\u003e" in html
     assert "alert('x')" in html
-    assert "Keyboard: Space play/pause" in html
-    assert "Successor Session Reviewer" in html
+    assert "<title>Playback Escape</title>" in html
+    assert "Wheel to zoom. Drag to pan." in html
 
 
 def test_playback_html_includes_bundle_artifacts_and_visuals(tmp_path: Path) -> None:
@@ -109,7 +112,8 @@ def test_playback_html_includes_bundle_artifacts_and_visuals(tmp_path: Path) -> 
     assert "summary.json" in html
     assert "turn_01_plain.txt" in html
     assert "visuals/frame.png" in html
-    assert "local-only artifact" in html
+    assert "<title>Bundle Demo</title>" in html
+    assert "Artifacts" in html
 
 
 def test_recording_bundle_writes_artifacts_and_dedupes_identical_frames(tmp_path: Path) -> None:
@@ -213,6 +217,72 @@ def test_review_alias_parses_to_cmd_playback() -> None:
     assert args.func is cmd_playback
 
 
+def test_playback_slash_command_is_registered() -> None:
+    assert find_slash_command("playback") is not None
+    assert find_slash_command("review") is not None
+
+
+def test_write_recordings_html_builds_library_from_existing_bundles(tmp_path: Path) -> None:
+    root = tmp_path / "recordings"
+    first = root / "20260409-010101"
+    second = root / "20260409-020202"
+    for bundle, title in ((first, "alpha run"), (second, "beta run")):
+        bundle.mkdir(parents=True)
+        (bundle / "summary.json").write_text(
+            json.dumps(
+                {
+                    "title": title,
+                    "description": "demo bundle",
+                    "frame_count": 3,
+                    "trace_event_count": 2,
+                    "duration_s": 12.5,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (bundle / "timeline.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "index": 1,
+                        "turn_index": 1,
+                        "kind": "idle",
+                        "frame_index": 0,
+                        "turn_elapsed_s": 0.1,
+                        "scenario_elapsed_s": 0.1,
+                        "agent_turn": 1,
+                        "stream_open": False,
+                        "running_tools": 0,
+                        "message_count": 1,
+                        "plain": "hello world",
+                    }
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (bundle / "session_trace.json").write_text(
+            json.dumps([{"t": 0.1, "type": "browser_open"}]) + "\n",
+            encoding="utf-8",
+        )
+        (bundle / "playback.html").write_text("stale", encoding="utf-8")
+
+    payload = build_recordings_library_payload(root)
+    assert payload["kind"] == "library"
+    assert len(payload["sessions"]) == 2
+
+    html_path = write_recordings_html(root)
+    html = html_path.read_text(encoding="utf-8")
+    assert html_path == recordings_library_path(root)
+    assert "<title>Successor recordings</title>" in html
+    assert "alpha run" in html
+    assert "beta run" in html
+    refreshed = (first / "playback.html").read_text(encoding="utf-8")
+    assert "<title>alpha run</title>" in refreshed
+    assert "alpha run" in refreshed
+
+
 def test_chat_autorecord_defaults_on_and_slash_command_can_disable(
     temp_config_dir: Path,
     monkeypatch,
@@ -266,3 +336,60 @@ def test_chat_respects_autorecord_off_in_config(
     monkeypatch.setattr("successor.chat.RecordingBundle", _ExplodingBundle)
     chat = SuccessorChat()
     assert chat._recorder is None
+
+
+def test_chat_playback_recordings_opens_library(
+    temp_config_dir: Path,
+    monkeypatch,
+) -> None:
+    save_chat_config({"autorecord": False})
+    recordings_root = temp_config_dir / "recordings"
+    monkeypatch.setenv("SUCCESSOR_RECORDINGS_DIR", str(recordings_root))
+    opened: list[str] = []
+    monkeypatch.setattr("webbrowser.open", lambda uri: opened.append(uri) or True)
+
+    chat = SuccessorChat()
+    chat.input_buffer = "/playback recordings"
+    chat._submit()
+
+    assert (recordings_root / "recordings.html").exists()
+    assert opened and opened[0].endswith("/recordings.html")
+    assert "opened recordings manager" in chat.messages[-1].raw_text
+
+
+def test_chat_playback_current_uses_live_bundle(
+    temp_config_dir: Path,
+    monkeypatch,
+) -> None:
+    save_chat_config({"autorecord": False})
+    opened: list[str] = []
+    monkeypatch.setattr("webbrowser.open", lambda uri: opened.append(uri) or True)
+
+    class _FakeLiveBundle:
+        def __init__(self, root: Path) -> None:
+            self.root = root
+            self.viewer_path = root / "playback.html"
+            self.refresh_calls = 0
+            self.capture_calls = 0
+
+        def capture_frame(self, _grid, *, chat, force: bool = False) -> None:
+            self.capture_calls += 1
+
+        def refresh_viewer(self, *, trace_path) -> dict[str, object]:
+            self.refresh_calls += 1
+            self.viewer_path.parent.mkdir(parents=True, exist_ok=True)
+            self.viewer_path.write_text("<html>live</html>\n", encoding="utf-8")
+            return {"viewer_path": str(self.viewer_path), "trace_path": str(trace_path)}
+
+    chat = SuccessorChat()
+    fake = _FakeLiveBundle(temp_config_dir / "live-bundle")
+    chat._recorder = fake
+    chat._front = _grid_with_text("live frame")
+    chat.input_buffer = "/playback"
+    chat._submit()
+
+    assert fake.capture_calls == 1
+    assert fake.refresh_calls == 1
+    assert fake.viewer_path.exists()
+    assert opened and opened[0].endswith("/playback.html")
+    assert "opened current session reviewer" in chat.messages[-1].raw_text
