@@ -287,8 +287,6 @@ The phase was scoped deliberately:
 - make the runtime use that state for one narrow continuation decision
 - keep the whole thing visible in trace + playback
 
-This is Phase 1 from [`docs/autonomy-plan.md`](autonomy-plan.md).
-
 ### Deterministic references
 
 The implementation was shaped directly by these local `free-code`
@@ -327,7 +325,6 @@ surfaces:
   - the reminder is single-use per user turn, so it cannot spiral into
     an unbounded self-kick
 - docs:
-  - new `docs/autonomy-plan.md`
   - updated `README.md`
   - updated `CLAUDE.md`
 
@@ -1208,8 +1205,6 @@ real model-visible delegation path.
 - `successor-dev` now enables the model-visible `subagent` tool by
   default. The plain `default` profile keeps manual `/fork` available
   but leaves model delegation off by default.
-- `docs/subagents-plan.md` was rewritten into an up-to-date design note
-  instead of a stale pre-implementation plan.
 
 ### Verification
 

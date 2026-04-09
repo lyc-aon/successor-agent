@@ -91,6 +91,29 @@ The bundled default profile does not enable `holonet`, `browser`, or
 harness, but they only appear in the runtime when you opt in through
 the wizard's tools step or the config menu.
 
+## Core Workflows
+
+These are the commands that matter most day to day:
+
+```bash
+successor setup
+successor doctor
+successor chat
+successor record
+successor playback --open
+```
+
+- `successor setup` is the first-run path and the easiest way to turn
+  on `holonet`, `browser`, `vision`, theming, and auto-record.
+- `successor doctor` is the first troubleshooting command when the
+  model cannot reach its provider, the browser tool is unavailable, or
+  a profile's web/vision configuration looks wrong.
+- `successor chat` is the normal interactive path once a profile is
+  configured.
+- `successor record` and `successor playback --open` are the normal
+  debugging path when you want a durable, reviewable artifact instead
+  of trying to remember what happened in a long session.
+
 ## Visuals
 
 The braille intro animation that plays before the chat opens, and
@@ -139,6 +162,9 @@ editing            scroll                 look & feel        commands
   Ctrl+C quit       Home/End top/bottom     Alt+D dark/light   /compact
   Ctrl+G interrupt  Ctrl+F search history   Ctrl+] density     /config
 ```
+
+Common runtime commands not shown in the compact grid:
+`/recording`, `/fork`, `/tasks`, and `/task-cancel`.
 
 `/fork <directive>` spawns a background subagent against the current
 chat context. `/tasks` lists queued/running/completed background
@@ -235,6 +261,18 @@ Recommended local secret path:
   `SUCCESSOR_BRAVE_API_KEY` / `BRAVE_API_KEY`,
   `SUCCESSOR_FIRECRAWL_API_KEY` / `FIRECRAWL_API_KEY`,
   and `SUCCESSOR_VISION_API_KEY` / `OPENAI_API_KEY`
+
+Example local secret-file setup:
+
+```bash
+mkdir -p ~/.config/successor/secrets
+chmod 700 ~/.config/successor ~/.config/successor/secrets
+printf '%s' "$BRAVE_API_KEY" > ~/.config/successor/secrets/brave-api-key
+printf '%s' "$FIRECRAWL_API_KEY" > ~/.config/successor/secrets/firecrawl-api-key
+chmod 600 ~/.config/successor/secrets/brave-api-key ~/.config/successor/secrets/firecrawl-api-key
+```
+
+Those files live outside the repo and are never tracked by git.
 
 Successor also ships focused helper skills for these tools:
 
@@ -416,6 +454,16 @@ successor playback
 successor playback ~/incoming/hang-debug --open
 successor review ~/incoming/hang-debug --open
 ```
+
+For ordinary debugging, the shortest loop is:
+
+```bash
+successor chat
+successor playback --open
+```
+
+Leave auto-record on, do the run, exit, and immediately reopen the
+latest bundle in the reviewer.
 
 Normal `successor chat` sessions also auto-record to that same local
 bundle format by default. This is a user preference, not a profile

@@ -148,8 +148,6 @@ plus one guarded continuation nudge for longer agentic runs.
 - if a turn ends while a task is still explicitly marked
   `in_progress`, the loop can issue one structured continuation
   reminder instead of stopping early
-- documented the staged autonomy architecture in
-  [`docs/autonomy-plan.md`](docs/autonomy-plan.md)
 - refreshed local docs to reflect the internal task ledger and the
   current playback workflow in [`README.md`](README.md) and
   [`CLAUDE.md`](CLAUDE.md)
@@ -163,9 +161,8 @@ plus one guarded continuation nudge for longer agentic runs.
   - follow-on recording showed immediate `task` adoption with real
     task-ledger cards and trace events
   - remaining observed gap: the model can still spend too many turns on
-    task bookkeeping, so the next pass remains the stricter progress /
-    browser verification controller documented in
-    [`docs/autonomy-plan.md`](docs/autonomy-plan.md)
+    task bookkeeping, so the next pass remained the stricter progress /
+    browser verification controller
 
 ## v0.1.18 — 2026-04-08
 

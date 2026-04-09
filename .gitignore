@@ -70,3 +70,8 @@ scripts/walkthrough_demo.py
 # Generated artifacts from local fiddling
 /tmp_*
 /scratch_*
+
+# Local planning / private notes — keep internal scratch out of the repo
+/plans/
+/notes/
+docs/*.local.md

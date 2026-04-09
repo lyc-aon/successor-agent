@@ -107,7 +107,6 @@ docs/                        architectural docs (read these)
   concepts.md                features enabled by the architecture
   llamacpp-protocol.md       what we send / what we get back from llama.cpp
   web-tools.md               holonet + Playwright browser install/config guide
-  autonomy-plan.md           staged autonomy/task-ledger/controller plan
   changelog.md               per-phase notes
 ```
 
@@ -134,6 +133,7 @@ successor chat         chat interface (real llama.cpp streaming, intro plays fir
                           /budget         show context fill % + thresholds
                           /burn N         inject N synthetic tokens (test compaction)
                           /compact        manually fire compaction
+                          /recording      show or toggle local auto-record
                           /fork <text>    spawn a background subagent
                           /tasks          list background task state
                           /task-cancel    cancel a queued/running task
