@@ -3,6 +3,27 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
+## v0.1.16 — 2026-04-08
+
+Fix self-contained playback HTML so the embedded controls work in a real browser.
+
+### What changed
+
+- escaped the embedded playback JSON payload so captured frame text or
+  trace excerpts containing literal `</script>` do not break the page
+  JavaScript
+- added a regression test that feeds the playback writer captured text
+  containing script terminators and asserts the output still contains
+  only the two intended closing script tags
+
+### Verification
+
+- `tests/test_e2e_playback.py`: `1 passed`
+- full local suite: `1136 passed`
+- repaired the copied playback files under
+  `~/incoming/successor-issue-desk-demo/` and the source E2E artifact
+  directory in place
+
 ## v0.1.15 — 2026-04-08
 
 Optional multimodal vision tool for screenshot-based local verification.

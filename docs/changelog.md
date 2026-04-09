@@ -11,6 +11,43 @@ unit on top of phase 0.
 
 ---
 
+## v0.1.16, playback HTML escaping fix (2026-04-08)
+
+The new playback scrubber was conceptually right but had a concrete
+serialization bug: it embedded raw JSON directly inside a `<script
+type="application/json">` tag. That becomes invalid the moment the
+captured frame text or trace data itself contains literal `</script>`,
+which real web-app traces absolutely can.
+
+That is exactly why the copied playbacks in the handoff folder opened
+but their controls appeared dead: the payload script tag was being
+terminated early by captured HTML from the app under test.
+
+### What landed
+
+- `scripts/e2e_chat_driver.py`:
+  - the playback writer now escapes `&`, `<`, and `>` inside the
+    embedded JSON payload before writing the HTML file
+- new regression:
+  - `tests/test_e2e_playback.py`
+  - imports the playback writer directly
+  - feeds it timeline/trace data containing literal `</script>`
+  - asserts the output HTML still contains only the two intended
+    closing script tags
+
+### Verification
+
+- `tests/test_e2e_playback.py`: `1 passed`
+- full local suite: `1136 passed`
+- repaired the already-exported playback files in:
+  - `/home/lycaon/incoming/successor-issue-desk-demo/`
+  - `/home/lycaon/.local/share/successor/e2e-vision/`
+- post-fix sanity check on the copied handoff files:
+  - `issue-desk-playback.html` now contains exactly 2 closing script
+    tags and escaped payload terminators
+  - `browser-vision-playback.html` now contains exactly 2 closing
+    script tags
+
 ## v0.1.15, multimodal vision tool + screenshot-based visual QA (2026-04-08)
 
 The browser and holonet passes gave Successor real web/runtime reach,

@@ -918,6 +918,12 @@ def _write_playback_html(
         "frames": timeline,
         "trace_events": trace_events,
     }
+    payload_json = (
+        json.dumps(payload)
+        .replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+    )
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1029,7 +1035,7 @@ def _write_playback_html(
       <div id="events" class="events"></div>
     </div>
   </div>
-  <script type="application/json" id="payload">{json.dumps(payload)}</script>
+  <script type="application/json" id="payload">{payload_json}</script>
   <script>
     const payload = JSON.parse(document.getElementById("payload").textContent);
     const frames = payload.frames || [];
