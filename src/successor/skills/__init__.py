@@ -22,6 +22,7 @@ Public surface:
 from .prompt import (
     build_skill_card_output,
     build_skill_discovery_section,
+    build_skill_hint_section,
     build_skill_reuse_result,
     build_skill_tool_result,
     enabled_profile_skills,
@@ -42,6 +43,7 @@ __all__ = [
     "all_skills",
     "build_skill_card_output",
     "build_skill_discovery_section",
+    "build_skill_hint_section",
     "build_skill_reuse_result",
     "build_skill_tool_result",
     "enabled_profile_skills",

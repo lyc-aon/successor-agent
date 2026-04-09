@@ -45,6 +45,14 @@ browsers with:
 python -m playwright install chromium
 ```
 
+The `vision` tool does not need an extra Python package. It needs a
+multimodal model endpoint. For local `llama.cpp`, that usually means a
+VL model plus an `mmproj` projector, often on a separate sidecar port:
+
+```bash
+llama-server -m /path/to/Qwen3-VL.gguf --mmproj /path/to/mmproj.gguf --port 8090
+```
+
 `successor setup` plays the SUCCESSOR emergence animation and walks
 you through 10 interactive wizard steps with a live preview pane:
 welcome, name, theme, dark/light, density, intro animation, provider,
@@ -64,9 +72,10 @@ use, so the autocompactor's percentage thresholds resolve to actual
 token counts without you having to set anything manually.
 
 The tools step auto-discovers the built-in tool registry. `bash` is on
-by default; `subagent`, `holonet`, and `browser` are opt-in. If you want
-bare chat, uncheck everything. If you want API-backed web research or a
-live browser session, enable them there or later in `/config`.
+by default; `subagent`, `holonet`, `browser`, and `vision` are opt-in.
+If you want bare chat, uncheck everything. If you want API-backed web
+research, a live browser session, or screenshot-based visual
+inspection, enable them there or later in `/config`.
 
 If you skip the wizard and run `successor chat` directly on a fresh install, you get the
 bundled default profile pointed at `http://localhost:8080`. Bash is
@@ -77,10 +86,10 @@ is not running yet. The hint message lists three concrete remediation
 paths: start a local server, run `successor setup` to switch
 providers, or open `/config` to edit the profile inline.
 
-The bundled default profile does not enable `holonet` or `browser` for
-the model automatically. Those tools are included in the harness, but
-they only appear in the runtime when you opt in through the wizard's
-tools step or the config menu.
+The bundled default profile does not enable `holonet`, `browser`, or
+`vision` for the model automatically. Those tools are included in the
+harness, but they only appear in the runtime when you opt in through
+the wizard's tools step or the config menu.
 
 ## Visuals
 
@@ -144,9 +153,9 @@ as a background-task notification. The bundled `successor-dev` profile
 ships with the model-visible tool on; the plain `default` profile keeps
 manual `/fork` available but leaves model delegation off by default.
 
-## Web And Browser Tools
+## Web, Browser, And Vision Tools
 
-Successor now ships two more built-in tool families alongside `bash`
+Successor now ships three more built-in tool families alongside `bash`
 and `subagent`.
 
 `holonet` is the API-backed web and research path. It stays in the
@@ -174,10 +183,23 @@ Chromium-family browser. One persistent session is kept per profile so
 local app verification, login state, clicks, typing, screenshots, and
 console-error checks all happen in one place.
 
-Both tools are configured under `/config` once enabled. `holonet` has
-per-provider toggles plus inline key / key-file fields. `browser` has
-`headless`, `channel`, `python_executable`, `executable_path`,
-`user_data_dir`, viewport, timeout, and `screenshot_on_error`. The full reference is in
+`vision` is the screenshot and image-inspection path. It lets a text
+chat model call out to a multimodal endpoint for layout, clipping,
+contrast, hierarchy, and other visibly grounded questions. It works
+well with `browser screenshot`, but it can also inspect any local image
+path the harness can read. The config supports two modes:
+
+- `inherit`: reuse the active chat provider if it is multimodal
+- `endpoint`: point at a dedicated multimodal endpoint, such as a local
+  `llama.cpp` sidecar launched with `--mmproj`
+
+All three tools are configured under `/config` once enabled.
+`holonet` has per-provider toggles plus inline key / key-file fields.
+`browser` has `headless`, `channel`, `python_executable`,
+`executable_path`, `user_data_dir`, viewport, timeout, and
+`screenshot_on_error`. `vision` has `mode`, provider type, base URL,
+model, optional API key / key file, timeout, max tokens, and detail
+level. The full reference is in
 [`docs/web-tools.md`](docs/web-tools.md).
 
 Successor also ships focused helper skills for these tools:
@@ -185,10 +207,12 @@ Successor also ships focused helper skills for these tools:
 - `holonet-research`
 - `biomedical-research`
 - `browser-operator`
+- `browser-verifier`
+- `vision-inspector`
 
 Profiles created through `successor setup` auto-seed the matching
-built-in skills when you enable `holonet` or `browser`. Existing
-profiles can edit the skill list later in `/config` under the
+built-in skills when you enable `holonet`, `browser`, or `vision`.
+Existing profiles can edit the skill list later in `/config` under the
 `extensions` section.
 
 `/budget` shows the live token fill, the warning / autocompact /
@@ -307,14 +331,16 @@ terminal capabilities, lists the active profile's provider and model,
 probes the configured `base_url` to see if it is reachable, and
 reports the resolved context window. On llama.cpp it also reports the
 visible slot count and whether the server advertises parallel tool-call
-support. When `holonet` or `browser` are enabled on the active profile,
-doctor also reports the enabled provider set, Playwright package
-readiness, the browser channel/executable path, and the persistent user
-data directory. Run it first when something is not working.
+support. When `holonet`, `browser`, or `vision` are enabled on the
+active profile, doctor also reports the enabled provider set,
+Playwright package readiness, the browser channel/executable path, the
+persistent user-data directory, and the configured vision runtime
+status. Run it first when something is not working.
 
 `successor tools` is a different registry: it lists Python
 import-registered tools from `src/successor/tools/`, not the native
-profile tool picker (`bash`, `subagent`, `holonet`, `browser`).
+profile tool picker (`bash`, `subagent`, `holonet`, `browser`,
+`vision`).
 
 Normal `successor chat` sessions also leave a bounded local runtime
 trace under `~/.config/successor/logs/`. These JSONL files record user

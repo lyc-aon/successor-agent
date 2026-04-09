@@ -312,6 +312,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             browser_runtime_status,
             resolve_browser_config,
             resolve_holonet_config,
+            resolve_vision_config,
+            vision_runtime_status,
         )
         profile = get_active_profile()
         print(f"    name        {profile.name}")
@@ -419,6 +421,22 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             if browser_status.executable_path:
                 print(f"    browser exe {browser_status.executable_path}")
             print(f"    browser dir {browser_status.user_data_dir}")
+        if "vision" in tools:
+            vision_cfg = resolve_vision_config(profile)
+            vision_client = make_provider(profile.provider or {"type": "llamacpp"})
+            vision_status = vision_runtime_status(vision_cfg, client=vision_client)
+            print(
+                "    vision      "
+                + ("ready" if vision_status.tool_available else "unavailable")
+                + f" ({vision_status.mode})"
+            )
+            if vision_status.provider_type:
+                print(f"    vision type {vision_status.provider_type}")
+            if vision_status.base_url:
+                print(f"    vision url  {vision_status.base_url}")
+            if vision_status.model:
+                print(f"    vision mod  {vision_status.model}")
+            print(f"    vision note {vision_status.reason}")
     except Exception as exc:  # noqa: BLE001
         print(f"    error: could not load active profile ({exc})")
     return 0

@@ -1,4 +1,4 @@
-"""Config menu coverage for holonet and browser sections."""
+"""Config menu coverage for holonet, browser, and vision sections."""
 
 from __future__ import annotations
 
@@ -45,13 +45,25 @@ def test_browser_section_hidden_until_tool_enabled(temp_config_dir: Path) -> Non
     assert "user data dir" in plain.lower()
 
 
-def test_config_menu_save_writes_holonet_and_browser_settings(temp_config_dir: Path) -> None:
+def test_vision_section_hidden_until_tool_enabled(temp_config_dir: Path) -> None:
+    menu = SuccessorConfig()
+    plain = _paint(menu)
+    assert "base url" not in plain.lower()
+
+    cur = menu._current_profile()
+    menu._working_profiles[menu._profile_cursor] = replace(cur, tools=("vision",))
+    plain = _paint(menu)
+    assert "vision" in plain.lower()
+    assert "max tokens" in plain.lower()
+
+
+def test_config_menu_save_writes_holonet_browser_and_vision_settings(temp_config_dir: Path) -> None:
     menu = SuccessorConfig()
     profile = menu._current_profile()
     menu._set_field_on_profile(
         menu._profile_cursor,
         _SETTINGS_TREE[_field_idx("tools")],
-        ("holonet", "browser"),
+        ("holonet", "browser", "vision"),
     )
     menu._set_field_on_profile(
         menu._profile_cursor,
@@ -73,15 +85,39 @@ def test_config_menu_save_writes_holonet_and_browser_settings(temp_config_dir: P
         _SETTINGS_TREE[_field_idx("browser_headless")],
         False,
     )
+    menu._set_field_on_profile(
+        menu._profile_cursor,
+        _SETTINGS_TREE[_field_idx("vision_mode")],
+        "endpoint",
+    )
+    menu._set_field_on_profile(
+        menu._profile_cursor,
+        _SETTINGS_TREE[_field_idx("vision_provider_type")],
+        "openai_compat",
+    )
+    menu._set_field_on_profile(
+        menu._profile_cursor,
+        _SETTINGS_TREE[_field_idx("vision_base_url")],
+        "http://127.0.0.1:8090",
+    )
+    menu._set_field_on_profile(
+        menu._profile_cursor,
+        _SETTINGS_TREE[_field_idx("vision_model")],
+        "vision-local",
+    )
     menu._save()
 
     target = temp_config_dir / "profiles" / f"{profile.name}.json"
     payload = json.loads(target.read_text())
-    assert payload["tools"] == ["holonet", "browser"]
+    assert payload["tools"] == ["holonet", "browser", "vision"]
     assert payload["tool_config"]["holonet"]["default_provider"] == "firecrawl_search"
     assert payload["tool_config"]["holonet"]["firecrawl_api_key_file"] == "~/keys/firecrawl.txt"
     assert payload["tool_config"]["browser"]["channel"] == "msedge"
     assert payload["tool_config"]["browser"]["headless"] is False
+    assert payload["tool_config"]["vision"]["mode"] == "endpoint"
+    assert payload["tool_config"]["vision"]["provider_type"] == "openai_compat"
+    assert payload["tool_config"]["vision"]["base_url"] == "http://127.0.0.1:8090"
+    assert payload["tool_config"]["vision"]["model"] == "vision-local"
 
 
 def test_profile_json_round_trip_preserves_tool_config(temp_config_dir: Path) -> None:
@@ -89,10 +125,11 @@ def test_profile_json_round_trip_preserves_tool_config(temp_config_dir: Path) ->
 
     original = Profile(
         name="roundtrip-web-config",
-        tools=("holonet", "browser"),
+        tools=("holonet", "browser", "vision"),
         tool_config={
             "holonet": {"default_provider": "clinicaltrials"},
             "browser": {"channel": "chrome", "headless": False},
+            "vision": {"mode": "endpoint", "base_url": "http://127.0.0.1:8090", "model": "vision-local"},
         },
     )
     payload = _profile_to_json_dict(original)

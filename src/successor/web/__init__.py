@@ -1,4 +1,4 @@
-"""Web-native tools: API-backed holonet routes and optional browser control."""
+"""Web-native and multimodal tools: holonet, browser, and vision."""
 
 from .browser import (
     BrowserRuntimeStatus,
@@ -12,8 +12,12 @@ from .config import (
     BrowserConfig,
     HOLO_DEFAULT_PROVIDER_OPTIONS,
     HolonetConfig,
+    VISION_MODE_OPTIONS,
+    VISION_PROVIDER_OPTIONS,
+    VisionConfig,
     resolve_browser_config,
     resolve_holonet_config,
+    resolve_vision_config,
 )
 from .holonet import (
     HolonetError,
@@ -24,6 +28,12 @@ from .holonet import (
     resolve_route,
     run_holonet,
 )
+from .vision import (
+    VisionRuntimeStatus,
+    run_vision_analysis,
+    vision_preview_card,
+    vision_runtime_status,
+)
 
 __all__ = [
     "BrowserConfig",
@@ -33,6 +43,10 @@ __all__ = [
     "HolonetError",
     "HolonetRoute",
     "PlaywrightBrowserManager",
+    "VISION_MODE_OPTIONS",
+    "VISION_PROVIDER_OPTIONS",
+    "VisionConfig",
+    "VisionRuntimeStatus",
     "available_provider_status",
     "browser_preview_card",
     "browser_runtime_status",
@@ -41,7 +55,11 @@ __all__ = [
     "playwright_available",
     "resolve_browser_config",
     "resolve_holonet_config",
+    "resolve_vision_config",
     "resolve_route",
     "run_browser_action",
     "run_holonet",
+    "run_vision_analysis",
+    "vision_preview_card",
+    "vision_runtime_status",
 ]

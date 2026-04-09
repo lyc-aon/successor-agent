@@ -101,11 +101,13 @@ def test_wizard_state_seeds_recommended_skills_for_web_tools() -> None:
         "holonet-research",
         "biomedical-research",
         "browser-operator",
+        "browser-verifier",
     )
     assert payload["skills"] == [
         "holonet-research",
         "biomedical-research",
         "browser-operator",
+        "browser-verifier",
     ]
 
 

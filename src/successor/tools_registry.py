@@ -24,7 +24,7 @@ copy of the dict at chat startup.
 
 A "tool" in this context is BIGGER than a single bash command parser.
 It's an entire capability the model can invoke — today `bash`,
-`subagent`, `holonet`, and `browser`. Later we might add
+`subagent`, `holonet`, `browser`, and `vision`. Later we might add
 "git_diff", "db_query", or user-installed tools as separate entries.
 
 Per-tool configuration (timeout, max output, allow_dangerous, etc.)
@@ -481,8 +481,13 @@ the current chat.
 ### Actions
 
 - `open` — navigate to a URL
+- `inspect` — list visible controls and stable selector hints for the current page
 - `click` — click a visible target
-- `type` — fill an input or textarea
+- `type` — fill an input or textarea, or type into the focused field
+- `press` — send a keyboard key like `Enter` or `Escape`
+- `select` — choose an option in a `<select>` or similar form control
+- `storage_state` — inspect local/session storage for the current page
+- `clear_storage` — clear local/session storage for the current page
 - `wait_for` — wait until a target is visible
 - `extract_text` — read visible text from the page or a target
 - `screenshot` — capture a screenshot to disk
@@ -493,13 +498,41 @@ the current chat.
 Prefer text/label targets when possible; use `target_kind="selector"`
 only when the visible text is not distinctive enough.
 
+If you built the local page yourself and know stable selectors such as
+`#new-title` or `#status-filter`, prefer those selectors over ambiguous
+visible text like `Open`, `Closed`, or placeholder copy.
+
 Example — open a page:
 
     {"action": "open", "url": "http://127.0.0.1:4173"}
 
+Example — inspect the current page before guessing targets:
+
+    {"action": "inspect"}
+
 Example — click a visible button:
 
     {"action": "click", "target": "Launch", "target_kind": "text"}
+
+Example — choose from a dropdown:
+
+    {"action": "select", "target": "Status", "target_kind": "label", "option": "Closed"}
+
+Example — inspect persisted app state before retesting:
+
+    {"action": "storage_state"}
+
+Example — reset polluted browser state after a code fix:
+
+    {"action": "clear_storage", "scope": "both"}
+
+Example — commit an inline edit in the focused field:
+
+    {"action": "type", "text": "Keyboard navigation bug", "press_enter": true}
+
+Example — scope a repeated button label to one row:
+
+    {"action": "click", "target": "li:has-text(\"Keyboard navigation bug\") button.status-btn", "target_kind": "selector"}
 
 ### Critical rules
 
@@ -509,6 +542,19 @@ Example — click a visible button:
   you can continue from the current one.
 - After interactive actions, read the returned snapshot before deciding
   what to do next.
+- For local verification flows, call `inspect` after `open` or reload if
+  you are not sure which control to target next.
+- For local apps or fixtures you just built, prefer stable ids/classes
+  over ambiguous visible text. Do not click words like `Open` or
+  `Closed` unless they are clearly the intended control.
+- If local verification is polluted by persisted browser state after a
+  reload, use `storage_state` or `clear_storage` in the browser. Do not
+  edit the app just to reset test data.
+- When multiple controls share the same label, prefer a selector target
+  scoped to the relevant row or region instead of a bare text click.
+- For inline-edit or keyboard-driven flows, use `press` or
+  `press_enter` instead of pretending the change is verified while the
+  input is merely focused.
 """
 
 BROWSER_MODEL_GUIDANCE = """\
@@ -516,8 +562,39 @@ BROWSER_MODEL_GUIDANCE = """\
 
 Use the Playwright browser only for tasks that genuinely need a live
 page session: local app verification, clicks, typing, login state,
-console errors, screenshots, or JS-rendered pages. For search and
-content retrieval, prefer `holonet`.
+console errors, screenshots, JS-rendered pages, or real form controls
+like dropdowns. For search and content retrieval, prefer `holonet`.
+
+For local verification work, the default rhythm should be: `open`
+once, `inspect` to learn the real controls/selectors, perform the
+smallest necessary action, then read the returned snapshot before
+choosing the next step.
+
+For open-ended local polish or "inspect it like a human" tasks, do not
+tour every control. Sample one or two representative interactions, pick
+the most important issue, fix it, verify it, and stop.
+
+When an input is already focused, `type` may omit `target`. If the next
+step is simply Enter, prefer one `type` call with `press_enter=true`
+instead of a separate `press`. Use `press` mainly for keys like
+`Escape` or for keyboard-only flows that are not just "type, then
+Enter". When a button label is repeated, prefer a scoped selector such as
+`li:has-text("Issue title") button.status-btn`.
+
+For local fixtures or pages you just built, prefer stable ids/classes
+you already know from the source over ambiguous visible text. Use
+`#search`, `#new-title`, or `#status-filter` instead of clicking generic
+words like `Open`, `Closed`, or placeholder text unless those are the
+actual controls you intend.
+
+If a reload or prior verification step leaves stale browser state behind,
+use `storage_state` or `clear_storage` instead of changing the app code
+just to get a clean test fixture.
+
+When the task is explicitly visual — layout, spacing, clipping,
+overflow, hierarchy, contrast, “inspect it like a human”, or design
+polish — capture a `screenshot` and use `vision` instead of relying on
+DOM text alone.
 """
 
 _BROWSER_TOOL_SCHEMA: dict[str, Any] = {
@@ -536,8 +613,13 @@ _BROWSER_TOOL_SCHEMA: dict[str, Any] = {
                     "type": "string",
                     "enum": [
                         "open",
+                        "inspect",
                         "click",
                         "type",
+                        "press",
+                        "select",
+                        "storage_state",
+                        "clear_storage",
                         "wait_for",
                         "extract_text",
                         "screenshot",
@@ -551,7 +633,7 @@ _BROWSER_TOOL_SCHEMA: dict[str, Any] = {
                 },
                 "target": {
                     "type": "string",
-                    "description": "Visible text, label, placeholder, or selector target.",
+                    "description": "Visible text, label, placeholder, or selector target. Optional for focused `type`/`press` actions.",
                 },
                 "target_kind": {
                     "type": "string",
@@ -562,16 +644,110 @@ _BROWSER_TOOL_SCHEMA: dict[str, Any] = {
                     "type": "string",
                     "description": "Text payload for `type`.",
                 },
+                "option": {
+                    "type": "string",
+                    "description": "Option label or value for `select`.",
+                },
+                "key": {
+                    "type": "string",
+                    "description": "Keyboard key for `press`, for example `Enter` or `Escape`.",
+                },
                 "press_enter": {
                     "type": "boolean",
-                    "description": "Press Enter after typing.",
+                    "description": "Press Enter after typing. Useful for inline-edit save and form submit flows.",
                 },
                 "path": {
                     "type": "string",
                     "description": "Optional output path for `screenshot`.",
                 },
+                "scope": {
+                    "type": "string",
+                    "enum": ["local", "session", "both"],
+                    "description": "Storage scope for `clear_storage`. Defaults to `both`.",
+                },
             },
             "required": ["action"],
+        },
+    },
+}
+
+VISION_DOC = """\
+### vision — inspect screenshots and images with a multimodal model
+
+Use `vision` when the task depends on what is visibly on screen rather
+than what the DOM or source code claims should be there: layout,
+spacing, clipping, overlap, hierarchy, contrast, empty states, or
+other design/runtime details.
+
+`vision` analyzes a local image file. It works well with browser
+screenshots, but it can also inspect any other local PNG, JPEG, WEBP,
+or GIF that the harness can read.
+
+### How to invoke
+
+Pass a local `path` plus a short `prompt` explaining what you need to
+verify.
+
+Example — inspect a browser screenshot:
+
+    {"path": "/tmp/successor-shot.png", "prompt": "Describe the most obvious visual issue in this UI."}
+
+Example — verify a specific layout question:
+
+    {"path": "/tmp/page.png", "prompt": "Check whether the CTA is clipped or overlaps nearby content."}
+
+### Critical rules
+
+- Use `vision` when the task is visually grounded. Do not guess visual
+  details from HTML/CSS/DOM text alone.
+- For local UI verification, the normal sequence is: `browser open`,
+  `browser screenshot`, then `vision`.
+- Keep the prompt concrete. Ask for one or two specific visual checks
+  instead of an open-ended essay.
+"""
+
+VISION_MODEL_GUIDANCE = """\
+## Using the vision tool
+
+Use `vision` for screenshot-based inspection: layout, spacing, clipping,
+overlap, contrast, hierarchy, and other visible UI/runtime details.
+
+If a browser or local-app task says “inspect it like a human”, “check
+the design”, “look for visual weirdness”, or “verify the layout”, take a
+browser screenshot and call `vision` instead of inferring everything
+from page text or selectors.
+
+For visual verification, keep the loop tight: open once, capture a
+screenshot, ask one concrete visual question, then act on the answer.
+"""
+
+_VISION_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "vision",
+        "description": (
+            "Inspect a local image or browser screenshot with a multimodal "
+            "model. Useful for layout, visual QA, and screenshot-based "
+            "verification."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Local image path to analyze.",
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Short instruction describing what to inspect in the image.",
+                },
+                "detail": {
+                    "type": "string",
+                    "enum": ["auto", "low", "high", "original"],
+                    "description": "Optional image-detail level. Omit to use the configured default.",
+                },
+            },
+            "required": ["path"],
         },
     },
 }
@@ -622,6 +798,15 @@ AVAILABLE_TOOLS: Mapping[str, ToolDescriptor] = {
         schema=_BROWSER_TOOL_SCHEMA,
         system_prompt_doc=BROWSER_DOC,
         model_guidance=BROWSER_MODEL_GUIDANCE,
+    ),
+    "vision": ToolDescriptor(
+        name="vision",
+        label="vision",
+        description="Optional multimodal image inspection for screenshots and visual QA.",
+        default_enabled=False,
+        schema=_VISION_TOOL_SCHEMA,
+        system_prompt_doc=VISION_DOC,
+        model_guidance=VISION_MODEL_GUIDANCE,
     ),
 }
 

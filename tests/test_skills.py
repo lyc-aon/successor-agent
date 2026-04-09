@@ -15,6 +15,7 @@ from successor.skills import (
     Skill,
     all_skills,
     build_skill_discovery_section,
+    build_skill_hint_section,
     get_skill,
     parse_skill_file,
     recommended_skills_for_tools,
@@ -191,6 +192,31 @@ def test_builtin_successor_rendering_skill_loads(temp_config_dir: Path) -> None:
     assert SKILL_REGISTRY.source_of("successor-rendering-pattern") == "builtin"
 
 
+def test_build_skill_hint_section_for_browser_skills(temp_config_dir: Path) -> None:
+    SKILL_REGISTRY.reload()
+    browser_operator = get_skill("browser-operator")
+    browser_verifier = get_skill("browser-verifier")
+    assert browser_operator is not None
+    assert browser_verifier is not None
+
+    section = build_skill_hint_section([browser_operator, browser_verifier])
+
+    assert "Skill Routing Hints" in section
+    assert "call the `skill` tool with `browser-operator`" in section
+    assert "call the `skill` tool with `browser-verifier`" in section
+
+
+def test_build_skill_hint_section_for_vision_skill(temp_config_dir: Path) -> None:
+    SKILL_REGISTRY.reload()
+    vision_skill = get_skill("vision-inspector")
+    assert vision_skill is not None
+
+    section = build_skill_hint_section([vision_skill])
+
+    assert "Skill Routing Hints" in section
+    assert "call the `skill` tool with `vision-inspector`" in section
+
+
 def test_user_skill_loads(temp_config_dir: Path) -> None:
     user_dir = temp_config_dir / "skills"
     user_dir.mkdir()
@@ -278,6 +304,7 @@ def test_builtin_browser_and_holonet_skills_load(temp_config_dir: Path) -> None:
     assert "browser-operator" in names
     assert "holonet-research" in names
     assert "biomedical-research" in names
+    assert "vision-inspector" in names
 
 
 def test_build_skill_discovery_section_lists_enabled_skills(temp_config_dir: Path) -> None:
@@ -307,4 +334,12 @@ def test_recommended_skills_for_tools_returns_builtin_web_defaults(
         "holonet-research",
         "biomedical-research",
         "browser-operator",
+        "browser-verifier",
     )
+
+
+def test_recommended_skills_for_tools_returns_vision_defaults(
+    temp_config_dir: Path,
+) -> None:
+    SKILL_REGISTRY.reload()
+    assert recommended_skills_for_tools(("vision",)) == ("vision-inspector",)

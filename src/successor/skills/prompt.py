@@ -11,7 +11,34 @@ DEFAULT_CHAR_BUDGET = 8_000
 MAX_LISTING_DESC_CHARS = 250
 RECOMMENDED_SKILLS_BY_TOOL: dict[str, tuple[str, ...]] = {
     "holonet": ("holonet-research", "biomedical-research"),
-    "browser": ("browser-operator",),
+    "browser": ("browser-operator", "browser-verifier"),
+    "vision": ("vision-inspector",),
+}
+ALWAYS_ON_SKILL_HINTS: dict[str, str] = {
+    "browser-operator": (
+        "For general live browser interaction, call the `skill` tool with "
+        "`browser-operator` before the first browser action. Open once, "
+        "inspect if unsure, and avoid broad exploratory clicking."
+    ),
+    "browser-verifier": (
+        "For local app verification, QA, or browser-driven bug reproduction, "
+        "call the `skill` tool with `browser-verifier` before the first "
+        "browser action. Open once, inspect if unsure, take the smallest "
+        "proving action, and stop after the behavior is verified or falsified."
+    ),
+    "holonet-research": (
+        "For general web research with API-backed sources, call the `skill` "
+        "tool with `holonet-research` before using `holonet`."
+    ),
+    "biomedical-research": (
+        "For literature/trial research questions, call the `skill` tool with "
+        "`biomedical-research` before using `holonet`."
+    ),
+    "vision-inspector": (
+        "For screenshot-based inspection, visual QA, layout checks, or design "
+        "polish, call the `skill` tool with `vision-inspector` before using "
+        "`vision`."
+    ),
 }
 
 
@@ -122,6 +149,24 @@ def build_skill_discovery_section(
         "other tools or answer from memory. The `skill` tool loads the full "
         "instructions on demand, so this list is discovery-only.\n\n"
         f"{listing}"
+    )
+
+
+def build_skill_hint_section(skills: list[Skill]) -> str:
+    """Compact always-on routing hints for high-leverage enabled skills."""
+    lines: list[str] = []
+    for skill in skills:
+        hint = ALWAYS_ON_SKILL_HINTS.get(skill.name)
+        if not hint:
+            continue
+        lines.append(f"- {skill.name}: {hint}")
+    if not lines:
+        return ""
+    return (
+        "## Skill Routing Hints\n\n"
+        "These are short always-on summaries for enabled skills. Load the "
+        "matching skill with the `skill` tool when the task clearly fits.\n\n"
+        + "\n".join(lines)
     )
 
 

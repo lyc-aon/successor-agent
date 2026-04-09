@@ -41,7 +41,6 @@ import json
 import os
 import shutil
 import sys
-import tempfile
 import time
 import traceback
 from dataclasses import asdict, dataclass, field, replace
@@ -68,10 +67,10 @@ GRID_ROWS = 60
 GRID_COLS = 140
 TURN_TIMEOUT_S = 240.0  # per user prompt, including all continuation turns
 TICK_SLEEP_S = 0.05  # how long to sleep between _pump_stream calls
-MID_STREAM_SNAPSHOT_INTERVAL_S = 0.25  # capture a frame every N seconds while a stream is open
+DEFAULT_FRAME_INTERVAL_S = 0.25  # capture a frame every N seconds while a stream is open
 DEFAULT_BASE_URL = "http://localhost:8080"
 DEFAULT_MODEL = "local"
-ARTIFACT_ROOT = Path("/tmp/successor-e2e")
+ARTIFACT_ROOT = Path.home() / ".local" / "share" / "successor" / "e2e"
 
 
 # ─── Scenario definition ───
@@ -211,6 +210,12 @@ def settle_chat_with_capture(
     timeout_s: float,
     snapshot_dir: Path | None,
     snapshot_prefix: str,
+    *,
+    frame_interval_s: float,
+    out_dir: Path,
+    turn_index: int,
+    timeline: list[dict[str, object]],
+    scenario_t0: float,
 ) -> tuple[bool, float, int]:
     """Drive the chat's pumps until it's fully settled: no stream in
     flight, no pending agent turn, AND no in-flight bash runners.
@@ -252,10 +257,21 @@ def settle_chat_with_capture(
         # Mid-stream capture
         if snapshot_dir is not None:
             elapsed = time.monotonic() - start
-            if elapsed - last_snapshot_at >= MID_STREAM_SNAPSHOT_INTERVAL_S:
+            if elapsed - last_snapshot_at >= frame_interval_s:
                 last_snapshot_at = elapsed
                 frames += 1
-                _capture_frame(chat, snapshot_dir, snapshot_prefix, frames)
+                _capture_frame(
+                    chat,
+                    snapshot_dir,
+                    snapshot_prefix,
+                    frames,
+                    root_dir=out_dir,
+                    timeline=timeline,
+                    kind="mid_stream",
+                    turn_index=turn_index,
+                    turn_elapsed_s=elapsed,
+                    scenario_elapsed_s=time.monotonic() - scenario_t0,
+                )
 
         chat._pump_stream()
         chat._pump_running_tools()
@@ -299,6 +315,13 @@ def _capture_frame(
     out_dir: Path,
     prefix: str,
     frame_idx: int,
+    *,
+    root_dir: Path,
+    timeline: list[dict[str, object]],
+    kind: str,
+    turn_index: int,
+    turn_elapsed_s: float,
+    scenario_elapsed_s: float,
 ) -> None:
     """Paint a single frame snapshot for mid-stream evolution capture."""
     grid = Grid(GRID_ROWS, GRID_COLS)
@@ -312,8 +335,25 @@ def _capture_frame(
     out_dir.mkdir(parents=True, exist_ok=True)
     plain = render_grid_to_plain(grid)
     ansi = render_grid_to_ansi(grid)
-    (out_dir / f"{prefix}_frame_{frame_idx:03d}_plain.txt").write_text(plain)
-    (out_dir / f"{prefix}_frame_{frame_idx:03d}_ansi.txt").write_text(ansi)
+    plain_path = out_dir / f"{prefix}_frame_{frame_idx:03d}_plain.txt"
+    ansi_path = out_dir / f"{prefix}_frame_{frame_idx:03d}_ansi.txt"
+    plain_path.write_text(plain)
+    ansi_path.write_text(ansi)
+    timeline.append({
+        "index": len(timeline) + 1,
+        "turn_index": turn_index,
+        "kind": kind,
+        "frame_index": frame_idx,
+        "turn_elapsed_s": round(turn_elapsed_s, 4),
+        "scenario_elapsed_s": round(scenario_elapsed_s, 4),
+        "agent_turn": int(getattr(chat, "_agent_turn", 0)),
+        "stream_open": bool(getattr(chat, "_stream", None) is not None),
+        "running_tools": len(getattr(chat, "_running_tools", [])),
+        "message_count": len(getattr(chat, "messages", [])),
+        "plain_path": str(plain_path.relative_to(root_dir)),
+        "ansi_path": str(ansi_path.relative_to(root_dir)),
+        "plain": plain,
+    })
 
 
 def run_user_prompt(
@@ -322,6 +362,10 @@ def run_user_prompt(
     turn_index: int,
     out_dir: Path,
     capture_mid_stream: bool,
+    *,
+    frame_interval_s: float,
+    timeline: list[dict[str, object]],
+    scenario_t0: float,
 ) -> TurnStats:
     """Submit one user prompt, drain all agent-loop turns, return stats."""
     messages_before = len(chat.messages)
@@ -334,7 +378,15 @@ def run_user_prompt(
 
     snapshot_dir = (out_dir / f"turn_{turn_index:02d}_stream") if capture_mid_stream else None
     settled, wall_s, frames = settle_chat_with_capture(
-        chat, TURN_TIMEOUT_S, snapshot_dir, f"turn_{turn_index:02d}",
+        chat,
+        TURN_TIMEOUT_S,
+        snapshot_dir,
+        f"turn_{turn_index:02d}",
+        frame_interval_s=frame_interval_s,
+        out_dir=out_dir,
+        turn_index=turn_index,
+        timeline=timeline,
+        scenario_t0=scenario_t0,
     )
 
     new_msgs = chat.messages[messages_before:]
@@ -397,6 +449,9 @@ def dump_snapshots(
     workspace: Path,
     out_dir: Path,
     stats: TurnStats,
+    *,
+    timeline: list[dict[str, object]],
+    scenario_t0: float,
 ) -> None:
     """Paint the chat to a Grid and dump every artifact for this turn."""
     prefix = f"turn_{stats.turn_index:02d}"
@@ -410,8 +465,25 @@ def dump_snapshots(
         )
     plain = render_grid_to_plain(grid)
     ansi = render_grid_to_ansi(grid)
-    (out_dir / f"{prefix}_plain.txt").write_text(plain)
-    (out_dir / f"{prefix}_ansi.txt").write_text(ansi)
+    plain_path = out_dir / f"{prefix}_plain.txt"
+    ansi_path = out_dir / f"{prefix}_ansi.txt"
+    plain_path.write_text(plain)
+    ansi_path.write_text(ansi)
+    timeline.append({
+        "index": len(timeline) + 1,
+        "turn_index": stats.turn_index,
+        "kind": "settled",
+        "frame_index": 0,
+        "turn_elapsed_s": round(stats.wall_clock_s, 4),
+        "scenario_elapsed_s": round(time.monotonic() - scenario_t0, 4),
+        "agent_turn": int(getattr(chat, "_agent_turn", 0)),
+        "stream_open": bool(getattr(chat, "_stream", None) is not None),
+        "running_tools": len(getattr(chat, "_running_tools", [])),
+        "message_count": len(getattr(chat, "messages", [])),
+        "plain_path": str(plain_path.relative_to(out_dir)),
+        "ansi_path": str(ansi_path.relative_to(out_dir)),
+        "plain": plain,
+    })
 
     messages_payload = []
     for i, m in enumerate(chat.messages):
@@ -751,6 +823,8 @@ def write_index(
     scenario: Scenario,
     all_stats: list[TurnStats],
     assertions: list[AssertionResult],
+    *,
+    trace_events: list[dict[str, object]],
 ) -> None:
     """Turn-by-turn summary table + assertion results for humans."""
     lines = [
@@ -797,10 +871,266 @@ def write_index(
     lines.append("- `turn_NN_workspace.txt` — recursive workspace listing")
     lines.append("- `turn_NN_loop.json` — stats for this user prompt")
     lines.append("- `turn_NN_stream/` — mid-stream frame snapshots (if captured)")
+    lines.append("- `timeline.json` — full frame timeline with timestamps")
+    lines.append("- `playback.html` — self-contained frame scrubber")
+    lines.append("- `session_trace.json` — parsed runtime trace events")
+    lines.append(f"- trace events captured: {len(trace_events)}")
     (out_dir / "index.md").write_text("\n".join(lines) + "\n")
     (out_dir / "assertions.json").write_text(
         json.dumps([asdict(a) for a in assertions], indent=2)
     )
+
+
+def _load_trace_events(trace_dir: Path) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    if not trace_dir.exists():
+        return events
+    for path in sorted(trace_dir.glob("*.jsonl")):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line_no, line in enumerate(lines, start=1):
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                obj["_source"] = path.name
+                obj["_line"] = line_no
+                events.append(obj)
+    return events
+
+
+def _write_playback_html(
+    out_dir: Path,
+    scenario: Scenario,
+    timeline: list[dict[str, object]],
+    trace_events: list[dict[str, object]],
+) -> None:
+    payload = {
+        "scenario": {
+            "name": scenario.name,
+            "description": scenario.description,
+        },
+        "frames": timeline,
+        "trace_events": trace_events,
+    }
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Successor E2E Playback - {scenario.name}</title>
+  <style>
+    :root {{
+      color-scheme: dark;
+      --bg: #111318;
+      --panel: #171b22;
+      --text: #e6e9ef;
+      --muted: #9aa4b2;
+      --accent: #59c2ff;
+      --border: #2a3140;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: var(--bg);
+      color: var(--text);
+    }}
+    .wrap {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 360px;
+      min-height: 100vh;
+    }}
+    .main, .side {{
+      padding: 16px;
+    }}
+    .side {{
+      border-left: 1px solid var(--border);
+      background: var(--panel);
+    }}
+    pre {{
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.15;
+      font-size: 12px;
+      background: #0a0d12;
+      border: 1px solid var(--border);
+      padding: 12px;
+      min-height: calc(100vh - 120px);
+      overflow: auto;
+    }}
+    input[type="range"] {{
+      width: 100%;
+    }}
+    button {{
+      background: #202735;
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 6px 10px;
+      cursor: pointer;
+    }}
+    button:hover {{
+      border-color: var(--accent);
+    }}
+    .meta {{
+      color: var(--muted);
+      font-size: 12px;
+      margin: 8px 0 12px;
+    }}
+    .kv {{
+      margin-bottom: 14px;
+      font-size: 12px;
+    }}
+    .kv strong {{
+      color: var(--text);
+    }}
+    .events {{
+      max-height: 40vh;
+      overflow: auto;
+      border: 1px solid var(--border);
+      background: #0a0d12;
+      padding: 8px;
+      font-size: 12px;
+    }}
+    .event {{
+      padding: 4px 0;
+      border-bottom: 1px solid #1a2130;
+    }}
+    .event:last-child {{
+      border-bottom: 0;
+    }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="main">
+      <h2>{scenario.name}</h2>
+      <div class="meta">{scenario.description}</div>
+      <div>
+        <button id="prev">Prev</button>
+        <button id="play">Play</button>
+        <button id="next">Next</button>
+      </div>
+      <div style="margin: 10px 0;">
+        <input id="scrub" type="range" min="0" max="0" value="0">
+      </div>
+      <div id="frameMeta" class="meta"></div>
+      <pre id="frameText"></pre>
+    </div>
+    <div class="side">
+      <div class="kv"><strong>Artifacts:</strong><br>Open this file directly later; it embeds the frame timeline and trace events.</div>
+      <div class="kv" id="summary"></div>
+      <div class="kv"><strong>Recent trace events</strong></div>
+      <div id="events" class="events"></div>
+    </div>
+  </div>
+  <script type="application/json" id="payload">{json.dumps(payload)}</script>
+  <script>
+    const payload = JSON.parse(document.getElementById("payload").textContent);
+    const frames = payload.frames || [];
+    const traceEvents = payload.trace_events || [];
+    const scrub = document.getElementById("scrub");
+    const frameText = document.getElementById("frameText");
+    const frameMeta = document.getElementById("frameMeta");
+    const summary = document.getElementById("summary");
+    const eventsBox = document.getElementById("events");
+    const playBtn = document.getElementById("play");
+    let idx = 0;
+    let timer = null;
+
+    scrub.max = Math.max(0, frames.length - 1);
+    summary.innerHTML =
+      "<strong>Frames:</strong> " + frames.length + "<br>" +
+      "<strong>Trace events:</strong> " + traceEvents.length;
+
+    function renderEvents(frame) {{
+      const windowStart = Math.max(0, frame.scenario_elapsed_s - 3.0);
+      const relevant = traceEvents.filter(ev => {{
+        const t = Number(ev.t || 0);
+        return t >= windowStart && t <= Number(frame.scenario_elapsed_s || 0);
+      }}).slice(-20);
+      eventsBox.innerHTML = relevant.map(ev => {{
+        const copy = Object.assign({{}}, ev);
+        delete copy._source;
+        delete copy._line;
+        return '<div class="event"><strong>' +
+          Number(ev.t || 0).toFixed(3) + 's</strong> ' +
+          (ev.type || 'event') +
+          '<br>' + JSON.stringify(copy) +
+          '</div>';
+      }}).join('') || '<div class="event">No trace events near this frame.</div>';
+    }}
+
+    function renderFrame(nextIdx) {{
+      if (!frames.length) {{
+        frameText.textContent = "No frames captured.";
+        frameMeta.textContent = "";
+        eventsBox.innerHTML = "";
+        return;
+      }}
+      idx = Math.max(0, Math.min(nextIdx, frames.length - 1));
+      scrub.value = idx;
+      const frame = frames[idx];
+      frameText.textContent = frame.plain || "";
+      frameMeta.textContent =
+        "frame " + frame.index + "/" + frames.length +
+        " | turn " + frame.turn_index +
+        " | " + frame.kind +
+        " | scenario " + Number(frame.scenario_elapsed_s || 0).toFixed(3) + "s" +
+        " | turn " + Number(frame.turn_elapsed_s || 0).toFixed(3) + "s" +
+        " | agent_turn=" + frame.agent_turn +
+        " | stream_open=" + frame.stream_open +
+        " | running_tools=" + frame.running_tools +
+        " | messages=" + frame.message_count;
+      renderEvents(frame);
+    }}
+
+    function stopPlayback() {{
+      if (timer !== null) {{
+        clearInterval(timer);
+        timer = null;
+      }}
+      playBtn.textContent = "Play";
+    }}
+
+    document.getElementById("prev").addEventListener("click", () => {{
+      stopPlayback();
+      renderFrame(idx - 1);
+    }});
+    document.getElementById("next").addEventListener("click", () => {{
+      stopPlayback();
+      renderFrame(idx + 1);
+    }});
+    scrub.addEventListener("input", () => {{
+      stopPlayback();
+      renderFrame(Number(scrub.value));
+    }});
+    playBtn.addEventListener("click", () => {{
+      if (timer !== null) {{
+        stopPlayback();
+        return;
+      }}
+      playBtn.textContent = "Pause";
+      timer = setInterval(() => {{
+        if (idx >= frames.length - 1) {{
+          stopPlayback();
+          return;
+        }}
+        renderFrame(idx + 1);
+      }}, 120);
+    }});
+
+    renderFrame(0);
+  </script>
+</body>
+</html>
+"""
+    (out_dir / "playback.html").write_text(html, encoding="utf-8")
 
 
 # ─── Scenario runner ───
@@ -812,6 +1142,8 @@ def run_scenario(
     model: str,
     artifact_root: Path,
     capture_mid_stream: bool,
+    *,
+    frame_interval_s: float,
     subdir: str | None = None,
 ) -> tuple[bool, list[AssertionResult]]:
     """Run one scenario end-to-end. Returns (all_assertions_passed, results).
@@ -841,81 +1173,127 @@ def run_scenario(
     log(f"artifacts  : {out_dir}")
     log(f"base_url   : {base_url}")
     log(f"model      : {model}")
+    log(f"frame_int  : {frame_interval_s:.2f}s")
     log("")
 
-    # tempfile prefix can't contain slashes
-    safe_prefix = out_dir_name.replace("/", "-").replace(" ", "-")
-    config_dir = Path(tempfile.mkdtemp(prefix=f"successor-e2e-{safe_prefix}-"))
+    timeline: list[dict[str, object]] = []
+    scenario_t0 = time.monotonic()
+
+    config_dir = out_dir / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    old_config_dir = os.environ.get("SUCCESSOR_CONFIG_DIR")
     os.environ["SUCCESSOR_CONFIG_DIR"] = str(config_dir)
 
-    profile = build_profile(workspace, base_url, model, scenario.profile_overrides)
-    chat = SuccessorChat()
-    chat.profile = profile
-    chat.system_prompt = profile.system_prompt
-    chat.client = make_provider(profile.provider)
-    chat.messages = []
+    chat = None
+    try:
+        profile = build_profile(workspace, base_url, model, scenario.profile_overrides)
+        chat = SuccessorChat()
+        chat.profile = profile
+        chat.system_prompt = profile.system_prompt
+        chat.client = make_provider(profile.provider)
+        chat.messages = []
 
-    if scenario.pre_setup is not None:
-        try:
-            scenario.pre_setup(chat)
-        except Exception as exc:
-            log(f"  PRE-SETUP CRASH: {exc}")
-            log(traceback.format_exc())
+        if scenario.pre_setup is not None:
+            try:
+                scenario.pre_setup(chat)
+            except Exception as exc:
+                log(f"  PRE-SETUP CRASH: {exc}")
+                log(traceback.format_exc())
 
-    all_stats: list[TurnStats] = []
+        all_stats: list[TurnStats] = []
 
-    for turn_idx, prompt in enumerate(scenario.prompts, start=1):
-        log(f"--- turn {turn_idx}: {prompt}")
-        try:
-            stats = run_user_prompt(
-                chat, prompt, turn_idx, out_dir, capture_mid_stream,
+        for turn_idx, prompt in enumerate(scenario.prompts, start=1):
+            log(f"--- turn {turn_idx}: {prompt}")
+            try:
+                stats = run_user_prompt(
+                    chat,
+                    prompt,
+                    turn_idx,
+                    out_dir,
+                    capture_mid_stream,
+                    frame_interval_s=frame_interval_s,
+                    timeline=timeline,
+                    scenario_t0=scenario_t0,
+                )
+            except Exception as exc:
+                log(f"  CRASH: {exc}")
+                log(traceback.format_exc())
+                stats = TurnStats(
+                    turn_index=turn_idx,
+                    user_prompt=prompt,
+                    agent_turns_consumed=0,
+                    tool_cards_appended=0,
+                    tool_cards_executed=0,
+                    tool_cards_refused=0,
+                    wall_clock_s=0.0,
+                    settled_cleanly=False,
+                    notes=[f"crashed: {exc!r}"],
+                )
+            else:
+                log(
+                    f"  agent_turns={stats.agent_turns_consumed} "
+                    f"cards={stats.tool_cards_appended} "
+                    f"exec={stats.tool_cards_executed} "
+                    f"refused={stats.tool_cards_refused} "
+                    f"wall={stats.wall_clock_s:.1f}s "
+                    f"frames={stats.mid_stream_frames_captured} "
+                    f"settled={stats.settled_cleanly}"
+                )
+                for n in stats.notes:
+                    log(f"  NOTE: {n}")
+
+            dump_snapshots(
+                chat,
+                workspace,
+                out_dir,
+                stats,
+                timeline=timeline,
+                scenario_t0=scenario_t0,
             )
-        except Exception as exc:
-            log(f"  CRASH: {exc}")
-            log(traceback.format_exc())
-            stats = TurnStats(
-                turn_index=turn_idx,
-                user_prompt=prompt,
-                agent_turns_consumed=0,
-                tool_cards_appended=0,
-                tool_cards_executed=0,
-                tool_cards_refused=0,
-                wall_clock_s=0.0,
-                settled_cleanly=False,
-                notes=[f"crashed: {exc!r}"],
-            )
+            all_stats.append(stats)
+
+        if hasattr(chat, "_shutdown_runtime_for_exit"):
+            try:
+                chat._shutdown_runtime_for_exit()
+            except Exception:
+                pass
+
+        trace_events = _load_trace_events(config_dir / "logs")
+        (out_dir / "timeline.json").write_text(json.dumps(timeline, indent=2))
+        (out_dir / "session_trace.json").write_text(json.dumps(trace_events, indent=2))
+        _write_playback_html(out_dir, scenario, timeline, trace_events)
+        assertions = evaluate_assertions(scenario, chat, workspace, out_dir, all_stats)
+        write_index(
+            out_dir,
+            scenario,
+            all_stats,
+            assertions,
+            trace_events=trace_events,
+        )
+
+        log("")
+        log("=== Assertions ===")
+        passed = sum(1 for a in assertions if a.passed)
+        log(f"  {passed}/{len(assertions)} passed")
+        for a in assertions:
+            mark = "✓" if a.passed else "✗"
+            log(f"  {mark} {a.name}: {a.detail}")
+        log("")
+
+        all_passed = all(a.passed for a in assertions)
+        log(f"=== scenario complete: {'PASS' if all_passed else 'FAIL'} ===")
+        return all_passed, assertions
+    finally:
+        if chat is not None and hasattr(chat, "_shutdown_runtime_for_exit"):
+            try:
+                chat._shutdown_runtime_for_exit()
+            except Exception:
+                pass
+        log_file.close()
+        if old_config_dir is None:
+            os.environ.pop("SUCCESSOR_CONFIG_DIR", None)
         else:
-            log(
-                f"  agent_turns={stats.agent_turns_consumed} "
-                f"cards={stats.tool_cards_appended} "
-                f"exec={stats.tool_cards_executed} "
-                f"refused={stats.tool_cards_refused} "
-                f"wall={stats.wall_clock_s:.1f}s "
-                f"frames={stats.mid_stream_frames_captured} "
-                f"settled={stats.settled_cleanly}"
-            )
-            for n in stats.notes:
-                log(f"  NOTE: {n}")
-
-        dump_snapshots(chat, workspace, out_dir, stats)
-        all_stats.append(stats)
-
-    assertions = evaluate_assertions(scenario, chat, workspace, out_dir, all_stats)
-    write_index(out_dir, scenario, all_stats, assertions)
-
-    log("")
-    log("=== Assertions ===")
-    passed = sum(1 for a in assertions if a.passed)
-    log(f"  {passed}/{len(assertions)} passed")
-    for a in assertions:
-        mark = "✓" if a.passed else "✗"
-        log(f"  {mark} {a.name}: {a.detail}")
-    log("")
-
-    all_passed = all(a.passed for a in assertions)
-    log(f"=== scenario complete: {'PASS' if all_passed else 'FAIL'} ===")
-    log_file.close()
-    return all_passed, assertions
+            os.environ["SUCCESSOR_CONFIG_DIR"] = old_config_dir
 
 
 # ─── Stability runner (multiple runs per scenario) ───
@@ -928,6 +1306,8 @@ def run_scenario_with_stability(
     artifact_root: Path,
     runs: int,
     capture_mid_stream: bool,
+    *,
+    frame_interval_s: float,
 ) -> dict:
     """Run a scenario `runs` times. Each run lands in its own subdir
     `<scenario_name>/run_N/`. Returns a summary dict with per-run
@@ -951,7 +1331,7 @@ def run_scenario_with_stability(
         subdir = f"{scenario.name}/run_{run_idx}"
         passed, assertions = run_scenario(
             scenario, base_url, model, artifact_root,
-            capture_mid_stream, subdir=subdir,
+            capture_mid_stream, frame_interval_s=frame_interval_s, subdir=subdir,
         )
 
         summary["results"].append({
@@ -1092,7 +1472,7 @@ def _enable_browser_tool_with_skill(chat: SuccessorChat) -> None:
     _enable_browser_tool_with_fixture(chat)
     profile = replace(
         chat.profile,
-        skills=("browser-operator",),
+        skills=("browser-operator", "browser-verifier"),
     )
     chat.profile = profile
     chat.system_prompt = (
@@ -1103,6 +1483,173 @@ def _enable_browser_tool_with_skill(chat: SuccessorChat) -> None:
         "returns, answer in one short paragraph."
     )
     chat.client = make_provider(profile.provider)
+
+
+def _vision_tool_defaults() -> dict[str, object]:
+    return {
+        "mode": "endpoint",
+        "provider_type": "llamacpp",
+        "base_url": os.environ.get("SUCCESSOR_E2E_VISION_URL", "http://127.0.0.1:8090"),
+        "model": os.environ.get("SUCCESSOR_E2E_VISION_MODEL", "vision-local"),
+        "timeout_s": 120.0,
+        "max_tokens": 512,
+        "detail": "low",
+    }
+
+
+def _enable_browser_vision_tool_with_fixture(chat: SuccessorChat) -> None:
+    workspace = Path(
+        ((chat.profile.tool_config or {}).get("bash") or {}).get("working_directory") or "."
+    )
+    fixture = workspace / "browser-vision-fixture.html"
+    fixture.write_text(
+        """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Visual Fixture</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: system-ui, sans-serif;
+      background: #f7f2ea;
+      color: #1b2430;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background:
+        radial-gradient(circle at top left, #fff6d8 0, transparent 32%),
+        linear-gradient(180deg, #f7f2ea 0%, #efe5d7 100%);
+    }
+    .card {
+      width: 280px;
+      overflow: hidden;
+      position: relative;
+      border: 2px solid #2d3a4a;
+      border-radius: 20px;
+      background: rgba(255,255,255,0.88);
+      box-shadow: 0 18px 48px rgba(27,36,48,0.18);
+      padding: 20px 20px 72px;
+    }
+    .eyebrow {
+      font-size: 12px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: #8b5a18;
+      margin-bottom: 10px;
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: 26px;
+      line-height: 1.05;
+    }
+    p {
+      margin: 0;
+      line-height: 1.45;
+      max-width: 26ch;
+    }
+    #ship-release {
+      position: absolute;
+      right: -54px;
+      bottom: 18px;
+      border: 0;
+      border-radius: 999px;
+      background: #1c6f47;
+      color: white;
+      font-weight: 700;
+      padding: 12px 22px;
+      box-shadow: 0 8px 18px rgba(28,111,71,0.28);
+    }
+  </style>
+</head>
+<body>
+  <section class="card">
+    <div class="eyebrow">Launch check</div>
+    <h1>Release readiness</h1>
+    <p>The QA pass should confirm whether the primary call to action is fully visible.</p>
+    <button id="ship-release">Ship release</button>
+  </section>
+</body>
+</html>
+""",
+        encoding="utf-8",
+    )
+    profile = replace(
+        chat.profile,
+        tools=("browser", "vision"),
+        skills=("browser-verifier", "browser-operator", "vision-inspector"),
+        tool_config={
+            "browser": {
+                "headless": True,
+                "channel": "chrome",
+                "timeout_s": 20.0,
+                "viewport_width": 1280,
+                "viewport_height": 900,
+            },
+            "vision": _vision_tool_defaults(),
+        },
+    )
+    chat.profile = profile
+    chat.system_prompt = (
+        "You are successor — a focused, brief assistant. "
+        "This test session exposes browser and vision plus any relevant enabled skills. "
+        "If a listed skill clearly matches the request, load it before using browser or "
+        "vision. For visually grounded questions, open the page, capture a screenshot, "
+        "inspect it with vision, then answer. Do not invent bash commands or alternate "
+        "tools. After the tool returns, answer in one short paragraph."
+    )
+    chat.client = make_provider(profile.provider)
+    chat.messages = [
+        _Message("user", f"Local visual fixture URL: {fixture.as_uri()}")
+    ]
+
+
+def _enable_issue_desk_supervision(chat: SuccessorChat) -> None:
+    workspace = Path(
+        ((chat.profile.tool_config or {}).get("bash") or {}).get("working_directory") or "."
+    )
+    app_path = workspace / "index.html"
+    profile = replace(
+        chat.profile,
+        tools=("bash", "browser", "vision"),
+        skills=("browser-verifier", "browser-operator", "vision-inspector"),
+        tool_config={
+            "bash": dict((chat.profile.tool_config or {}).get("bash") or {}),
+            "browser": {
+                "headless": True,
+                "channel": "chrome",
+                "timeout_s": 20.0,
+                "viewport_width": 1360,
+                "viewport_height": 940,
+            },
+            "vision": _vision_tool_defaults(),
+        },
+    )
+    chat.profile = profile
+    chat.system_prompt = (
+        "You are successor — a focused, brief assistant supervising a real "
+        "multi-turn product build. Use bash for file creation and edits. Use "
+        "the browser for live verification and interaction. If a listed skill "
+        "clearly matches the task, load it before using the browser. For "
+        "verification-style browser prompts, prefer the stricter verifier "
+        "skill over the generic operator skill. If a reload leaves stale "
+        "browser state behind, use browser storage tools instead of editing "
+        "the app just to reset the fixture. For open-ended inspect/polish "
+        "prompts, sample one or two representative interactions, choose one "
+        "important fix, verify it, and stop. When the issue is visual, "
+        "capture a browser screenshot and inspect it with vision instead of "
+        "guessing from page text alone. After "
+        "each tool batch, read the result and take the next concrete step; do "
+        "not loop or repeat successful actions. After each prompt, answer in "
+        "one short paragraph."
+    )
+    chat.client = make_provider(profile.provider)
+    chat.messages = [
+        _Message("user", f"Local issue desk app URL for browser checks: {app_path.as_uri()}")
+    ]
 
 
 SCENARIOS: dict[str, Scenario] = {
@@ -1370,6 +1917,79 @@ SCENARIOS: dict[str, Scenario] = {
         },
         assert_each_settles=True,
     ),
+    "browser_vision_fixture": Scenario(
+        name="browser_vision_fixture",
+        description="Use browser + vision to inspect a deliberately clipped CTA in a local fixture",
+        pre_setup=_enable_browser_vision_tool_with_fixture,
+        prompts=[
+            (
+                "Open the local visual fixture URL already in context. Use browser and vision, "
+                "not bash. Determine whether the primary 'Ship release' button is fully visible "
+                "or clipped. Say either 'fully visible' or 'clipped' first, then one short "
+                "explanation of the visible issue."
+            ),
+        ],
+        assert_min_text_in_final=["clipped"],
+        assert_turn_tool_verbs_contains={
+            1: ["browser-open", "browser-screenshot", "vision-inspect"],
+        },
+        assert_each_settles=True,
+    ),
+    "issue_desk_supervised": Scenario(
+        name="issue_desk_supervised",
+        description="Build and iteratively debug a local issue desk app across multiple turns with real browser supervision",
+        pre_setup=_enable_issue_desk_supervision,
+        prompts=[
+            (
+                "Build a small local issue desk app at the app URL already in context. "
+                "Use plain HTML, CSS, and vanilla JS in separate files named index.html, styles.css, and app.js. "
+                "Requirements: 3 seeded issues, a search box, a status filter (all/open/closed), a create-issue form "
+                "with title and priority, open/closed counts, a close/reopen button on each issue, and a light/dark "
+                "theme toggle. Persist issues and the active theme in localStorage so browser-driven state survives "
+                "reloads during later verification. Keep it readable and compact. After writing the files, briefly say "
+                "it's ready."
+            ),
+            (
+                "Open the local issue desk page already in context in the browser and inspect it like a human. "
+                "If you see any obvious rough edges or broken behavior, fix them. If it already looks sound, make "
+                "one small usability improvement based on the live UI and tell me what you changed."
+            ),
+            (
+                "Use the browser to add a new high-priority issue titled 'Keyboard nav bug'. Then tell me the "
+                "visible open count and whether the issue appeared."
+            ),
+            (
+                "Add inline title editing with Enter to save and Escape to cancel. Then verify it in the browser "
+                "by renaming 'Keyboard nav bug' to 'Keyboard navigation bug'."
+            ),
+            (
+                "Use the browser to close 'Keyboard navigation bug', switch the status filter so only closed items "
+                "are shown, and confirm the closed count and filtered list look right. If anything is broken, fix "
+                "it first."
+            ),
+            (
+                "Do a final polish pass with the browser: toggle theme once, check for console errors, and look "
+                "for obvious copy/layout weirdness. Fix the most important issue you find, then summarize the final "
+                "app in a short paragraph."
+            ),
+        ],
+        assert_files={
+            "index.html": None,
+            "styles.css": None,
+            "app.js": None,
+        },
+        assert_turn_plain_contains={
+            5: ["Keyboard navigation bug"],
+        },
+        assert_turn_tool_verbs_contains={
+            4: ["browser-type"],
+            5: ["browser-select"],
+        },
+        assert_min_total_cards=10,
+        assert_max_total_cards=60,
+        assert_max_agent_turns_per_prompt=10,
+        assert_each_settles=True,
+    ),
     "model_subagent_version_audit": Scenario(
         name="model_subagent_version_audit",
         description="Model uses the subagent tool, then answers from the completion notification",
@@ -1433,6 +2053,12 @@ def main() -> int:
         default=str(ARTIFACT_ROOT),
         help=f"output dir (default: {ARTIFACT_ROOT})",
     )
+    parser.add_argument(
+        "--frame-interval",
+        type=float,
+        default=DEFAULT_FRAME_INTERVAL_S,
+        help=f"mid-stream frame capture interval in seconds (default: {DEFAULT_FRAME_INTERVAL_S})",
+    )
     args = parser.parse_args()
 
     if args.list:
@@ -1468,6 +2094,7 @@ def main() -> int:
         if args.runs == 1:
             passed, assertions = run_scenario(
                 scenario, args.base_url, args.model, artifact_root, capture_mid_stream,
+                frame_interval_s=max(0.05, args.frame_interval),
             )
             summary_per_scenario.append({
                 "name": name,
@@ -1479,6 +2106,7 @@ def main() -> int:
             summary = run_scenario_with_stability(
                 scenario, args.base_url, args.model, artifact_root,
                 args.runs, capture_mid_stream,
+                frame_interval_s=max(0.05, args.frame_interval),
             )
             summary_per_scenario.append(summary)
 

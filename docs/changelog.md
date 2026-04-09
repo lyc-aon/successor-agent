@@ -11,6 +11,123 @@ unit on top of phase 0.
 
 ---
 
+## v0.1.15, multimodal vision tool + screenshot-based visual QA (2026-04-08)
+
+The browser and holonet passes gave Successor real web/runtime reach,
+but there was still a missing piece for local product work: visibly
+grounded inspection. The model could navigate pages and read DOM text,
+but it had no native way to answer screenshot questions like "is this
+button clipped?" or "does this layout actually look right?"
+
+This pass adds that missing path without forcing the main chat model to
+be multimodal.
+
+### What landed
+
+- `src/successor/web/vision.py`:
+  - native `vision` tool preview cards and execution path
+  - local-image base64 encoding + OpenAI-compatible
+    `/v1/chat/completions` request body with `image_url` content parts
+  - runtime readiness probing for inherited or dedicated endpoints
+  - call-time validation and structured result formatting
+- `src/successor/web/config.py`:
+  - new `VisionConfig`
+  - `inherit` vs `endpoint` mode
+  - provider type, base URL, model, API key / key file, timeout,
+    max-tokens, and detail controls
+- `src/successor/providers/llama.py`:
+  - explicit runtime capability fields for `supports_vision` and
+    `supports_typed_content`
+- `src/successor/chat.py`:
+  - native tool dispatch for `vision`
+  - runtime filtering so the model only sees `vision` when a configured
+    multimodal path is actually usable
+- `src/successor/tools_registry.py`:
+  - `vision` schema, system-prompt docs, and concise model guidance
+  - updated browser guidance so visibly grounded tasks prefer
+    screenshot-plus-vision over DOM-only guesses
+- new bundled skill:
+  - `src/successor/builtin/skills/vision-inspector.md`
+- updated bundled skills:
+  - `src/successor/builtin/skills/browser-operator.md`
+  - `src/successor/builtin/skills/browser-verifier.md`
+- `src/successor/wizard/config.py`:
+  - `/config` section for vision runtime setup
+- `src/successor/cli.py`:
+  - `successor doctor` now reports vision runtime readiness when the
+    tool is enabled
+- `scripts/e2e_chat_driver.py`:
+  - new `browser_vision_fixture` scenario
+  - issue-desk supervision now includes vision in the tool set and
+    prompt guidance
+
+### Important runtime finding
+
+Local `llama.cpp` multimodal support was slightly trickier than the
+`/props` contract suggested.
+
+On the live Qwen3-VL sidecar:
+
+- `modalities.vision` was `true`
+- `chat_template_caps.supports_typed_content` was `false`
+- but a real `/v1/chat/completions` request with `image_url` content
+  parts still worked correctly
+
+So the shipped logic no longer hard-rejects llama.cpp vision endpoints
+just because the typed-content flag is false. If the endpoint reports
+vision support, Successor now treats the final image request as the
+authoritative check.
+
+### Why this shape
+
+The important product choice was not "make the main model multimodal at
+all times." It was "make visual inspection available as a first-class
+tool."
+
+That keeps the base chat path lean and preserves the local pattern we
+already wanted:
+
+- main model can stay text-only if that is the best local throughput
+- visual inspection can still happen through a sidecar multimodal model
+- browser verification can become genuinely human-like when needed
+
+This is also the right architectural match for the existing tool loop:
+`browser` owns live page state, `vision` owns visual interpretation, and
+the main model decides when to bridge between them.
+
+### Verification
+
+- Focused regression slice:
+  - `tests/test_vision_tool.py`
+  - `tests/test_chat_web_tools.py`
+  - `tests/test_cli_doctor.py`
+  - `tests/test_config_menu_web.py`
+  - `tests/test_web_config.py`
+  - `tests/test_skills.py`
+  - result: `50 passed`
+- Full local suite:
+  - `1135 passed`
+- Live local llama.cpp verification:
+  - launched a dedicated sidecar with
+    `Qwen3-VL-8B-Instruct-Q3_K_S.gguf` +
+    `mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf` on `127.0.0.1:8090`
+  - direct image request to `/v1/chat/completions` succeeded
+- Live E2E:
+  - `browser_vision_fixture` passed end to end
+  - artifact:
+    `/home/lycaon/.local/share/successor/e2e-vision/browser_vision_fixture/playback.html`
+  - the run showed `load-skill -> browser-open -> browser-screenshot -> vision-inspect`
+    and the final answer correctly identified a clipped CTA
+- Broader human-emulated run:
+  - `issue_desk_supervised` improved materially on the visually grounded
+    turns
+  - turn 2 used screenshot + vision to find a real alignment issue and
+    verify the fix
+  - the full scenario still failed its prompt-turn budget because the
+    final polish turn drifted to `18` agent turns, which confirms the
+    remaining gap is the browser verification controller, not the vision
+    path itself
+
 ## v0.1.14, on-demand web/browser skills + external Playwright runtime (2026-04-08)
 
 The holonet/browser tool pass was functional, but two important product

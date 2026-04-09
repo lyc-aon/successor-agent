@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import queue
@@ -10,7 +11,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -51,16 +52,117 @@ class BrowserRequest:
     result: list[ToolExecutionResult]
 
 
+@dataclass(slots=True)
+class _BrowserProgressTracker:
+    """Track repeated failures and no-op browser actions within one session."""
+
+    last_action: str = ""
+    last_target: str = ""
+    last_state_hash: str = ""
+    stagnant_repeats: int = 0
+    last_failure_signature: tuple[str, str] | None = None
+    repeat_failures: int = 0
+    last_controls_summary: str = ""
+
+    def annotate(
+        self,
+        arguments: dict[str, Any],
+        result: ToolExecutionResult,
+    ) -> ToolExecutionResult:
+        action = str(arguments.get("action", "") or "").strip().lower()
+        target = str(arguments.get("target", "") or arguments.get("url", "") or "").strip()
+        metadata = result.metadata or {}
+        state_hash = str(metadata.get("state_hash", "") or "")
+        controls_summary = str(metadata.get("controls_summary", "") or "").strip()
+        if controls_summary:
+            self.last_controls_summary = controls_summary
+
+        if result.exit_code != 0:
+            signature = (action, target)
+            if signature == self.last_failure_signature:
+                self.repeat_failures += 1
+            else:
+                self.repeat_failures = 1
+                self.last_failure_signature = signature
+            if self.repeat_failures < 2:
+                return result
+            note = (
+                "\nProgress note: this browser action has failed repeatedly. "
+                "Stop retrying the same step. Call `inspect` to list the "
+                "actual visible controls and selector hints, or switch strategy."
+            )
+            if self.last_controls_summary:
+                note = f"{note}\n\n{self.last_controls_summary}"
+            return replace(result, stderr=(result.stderr or "").rstrip() + note)
+
+        self.repeat_failures = 0
+        self.last_failure_signature = None
+
+        repeated_open = (
+            action == "open"
+            and state_hash
+            and self.last_action == "open"
+            and target == self.last_target
+            and state_hash == self.last_state_hash
+        )
+        self.last_action = action
+        self.last_target = target
+
+        if repeated_open:
+            note = (
+                "\nProgress note: you reopened the same page and got the same "
+                "state back. Reuse the current browser session unless a code "
+                "edit, storage reset, or explicit reload is actually required."
+            )
+            if controls_summary:
+                note = f"{note}\n\n{controls_summary}"
+            return replace(result, output=(result.output or "").rstrip() + note)
+
+        if action not in {"click", "type", "press", "select", "wait_for"} or not state_hash:
+            if state_hash:
+                self.last_state_hash = state_hash
+            self.stagnant_repeats = 0
+            return result
+
+        if state_hash == self.last_state_hash:
+            self.stagnant_repeats += 1
+        else:
+            self.stagnant_repeats = 0
+        self.last_state_hash = state_hash
+
+        if self.stagnant_repeats < 2:
+            return result
+
+        note = (
+            "\nProgress note: page state has not meaningfully changed across "
+            "the last 3 browser actions. Stop exploratory clicking. Use "
+            "`inspect` to see visible controls and stable selectors before "
+            "trying again."
+        )
+        if controls_summary:
+            note = f"{note}\n\n{controls_summary}"
+        return replace(result, output=(result.output or "").rstrip() + note)
+
+
 def browser_preview_card(arguments: dict[str, Any], *, tool_call_id: str) -> ToolCard:
     action = str(arguments.get("action", "") or "").strip().lower() or "browser"
     target = str(arguments.get("target", "") or arguments.get("url", "") or "").strip()
     text = str(arguments.get("text", "") or "").strip()
+    option = str(arguments.get("option", "") or "").strip()
+    key = str(arguments.get("key", "") or "").strip()
+    scope = str(arguments.get("scope", "") or "").strip()
     params: list[tuple[str, str]] = [("action", action)]
     if target:
         params.append(("target", target))
     if text:
         params.append(("text", text[:48] + ("…" if len(text) > 48 else "")))
-    raw = " ".join(bit for bit in (action, target or text) if bit)
+    if option:
+        params.append(("option", option[:48] + ("…" if len(option) > 48 else "")))
+    if key:
+        params.append(("key", key))
+    if scope:
+        params.append(("scope", scope))
+    raw = " ".join(bit for bit in (action, target or text, option, key, scope) if bit)
     return ToolCard(
         verb=_verb_for_action(action),
         params=tuple(params),
@@ -227,6 +329,11 @@ class _PlaywrightBridgeProcess:
                 stderr=str(payload.get("stderr", "") or ""),
                 exit_code=int(payload.get("exit_code", 0) or 0),
                 truncated=bool(payload.get("truncated", False)),
+                metadata=(
+                    dict(payload.get("metadata") or {})
+                    if isinstance(payload.get("metadata"), dict)
+                    else None
+                ),
             )
 
     def close(self) -> None:
@@ -308,31 +415,35 @@ class PlaywrightBrowserManager:
         self._thread: threading.Thread | None = None
         self._started = threading.Event()
         self._bridge: _PlaywrightBridgeProcess | None = None
+        self._submit_lock = threading.RLock()
+        self._progress = _BrowserProgressTracker()
 
     def submit(self, arguments: dict[str, Any]) -> ToolExecutionResult:
-        if self._runtime is None:
-            return ToolExecutionResult(
-                stderr=(
-                    "Playwright Python package is not available in the configured "
-                    "runtime. Install with `pip install 'successor[browser]'`, or "
-                    "set browser.python_executable to a Python interpreter that "
-                    "already has Playwright installed."
-                ),
-                exit_code=1,
-            )
-        if not self._runtime.in_process:
-            if self._bridge is None:
-                self._bridge = _PlaywrightBridgeProcess(
-                    profile_name=self._profile_name,
-                    config=self._config,
-                    runtime=self._runtime,
+        with self._submit_lock:
+            if self._runtime is None:
+                return ToolExecutionResult(
+                    stderr=(
+                        "Playwright Python package is not available in the configured "
+                        "runtime. Install with `pip install 'successor[browser]'`, or "
+                        "set browser.python_executable to a Python interpreter that "
+                        "already has Playwright installed."
+                    ),
+                    exit_code=1,
                 )
-            return self._bridge.submit(arguments)
-        self._ensure_thread()
-        req = BrowserRequest(arguments=dict(arguments), done=threading.Event(), result=[])
-        self._queue.put(req)
-        req.done.wait()
-        return req.result[0]
+            if not self._runtime.in_process:
+                if self._bridge is None:
+                    self._bridge = _PlaywrightBridgeProcess(
+                        profile_name=self._profile_name,
+                        config=self._config,
+                        runtime=self._runtime,
+                    )
+                result = self._bridge.submit(arguments)
+                return self._progress.annotate(arguments, result)
+            self._ensure_thread()
+            req = BrowserRequest(arguments=dict(arguments), done=threading.Event(), result=[])
+            self._queue.put(req)
+            req.done.wait()
+            return self._progress.annotate(arguments, req.result[0])
 
     def close(self) -> None:
         if self._bridge is not None:
@@ -462,29 +573,73 @@ def _execute_browser_action(
             if not url:
                 raise RuntimeError("open requires a url")
             page.goto(url, wait_until="domcontentloaded")
-            return ToolExecutionResult(output=_page_snapshot("Opened page.", page))
+            return _page_result("Opened page.", page, include_controls=True)
+        if action == "inspect":
+            return _page_result("Inspected page.", page, include_controls=True)
         if action == "click":
             locator = _resolve_locator(page, arguments)
             locator.click()
             page.wait_for_timeout(250)
-            return ToolExecutionResult(output=_page_snapshot("Clicked target.", page))
+            return _page_result("Clicked target.", page)
         if action == "type":
-            locator = _resolve_type_locator(page, arguments)
             text = str(arguments.get("text", "") or "")
-            locator = _fill_locator_with_fallback(
-                page,
-                arguments,
-                locator=locator,
-                text=text,
-            )
-            if bool(arguments.get("press_enter", False)):
-                locator.press("Enter")
+            if _has_target(arguments):
+                locator = _resolve_type_locator(page, arguments)
+                locator = _fill_locator_with_fallback(
+                    page,
+                    arguments,
+                    locator=locator,
+                    text=text,
+                )
+                if bool(arguments.get("press_enter", False)):
+                    locator.press("Enter")
+                prefix = "Typed into target."
+            else:
+                _type_into_focused_target(
+                    page,
+                    text,
+                    press_enter=bool(arguments.get("press_enter", False)),
+                )
+                prefix = "Typed into the focused target."
             page.wait_for_timeout(150)
-            return ToolExecutionResult(output=_page_snapshot("Typed into target.", page))
+            return _page_result(prefix, page)
+        if action == "press":
+            key = str(arguments.get("key", "") or "").strip()
+            if not key:
+                raise RuntimeError("press requires a key")
+            if _has_target(arguments):
+                locator = _resolve_locator(page, arguments, prefer_inputs=True)
+                locator.press(key)
+                prefix = f"Pressed {key} on target."
+            else:
+                page.keyboard.press(key)
+                prefix = f"Pressed {key}."
+            page.wait_for_timeout(150)
+            return _page_result(prefix, page)
+        if action == "select":
+            locator = _resolve_locator(page, arguments, prefer_inputs=True)
+            option = str(arguments.get("option", "") or arguments.get("text", "") or "").strip()
+            if not option:
+                raise RuntimeError("select requires an option")
+            _select_locator_option(locator, option)
+            page.wait_for_timeout(150)
+            return _page_result("Selected option.", page)
+        if action == "storage_state":
+            return ToolExecutionResult(
+                output=_storage_state_summary(page),
+                metadata=_page_state_metadata(page),
+            )
+        if action == "clear_storage":
+            scope = str(arguments.get("scope", "") or "both").strip().lower()
+            if scope not in {"local", "session", "both"}:
+                raise RuntimeError("clear_storage scope must be local, session, or both")
+            _clear_page_storage(page, scope)
+            page.wait_for_timeout(100)
+            return _page_result(f"Cleared {scope} storage.", page)
         if action == "wait_for":
             locator = _resolve_locator(page, arguments)
             locator.wait_for(state="visible")
-            return ToolExecutionResult(output=_page_snapshot("Target became visible.", page))
+            return _page_result("Target became visible.", page)
         if action == "extract_text":
             target = str(arguments.get("target", "") or "").strip()
             if target:
@@ -500,7 +655,8 @@ def _execute_browser_action(
                         "",
                         text.strip()[:4000],
                     ]
-                )
+                ),
+                metadata=_page_state_metadata(page),
             )
         if action == "screenshot":
             path = str(arguments.get("path", "") or "").strip()
@@ -518,20 +674,26 @@ def _execute_browser_action(
                         f"URL: {page.url}",
                         f"Path: {screenshot_path}",
                     ]
-                )
+                ),
+                metadata=_page_state_metadata(page),
             )
         if action == "console_errors":
             errors = [entry for entry in console_errors if entry]
             if not errors:
-                return ToolExecutionResult(output="No console errors recorded for the current page.")
+                return ToolExecutionResult(
+                    output="No console errors recorded for the current page.",
+                    metadata=_page_state_metadata(page),
+                )
             return ToolExecutionResult(
                 output="\n".join(
                     ["Console errors:"] + [f"  {idx + 1}. {entry}" for idx, entry in enumerate(errors[-10:])]
-                )
+                ),
+                metadata=_page_state_metadata(page),
             )
         raise RuntimeError(
-            "unsupported browser action. Use open, click, type, wait_for, "
-            "extract_text, screenshot, or console_errors."
+            "unsupported browser action. Use open, inspect, click, type, "
+            "press, select, storage_state, clear_storage, wait_for, extract_text, "
+            "screenshot, or console_errors."
         )
     except Exception as exc:  # noqa: BLE001
         screenshot_note = ""
@@ -564,6 +726,15 @@ def run_browser_action(
     return manager.submit(arguments)
 
 
+def _page_result(prefix: str, page: Any, *, include_controls: bool = False) -> ToolExecutionResult:
+    metadata = _page_state_metadata(page)
+    output = _page_snapshot(prefix, page)
+    controls_summary = str(metadata.get("controls_summary", "") or "").strip()
+    if include_controls and controls_summary:
+        output = f"{output}\n\n{controls_summary}"
+    return ToolExecutionResult(output=output, metadata=metadata)
+
+
 def _page_snapshot(prefix: str, page: Any) -> str:
     title = page.title().strip()
     text = _best_page_text(page)[:1200].strip()
@@ -573,6 +744,208 @@ def _page_snapshot(prefix: str, page: Any) -> str:
     if text:
         lines.extend(["", text])
     return "\n".join(lines)
+
+
+def _page_state_metadata(page: Any) -> dict[str, Any]:
+    title = page.title().strip()
+    text = _best_page_text(page)[:1200].strip()
+    controls_summary = _visible_controls_summary(page)
+    digest = hashlib.sha1(
+        "\n".join((page.url, title, text, controls_summary)).encode("utf-8")
+    ).hexdigest()[:12]
+    return {
+        "state_hash": digest,
+        "controls_summary": controls_summary,
+    }
+
+
+def _visible_controls_summary(page: Any, *, limit: int = 8) -> str:
+    controls = _visible_controls(page, limit=limit)
+    if not controls:
+        return ""
+    lines = ["Visible controls:"]
+    for item in controls:
+        role = str(item.get("role") or item.get("tag") or "element")
+        label = str(item.get("label") or "").strip()
+        selector = str(item.get("selector") or "").strip()
+        extras: list[str] = []
+        if label:
+            extras.append(f'"{label}"')
+        if selector:
+            extras.append(f"selector={selector}")
+        value = str(item.get("value") or "").strip()
+        if value:
+            extras.append(f'value="{value[:60]}"')
+        options = item.get("options")
+        if isinstance(options, list) and options:
+            extras.append("options=" + " | ".join(str(opt) for opt in options[:4]))
+        lines.append(f"- {role}: {'; '.join(extras) if extras else '(no label)'}")
+    return "\n".join(lines)
+
+
+def _visible_controls(page: Any, *, limit: int = 8) -> list[dict[str, Any]]:
+    try:
+        result = page.evaluate(
+            """(limit) => { /* successor-visible-controls */
+                const isVisible = (el) => {
+                    if (!(el instanceof Element)) return false;
+                    const style = window.getComputedStyle(el);
+                    if (!style || style.display === "none" || style.visibility === "hidden") return false;
+                    const rect = el.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                };
+                const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+                const selectorFor = (el) => {
+                    if (el.id) return `#${el.id}`;
+                    const testId = el.getAttribute("data-testid");
+                    if (testId) return `[data-testid="${testId}"]`;
+                    const name = el.getAttribute("name");
+                    if (name) return `${el.tagName.toLowerCase()}[name="${name}"]`;
+                    const cls = Array.from(el.classList || []).filter(Boolean).slice(0, 2);
+                    if (cls.length) return `${el.tagName.toLowerCase()}.${cls.join(".")}`;
+                    const text = clean(el.innerText || el.textContent || "");
+                    if (text) return `${el.tagName.toLowerCase()}:has-text("${text.slice(0, 40)}")`;
+                    return el.tagName.toLowerCase();
+                };
+                const labelFor = (el) => {
+                    return clean(
+                        el.getAttribute("aria-label")
+                        || el.getAttribute("placeholder")
+                        || el.innerText
+                        || el.textContent
+                        || el.value
+                    );
+                };
+                const optionsFor = (el) => {
+                    if (el.tagName.toLowerCase() !== "select") return [];
+                    return Array.from(el.options || []).map((opt) => clean(opt.textContent)).filter(Boolean).slice(0, 6);
+                };
+                const valueFor = (el) => {
+                    const tag = el.tagName.toLowerCase();
+                    if (tag === "select") {
+                        const selected = el.selectedOptions && el.selectedOptions[0];
+                        return clean(selected ? selected.textContent : el.value);
+                    }
+                    if (tag === "input" || tag === "textarea") {
+                        return clean(el.value);
+                    }
+                    if (el.isContentEditable) {
+                        return clean(el.innerText || el.textContent || "");
+                    }
+                    return "";
+                };
+                const nodes = Array.from(document.querySelectorAll(
+                    'input, textarea, select, button, a, [role="button"], [contenteditable="true"], summary'
+                ));
+                const seen = new Set();
+                const out = [];
+                for (const el of nodes) {
+                    if (!isVisible(el)) continue;
+                    const selector = selectorFor(el);
+                    const dedupe = `${el.tagName}|${selector}|${labelFor(el)}`;
+                    if (seen.has(dedupe)) continue;
+                    seen.add(dedupe);
+                    const tag = el.tagName.toLowerCase();
+                    const explicitRole = clean(el.getAttribute("role"));
+                    let role = explicitRole || tag;
+                    if (!explicitRole && tag === "input") {
+                        role = clean(el.getAttribute("type")) || "textbox";
+                    }
+                    out.push({
+                        tag,
+                        role,
+                        label: labelFor(el),
+                        selector,
+                        value: valueFor(el),
+                        options: optionsFor(el),
+                    });
+                    if (out.length >= limit) break;
+                }
+                return out;
+            }""",
+            limit,
+        )
+    except Exception:
+        return []
+    if not isinstance(result, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in result[:limit]:
+        if not isinstance(item, dict):
+            continue
+        normalized.append({
+            "tag": str(item.get("tag") or "").strip(),
+            "role": str(item.get("role") or "").strip(),
+            "label": str(item.get("label") or "").strip(),
+            "selector": str(item.get("selector") or "").strip(),
+            "value": str(item.get("value") or "").strip(),
+            "options": list(item.get("options") or [])[:6],
+        })
+    return normalized
+
+
+def _storage_state_summary(page: Any, *, value_limit: int = 120) -> str:
+    state = _storage_state(page, value_limit=value_limit)
+    lines = ["Browser storage state.", f"URL: {page.url}", ""]
+    for title, items in (
+        ("Local storage", state.get("local", [])),
+        ("Session storage", state.get("session", [])),
+    ):
+        lines.append(f"{title}:")
+        if not items:
+            lines.append("- (empty)")
+        else:
+            for item in items:
+                key = str(item.get("key") or "").strip()
+                value = str(item.get("value") or "").strip()
+                lines.append(f'- {key}="{value}"')
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _storage_state(page: Any, *, value_limit: int = 120) -> dict[str, list[dict[str, str]]]:
+    try:
+        payload = page.evaluate(
+            """(valueLimit) => { /* successor-storage-state */
+                const readStorage = (storage) => {
+                    const out = [];
+                    for (let i = 0; i < storage.length; i += 1) {
+                        const key = storage.key(i);
+                        if (!key) continue;
+                        const raw = storage.getItem(key) ?? "";
+                        out.push({
+                            key,
+                            value: String(raw).slice(0, valueLimit),
+                        });
+                    }
+                    return out;
+                };
+                return {
+                    local: readStorage(window.localStorage),
+                    session: readStorage(window.sessionStorage),
+                };
+            }""",
+            value_limit,
+        )
+    except Exception:
+        return {"local": [], "session": []}
+    if not isinstance(payload, dict):
+        return {"local": [], "session": []}
+    out: dict[str, list[dict[str, str]]] = {"local": [], "session": []}
+    for scope in ("local", "session"):
+        raw_items = payload.get(scope)
+        if not isinstance(raw_items, list):
+            continue
+        items: list[dict[str, str]] = []
+        for item in raw_items[:20]:
+            if not isinstance(item, dict):
+                continue
+            items.append({
+                "key": str(item.get("key") or "").strip(),
+                "value": str(item.get("value") or "").strip(),
+            })
+        out[scope] = items
+    return out
 
 
 def _best_page_text(page: Any) -> str:
@@ -631,6 +1004,10 @@ def _resolve_locator(page: Any, arguments: dict[str, Any], *, prefer_inputs: boo
     raise RuntimeError(f"could not find target {target!r}")
 
 
+def _has_target(arguments: dict[str, Any]) -> bool:
+    return bool(str(arguments.get("target", "") or "").strip())
+
+
 def _resolve_type_locator(page: Any, arguments: dict[str, Any]):
     """Resolve a type target, allowing explicit human-target fallbacks.
 
@@ -678,6 +1055,67 @@ def _fill_locator_with_fallback(
         return retry_locator
 
 
+def _active_element_is_editable(page: Any) -> bool:
+    try:
+        return bool(page.evaluate(
+            """() => {
+                const el = document.activeElement;
+                if (!el) return false;
+                if (el.isContentEditable) return true;
+                const tag = (el.tagName || "").toLowerCase();
+                if (tag === "textarea") return true;
+                if (tag !== "input") return false;
+                const type = (el.getAttribute("type") || "text").toLowerCase();
+                return ![
+                    "button",
+                    "checkbox",
+                    "color",
+                    "file",
+                    "hidden",
+                    "image",
+                    "radio",
+                    "range",
+                    "reset",
+                    "submit",
+                ].includes(type);
+            }"""
+        ))
+    except Exception:
+        return False
+
+
+def _type_into_focused_target(page: Any, text: str, *, press_enter: bool) -> None:
+    if not _active_element_is_editable(page):
+        raise RuntimeError("type requires a target or a focused editable element")
+    page.keyboard.type(text)
+    if press_enter:
+        page.keyboard.press("Enter")
+
+
+def _clear_page_storage(page: Any, scope: str) -> None:
+    page.evaluate(
+        """(scope) => { /* successor-clear-storage */
+            if (scope === "local" || scope === "both") {
+                window.localStorage.clear();
+            }
+            if (scope === "session" || scope === "both") {
+                window.sessionStorage.clear();
+            }
+        }""",
+        scope,
+    )
+
+
+def _select_locator_option(locator: Any, option: str) -> None:
+    """Select an option by visible label first, then by raw value."""
+    try:
+        locator.select_option(label=option)
+        return
+    except Exception:
+        pass
+    locator.select_option(value=option)
+
+
 def _locator_has_matches(locator: Any) -> bool:
     try:
         return bool(locator.count() > 0)
@@ -697,8 +1135,13 @@ def _looks_like_selector(text: str) -> bool:
 def _verb_for_action(action: str) -> str:
     return {
         "open": "browser-open",
+        "inspect": "browser-inspect",
         "click": "browser-click",
         "type": "browser-type",
+        "press": "browser-press",
+        "select": "browser-select",
+        "storage_state": "browser-storage-read",
+        "clear_storage": "browser-storage-clear",
         "wait_for": "browser-wait",
         "extract_text": "browser-read",
         "screenshot": "browser-screenshot",

@@ -288,9 +288,10 @@ class Profile:
       tools             ordered tuple of enabled tool names. This
                         controls model-visible native tools plus the
                         tool docs injected into the system prompt
-                        (`bash`, `subagent`, `holonet`, `browser`)
+                        (`bash`, `subagent`, `holonet`, `browser`, `vision`)
       tool_config       per-tool configuration dict. `bash`,
-                        `holonet`, and `browser` all read this live;
+                        `holonet`, `browser`, and `vision` all read
+                        this live;
                         future tools can do the same
       intro_animation   name of an intro animation to play before chat,
                         or None to skip. "successor" plays the bundled

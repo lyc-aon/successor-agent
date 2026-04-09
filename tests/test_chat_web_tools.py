@@ -1,4 +1,4 @@
-"""Chat integration coverage for holonet and browser native tools."""
+"""Chat integration coverage for holonet, browser, and vision native tools."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from successor.profiles import Profile
 from successor.providers.llama import StreamEnded
 from successor.tool_runner import ToolExecutionResult
 from successor.web.browser import BrowserRuntimeStatus
+from successor.web.vision import VisionRuntimeStatus
 
 
 class _StaticStream:
@@ -108,6 +109,27 @@ def test_browser_tool_filtered_when_playwright_missing(temp_config_dir: Path) ->
         assert chat._enabled_tools_for_turn() == ["bash"]
 
 
+def test_vision_tool_filtered_when_runtime_missing(temp_config_dir: Path) -> None:
+    from unittest.mock import patch
+
+    chat = SuccessorChat(
+        profile=Profile(name="vision-chat", tools=("bash", "vision")),
+        client=_MockClient(),
+    )
+    with patch(
+        "successor.chat.vision_runtime_status",
+        return_value=VisionRuntimeStatus(
+            tool_available=False,
+            mode="inherit",
+            provider_type="llamacpp",
+            base_url="http://localhost:8080",
+            model="local",
+            reason="llama.cpp endpoint reports vision=false",
+        ),
+    ):
+        assert chat._enabled_tools_for_turn() == ["bash"]
+
+
 def test_skill_tool_enabled_when_profile_has_usable_skills(temp_config_dir: Path) -> None:
     from unittest.mock import patch
 
@@ -131,6 +153,31 @@ def test_skill_tool_enabled_when_profile_has_usable_skills(temp_config_dir: Path
         ),
     ):
         assert chat._enabled_tools_for_turn() == ["browser", "skill"]
+
+
+def test_skill_tool_enabled_when_profile_has_vision_skill(temp_config_dir: Path) -> None:
+    from unittest.mock import patch
+
+    chat = SuccessorChat(
+        profile=Profile(
+            name="vision-chat",
+            tools=("vision",),
+            skills=("vision-inspector",),
+        ),
+        client=_MockClient(),
+    )
+    with patch(
+        "successor.chat.vision_runtime_status",
+        return_value=VisionRuntimeStatus(
+            tool_available=True,
+            mode="endpoint",
+            provider_type="openai_compat",
+            base_url="http://127.0.0.1:8090",
+            model="vision-local",
+            reason="ready",
+        ),
+    ):
+        assert chat._enabled_tools_for_turn() == ["vision", "skill"]
 
 
 def test_skill_tool_filtered_when_required_tool_missing(temp_config_dir: Path) -> None:
@@ -206,6 +253,59 @@ def test_native_browser_tool_call_dispatches(monkeypatch, temp_config_dir: Path)
     assert cards[0].tool_name == "browser"
     assert cards[0].tool_call_id == "call_browser_1"
     assert "Opened page." in cards[0].output
+
+
+def test_native_vision_tool_call_dispatches(monkeypatch, temp_config_dir: Path) -> None:
+    monkeypatch.setattr(
+        "successor.chat.vision_runtime_status",
+        lambda *_args, **_kwargs: VisionRuntimeStatus(
+            tool_available=True,
+            mode="endpoint",
+            provider_type="openai_compat",
+            base_url="http://127.0.0.1:8090",
+            model="vision-local",
+            reason="ready",
+        ),
+    )
+    monkeypatch.setattr(
+        "successor.chat.run_vision_analysis",
+        lambda arguments, cfg, client=None, progress=None: ToolExecutionResult(  # noqa: ARG005
+            output=f"Vision analysis completed.\nPath: {arguments['path']}\n\nThe CTA is clipped.",
+            exit_code=0,
+        ),
+    )
+    chat = SuccessorChat(
+        profile=Profile(
+            name="vision-chat",
+            tools=("vision",),
+        ),
+        client=_MockClient(),
+    )
+    chat.messages = []
+    chat._stream = _StaticStream([
+        StreamEnded(
+            finish_reason="tool_calls",
+            usage=None,
+            timings=None,
+            full_reasoning="",
+            full_content="",
+            tool_calls=({
+                "id": "call_vision_1",
+                "name": "vision",
+                "arguments": {"path": "/tmp/ui.png", "prompt": "Find the main issue."},
+                "raw_arguments": '{"path":"/tmp/ui.png","prompt":"Find the main issue."}',
+            },),
+        ),
+    ])
+
+    chat._pump_stream()
+    _pump_until_idle(chat)
+
+    cards = [m.tool_card for m in chat.messages if m.tool_card is not None]
+    assert len(cards) == 1
+    assert cards[0].tool_name == "vision"
+    assert cards[0].tool_call_id == "call_vision_1"
+    assert "CTA is clipped" in cards[0].output
 
 
 def test_native_skill_tool_call_dispatches(monkeypatch, temp_config_dir: Path) -> None:

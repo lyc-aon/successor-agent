@@ -138,6 +138,7 @@ from .tools_registry import (
 from .skills import (
     build_skill_card_output,
     build_skill_discovery_section,
+    build_skill_hint_section,
     build_skill_reuse_result,
     build_skill_tool_result,
     enabled_profile_skills,
@@ -165,9 +166,13 @@ from .web import (
     holonet_preview_card,
     resolve_browser_config,
     resolve_holonet_config,
+    resolve_vision_config,
     resolve_route as resolve_holonet_route,
     run_browser_action,
     run_holonet,
+    run_vision_analysis,
+    vision_preview_card,
+    vision_runtime_status,
 )
 from .session_trace import SessionTrace, clip_text as _trace_clip_text
 from .render.markdown import (
@@ -2975,6 +2980,11 @@ class SuccessorChat(App):
             status = browser_runtime_status(self.profile.name, browser_cfg)
             if not status.package_available:
                 enabled_tools = [name for name in enabled_tools if name != "browser"]
+        if "vision" in enabled_tools:
+            vision_cfg = resolve_vision_config(self.profile)
+            status = vision_runtime_status(vision_cfg, client=self.client)
+            if not status.tool_available:
+                enabled_tools = [name for name in enabled_tools if name != "vision"]
         if self._enabled_skills_for_turn(enabled_tools) and "skill" not in enabled_tools:
             enabled_tools.append("skill")
         return enabled_tools
@@ -3003,6 +3013,11 @@ class SuccessorChat(App):
                 status = browser_runtime_status(self.profile.name, browser_cfg)
                 if not status.package_available:
                     tools = [name for name in tools if name != "browser"]
+            if "vision" in tools:
+                vision_cfg = resolve_vision_config(self.profile)
+                status = vision_runtime_status(vision_cfg, client=self.client)
+                if not status.tool_available:
+                    tools = [name for name in tools if name != "vision"]
         else:
             tools = list(enabled_tools)
         return enabled_profile_skills(
@@ -3710,6 +3725,9 @@ class SuccessorChat(App):
         tool_guidance = build_model_tool_guidance(enabled_tools)
         if tool_guidance:
             sys_prompt = f"{sys_prompt}\n\n{tool_guidance}"
+        skill_hints = build_skill_hint_section(enabled_skills)
+        if skill_hints:
+            sys_prompt = f"{sys_prompt}\n\n{skill_hints}"
         skill_discovery = build_skill_discovery_section(
             enabled_skills,
             context_window_tokens=self._resolve_context_window(),
@@ -5287,6 +5305,55 @@ class SuccessorChat(App):
         self._scroll_to_bottom()
         return True
 
+    def _spawn_vision_runner(
+        self,
+        arguments: dict[str, Any],
+        *,
+        tool_call_id: str | None = None,
+    ) -> bool:
+        from .bash.exec import _new_tool_call_id  # noqa: PLC0415
+
+        resolved_call_id = tool_call_id or _new_tool_call_id()
+        preview = vision_preview_card(arguments, tool_call_id=resolved_call_id)
+        vision_cfg = resolve_vision_config(self.profile)
+        status = vision_runtime_status(vision_cfg, client=self.client)
+        if not status.tool_available:
+            card = self._tool_error_card(
+                tool_name="vision",
+                verb=preview.verb,
+                raw_command=preview.raw_command,
+                tool_call_id=resolved_call_id,
+                params=preview.params,
+                tool_arguments=preview.tool_arguments,
+                raw_label_prefix=preview.raw_label_prefix,
+                message=status.reason,
+            )
+            self.messages.append(_Message("tool", "", tool_card=card))
+            return False
+
+        runner = CallableToolRunner(
+            tool_call_id=resolved_call_id,
+            worker=lambda progress: run_vision_analysis(
+                arguments,
+                vision_cfg,
+                client=self.client,
+                progress=progress,
+            ),
+        )
+        msg = _Message("tool", "", tool_card=preview, running_tool=runner)
+        self.messages.append(msg)
+        self._running_tools.append(msg)
+        self._trace_event(
+            "tool_spawn",
+            tool_name="vision",
+            tool_call_id=resolved_call_id,
+            path=str(arguments.get("path") or ""),
+            prompt=str(arguments.get("prompt") or ""),
+        )
+        runner.start()
+        self._scroll_to_bottom()
+        return True
+
     def _dispatch_native_tool_calls(self, tool_calls: list[dict]) -> bool:
         """Spawn a BashRunner for each native tool_call from the
         model's structured `delta.tool_calls` stream. Mirrors the
@@ -5336,9 +5403,16 @@ class SuccessorChat(App):
                     ):
                         any_ran = True
                     continue
+                if name == "vision":
+                    if isinstance(args, dict) and self._spawn_vision_runner(
+                        dict(args),
+                        tool_call_id=call_id,
+                    ):
+                        any_ran = True
+                    continue
                 self.messages.append(_Message(
                     "successor",
-                    f"unknown tool {name!r} — supported tools are bash, skill, subagent, holonet, and browser",
+                    f"unknown tool {name!r} — supported tools are bash, skill, subagent, holonet, browser, and vision",
                     synthetic=True,
                 ))
                 continue

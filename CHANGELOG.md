@@ -3,6 +3,41 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
+## v0.1.15 — 2026-04-08
+
+Optional multimodal vision tool for screenshot-based local verification.
+
+### What changed
+
+- added a native `vision` tool for inspecting local images and browser
+  screenshots with a multimodal model
+- added `tool_config.vision` with `inherit` and dedicated-endpoint
+  modes, so a text-only main chat can still use a separate local vision
+  sidecar
+- added the bundled `vision-inspector` skill and updated browser
+  guidance so visual tasks prefer `browser screenshot` plus `vision`
+  instead of guessing from DOM text alone
+- setup/config/doctor now surface `vision` alongside `holonet` and
+  `browser`
+- issue-desk supervision now runs with vision enabled for the
+  screenshot-based verification path
+
+### Verification
+
+- focused integration slice: `50 passed`
+- full local suite: `1135 passed`
+- live local llama.cpp sidecar probe:
+  - `Qwen3-VL-8B-Instruct` + `mmproj` on `http://127.0.0.1:8090`
+  - direct `/v1/chat/completions` image request succeeded
+- live E2E:
+  - `scripts/e2e_chat_driver.py --scenario browser_vision_fixture`
+- live artifact review confirmed:
+  - the model loaded `vision-inspector`
+  - the runtime produced real `browser-open` / `browser-screenshot` /
+    `vision-inspect` cards
+  - the final answer correctly called out the clipped CTA from the
+    screenshot
+
 ## v0.1.14 — 2026-04-08
 
 On-demand browser / holonet skills plus external-Python Playwright runtime support.

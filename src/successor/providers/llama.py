@@ -108,6 +108,8 @@ class LlamaCppRuntimeCapabilities:
     total_slots: int | None = None
     endpoint_slots: bool = False
     supports_parallel_tool_calls: bool = False
+    supports_typed_content: bool = False
+    supports_vision: bool = False
 
     @property
     def usable_background_slots(self) -> int:
@@ -641,5 +643,11 @@ class LlamaCppClient:
             endpoint_slots=bool(props.get("endpoint_slots", False)),
             supports_parallel_tool_calls=bool(
                 chat_caps.get("supports_parallel_tool_calls", False)
+            ),
+            supports_typed_content=bool(
+                chat_caps.get("supports_typed_content", False)
+            ),
+            supports_vision=bool(
+                (props.get("modalities") or {}).get("vision", False)
             ),
         )

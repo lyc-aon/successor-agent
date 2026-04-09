@@ -1,9 +1,10 @@
 # Web Tools
 
-Successor ships two optional web-facing tool families:
+Successor ships three optional web-facing tool families:
 
 - `holonet`: deterministic API-backed web and research retrieval
 - `browser`: live Playwright browser control
+- `vision`: multimodal screenshot and image inspection
 
 Neither is enabled for the model by default on the bundled `default`
 profile. Turn them on in the setup wizard's `tools` step or later in
@@ -14,9 +15,11 @@ Successor also ships built-in helper skills for these tools:
 - `holonet-research`
 - `biomedical-research`
 - `browser-operator`
+- `browser-verifier`
+- `vision-inspector`
 
 Profiles created through `successor setup` automatically seed the
-matching skills when you enable `holonet` or `browser`. Existing
+matching skills when you enable `holonet`, `browser`, or `vision`. Existing
 profiles can edit the skill list later in `/config` under `extensions`.
 
 ## Holonet
@@ -97,8 +100,13 @@ while the main chat keeps running in the original environment.
 The current browser actions are:
 
 - `open`
+- `inspect`
 - `click`
 - `type`
+- `press`
+- `select`
+- `storage_state`
+- `clear_storage`
 - `wait_for`
 - `extract_text`
 - `screenshot`
@@ -121,13 +129,48 @@ Successor keeps one persistent browser session per profile. That means
 login state, cookies, and page context survive across multiple tool
 calls in the same chat.
 
+## Vision
+
+`vision` is the visibly grounded inspection path. Use it for layout,
+spacing, clipping, overlap, hierarchy, contrast, empty states, or any
+question where the screenshot matters more than the DOM text.
+
+It is designed to pair with `browser screenshot`, but it can inspect
+any local image path the harness can read.
+
+Configuration lives under `tool_config.vision`. The config menu
+exposes:
+
+- `mode`: `inherit` or `endpoint`
+- `provider_type`: `llamacpp` or `openai_compat`
+- `base_url`
+- `model`
+- optional inline API key / API key file
+- `timeout_s`
+- `max_tokens`
+- `detail`
+
+Mode semantics:
+
+- `inherit`: reuse the active chat provider if it is multimodal
+- `endpoint`: call a separate multimodal endpoint, which is the normal
+  local setup when the main chat model is text-only but a sidecar
+  vision model is available
+
+For local `llama.cpp`, the common pattern is a dedicated multimodal
+server launched with a VL model plus `--mmproj`, for example:
+
+```bash
+llama-server -m /path/to/Qwen3-VL.gguf --mmproj /path/to/mmproj.gguf --port 8090
+```
+
 ## Wizard And Config
 
 The setup wizard only decides whether the tool is enabled. Detailed
-provider/browser settings live in `/config`, because those fields are
-too granular for the 10-step first-run flow.
+provider/browser/vision settings live in `/config`, because those
+fields are too granular for the 10-step first-run flow.
 
-Once `holonet` or `browser` is enabled on a profile, the config menu
+Once `holonet`, `browser`, or `vision` is enabled on a profile, the config menu
 reveals the corresponding section automatically.
 
 ## Doctor Output
@@ -139,18 +182,22 @@ reveals the corresponding section automatically.
 - which Python interpreter Successor will use for Playwright
 - browser channel / executable path
 - persistent browser user-data directory
+- vision runtime mode, provider type, URL, model, and readiness note
 
-Run `successor doctor` first if a profile is not surfacing `holonet` or
-`browser` the way you expect.
+Run `successor doctor` first if a profile is not surfacing `holonet`,
+`browser`, or `vision` the way you expect.
 
 ## Guidance
 
 - Prefer `holonet` for search, news, article retrieval, papers, and
   clinical-study lookup.
 - Use `browser` only when a real page session or JS execution matters.
+- Use `vision` when the question is visibly grounded. For local UI
+  verification, the normal path is `browser open`, `browser screenshot`,
+  then `vision`.
 - Let the built-in skills handle the routing details when they are
   available. They keep the base prompt smaller and teach the model when
-  to prefer `holonet` over `browser`.
+  to prefer `holonet` over `browser`, and when to bring in `vision`.
 - Keep `browser` disabled on profiles that do not need it. It is
   heavier than API-backed retrieval and should be treated as a focused
   capability, not the default path for all web tasks.

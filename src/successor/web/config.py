@@ -1,4 +1,4 @@
-"""Resolved configuration for holonet API routes and Playwright browser."""
+"""Resolved configuration for holonet routes, browser control, and vision."""
 
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ HOLO_DEFAULT_PROVIDER_OPTIONS = (
     "clinicaltrials",
     "biomedical_research",
 )
+VISION_MODE_OPTIONS = ("inherit", "endpoint")
+VISION_PROVIDER_OPTIONS = ("llamacpp", "openai_compat")
 
 
 def _read_secret_file(path: str | None) -> str:
@@ -91,6 +93,26 @@ class BrowserConfig:
         return value or sys.executable
 
 
+@dataclass(frozen=True, slots=True)
+class VisionConfig:
+    mode: str = "inherit"
+    provider_type: str = "llamacpp"
+    base_url: str = ""
+    model: str = ""
+    api_key: str = ""
+    api_key_file: str = ""
+    timeout_s: float = 120.0
+    max_tokens: int = 1024
+    detail: str = "auto"
+
+    def effective_api_key(self) -> str:
+        return (
+            self.api_key.strip()
+            or _read_secret_file(self.api_key_file)
+            or os.environ.get("SUCCESSOR_VISION_API_KEY", "").strip()
+        )
+
+
 def resolve_holonet_config(profile: Any) -> HolonetConfig:
     if profile is None:
         return HolonetConfig()
@@ -141,3 +163,37 @@ def resolve_browser_config(profile: Any) -> BrowserConfig:
         )
     except (TypeError, ValueError):
         return BrowserConfig()
+
+
+def resolve_vision_config(profile: Any) -> VisionConfig:
+    if profile is None:
+        return VisionConfig()
+    tool_config = getattr(profile, "tool_config", None) or {}
+    raw = tool_config.get("vision") or {}
+    try:
+        mode = str(raw.get("mode", "inherit") or "inherit").strip().lower()
+        if mode not in VISION_MODE_OPTIONS:
+            mode = "inherit"
+        provider_type = str(raw.get("provider_type", "llamacpp") or "llamacpp").strip().lower()
+        if provider_type not in VISION_PROVIDER_OPTIONS:
+            provider_type = "llamacpp"
+        timeout_s = float(raw.get("timeout_s", 120.0))
+        max_tokens = int(raw.get("max_tokens", 1024))
+        detail = str(raw.get("detail", "auto") or "auto").strip().lower()
+        if detail not in {"auto", "low", "high", "original"}:
+            detail = "auto"
+        timeout_s = max(5.0, min(600.0, timeout_s))
+        max_tokens = max(64, min(8192, max_tokens))
+        return VisionConfig(
+            mode=mode,
+            provider_type=provider_type,
+            base_url=str(raw.get("base_url", "") or ""),
+            model=str(raw.get("model", "") or ""),
+            api_key=str(raw.get("api_key", "") or ""),
+            api_key_file=str(raw.get("api_key_file", "") or ""),
+            timeout_s=timeout_s,
+            max_tokens=max_tokens,
+            detail=detail,
+        )
+    except (TypeError, ValueError):
+        return VisionConfig()

@@ -1466,6 +1466,7 @@ def test_enabling_web_tools_seeds_recommended_skills_once(temp_config_dir: Path)
         "holonet-research",
         "biomedical-research",
         "browser-operator",
+        "browser-verifier",
     )
 
 

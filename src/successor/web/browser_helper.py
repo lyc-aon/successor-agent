@@ -99,6 +99,7 @@ def main() -> int:
                     "stderr": result.stderr,
                     "exit_code": result.exit_code,
                     "truncated": result.truncated,
+                    "metadata": result.metadata or {},
                 }) + "\n")
                 sys.stdout.flush()
     except Exception as exc:  # noqa: BLE001

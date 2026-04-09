@@ -145,12 +145,19 @@ _VERB_TO_CLASS: dict[str, VerbClass] = {
     "biomedical-search": VerbClass.SEARCH,
     # browser
     "browser-open": VerbClass.INSPECT,
+    "browser-inspect": VerbClass.INSPECT,
     "browser-click": VerbClass.EXEC,
     "browser-type": VerbClass.MUTATE,
+    "browser-press": VerbClass.MUTATE,
+    "browser-select": VerbClass.MUTATE,
+    "browser-storage-read": VerbClass.INSPECT,
+    "browser-storage-clear": VerbClass.MUTATE,
     "browser-wait": VerbClass.INSPECT,
     "browser-read": VerbClass.READ,
     "browser-screenshot": VerbClass.INSPECT,
     "browser-console": VerbClass.INSPECT,
+    # vision
+    "vision-inspect": VerbClass.INSPECT,
     # generic fallback
     "bash": VerbClass.UNKNOWN,
     "(empty)": VerbClass.UNKNOWN,

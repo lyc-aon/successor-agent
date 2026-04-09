@@ -122,7 +122,11 @@ from ..render.theme import (
 )
 from ..subagents.config import SUBAGENT_STRATEGIES
 from ..tools_registry import AVAILABLE_TOOLS, selectable_tool_names
-from ..web.config import HOLO_DEFAULT_PROVIDER_OPTIONS
+from ..web.config import (
+    HOLO_DEFAULT_PROVIDER_OPTIONS,
+    VISION_MODE_OPTIONS,
+    VISION_PROVIDER_OPTIONS,
+)
 from .prompt_editor import PromptEditor
 
 
@@ -370,6 +374,46 @@ _SETTINGS_TREE: tuple[_SettingField, ...] = (
         kind=FieldKind.TOGGLE,
         options_getter=lambda: [True, False],
     ),
+    # ── Vision / screenshot analysis ───────────────────────────────
+    _SettingField(
+        name="vision_mode", label="mode", section="vision",
+        kind=FieldKind.CYCLE,
+        options_getter=lambda: list(VISION_MODE_OPTIONS),
+    ),
+    _SettingField(
+        name="vision_provider_type", label="provider", section="",
+        kind=FieldKind.CYCLE,
+        options_getter=lambda: list(VISION_PROVIDER_OPTIONS),
+    ),
+    _SettingField(
+        name="vision_base_url", label="base url", section="",
+        kind=FieldKind.TEXT,
+    ),
+    _SettingField(
+        name="vision_model", label="model", section="",
+        kind=FieldKind.TEXT,
+    ),
+    _SettingField(
+        name="vision_api_key", label="api key", section="",
+        kind=FieldKind.SECRET,
+    ),
+    _SettingField(
+        name="vision_api_key_file", label="key file", section="",
+        kind=FieldKind.TEXT,
+    ),
+    _SettingField(
+        name="vision_timeout_s", label="timeout (s)", section="",
+        kind=FieldKind.NUMBER, number_kind="float",
+    ),
+    _SettingField(
+        name="vision_max_tokens", label="max tokens", section="",
+        kind=FieldKind.NUMBER, number_kind="int",
+    ),
+    _SettingField(
+        name="vision_detail", label="detail", section="",
+        kind=FieldKind.CYCLE,
+        options_getter=lambda: ["auto", "low", "high", "original"],
+    ),
     # ── Compaction (autocompactor thresholds + behavior) ────────────
     # All percentages are fractions of the resolved context window.
     # The chat builds the runtime ContextBudget by multiplying each
@@ -447,6 +491,8 @@ def _field_visible_for_profile(profile: Profile, field: _SettingField) -> bool:
         return "holonet" in (profile.tools or ())
     if field.name.startswith("browser_"):
         return "browser" in (profile.tools or ())
+    if field.name.startswith("vision_"):
+        return "vision" in (profile.tools or ())
     return True
 
 
@@ -841,6 +887,16 @@ class SuccessorConfig(App):
                 return "(default)"
             return str(raw)
 
+        if field.name.startswith("vision_"):
+            raw = self._profile_value_for_field_raw(profile, field)
+            if field.kind == FieldKind.SECRET:
+                if raw is None or raw == "":
+                    return "(not set)"
+                return "•" * min(len(str(raw)), 16)
+            if raw in (None, ""):
+                return "(default)"
+            return str(raw)
+
         if field.name.startswith("subagents_"):
             raw = self._profile_value_for_field_raw(profile, field)
             if field.name == "subagents_enabled":
@@ -894,7 +950,7 @@ class SuccessorConfig(App):
             new_tools = tuple(new_value)
             new_skills = tuple(old_profile.skills)
             added_tools = set(new_tools) - set(old_profile.tools)
-            if not new_skills and added_tools.intersection({"holonet", "browser"}):
+            if not new_skills and added_tools.intersection({"holonet", "browser", "vision"}):
                 new_skills = recommended_skills_for_tools(new_tools)
             new_profile = replace(old_profile, tools=new_tools, skills=new_skills)
         elif field.name == "skills":
@@ -930,6 +986,16 @@ class SuccessorConfig(App):
             browser_cfg = dict(new_tool_config.get("browser") or {})
             browser_cfg[key] = new_value
             new_tool_config["browser"] = browser_cfg
+            new_profile = replace(old_profile, tool_config=new_tool_config)
+        elif field.name.startswith("vision_"):
+            key = field.name.removeprefix("vision_")
+            new_tool_config = {
+                k: dict(v) if isinstance(v, dict) else v
+                for k, v in (old_profile.tool_config or {}).items()
+            }
+            vision_cfg = dict(new_tool_config.get("vision") or {})
+            vision_cfg[key] = new_value
+            new_tool_config["vision"] = vision_cfg
             new_profile = replace(old_profile, tool_config=new_tool_config)
         elif field.name.startswith("provider_"):
             key = field.name.removeprefix("provider_")
@@ -1066,6 +1132,21 @@ class SuccessorConfig(App):
                 "screenshot_on_error": True,
             }
             return browser_cfg.get(key, defaults.get(key))
+        if field.name.startswith("vision_"):
+            vision_cfg = (profile.tool_config or {}).get("vision") or {}
+            key = field.name.removeprefix("vision_")
+            defaults = {
+                "mode": "inherit",
+                "provider_type": "llamacpp",
+                "base_url": "",
+                "model": "",
+                "api_key": "",
+                "api_key_file": "",
+                "timeout_s": 120.0,
+                "max_tokens": 1024,
+                "detail": "auto",
+            }
+            return vision_cfg.get(key, defaults.get(key))
         if field.name.startswith("compaction_"):
             key = field.name.removeprefix("compaction_")
             cfg = profile.compaction

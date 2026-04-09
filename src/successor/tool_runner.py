@@ -12,7 +12,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 from .bash.cards import ToolCard
 from .bash.runner import (
@@ -33,6 +33,7 @@ class ToolExecutionResult:
     exit_code: int = 0
     truncated: bool = False
     final_card: ToolCard | None = None
+    metadata: dict[str, Any] | None = None
 
 
 class ToolProgress:
@@ -72,6 +73,7 @@ class CallableToolRunner:
         self._error: str = ""
         self._truncated: bool = False
         self._final_card: ToolCard | None = None
+        self._metadata: dict[str, Any] | None = None
 
     def start(self) -> None:
         if self._thread is not None:
@@ -129,6 +131,10 @@ class CallableToolRunner:
         return None
 
     @property
+    def metadata(self) -> dict[str, Any] | None:
+        return self._metadata
+
+    @property
     def started_at(self) -> float:
         return self._started_at
 
@@ -174,6 +180,7 @@ class CallableToolRunner:
             self._truncated = bool(result.truncated)
             self._exit_code = int(result.exit_code)
             self._final_card = result.final_card
+            self._metadata = dict(result.metadata) if result.metadata else None
             if result.output:
                 with self._buf_lock:
                     self._stdout_buf = [result.output]
