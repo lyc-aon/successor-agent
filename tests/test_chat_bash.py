@@ -16,16 +16,14 @@ import json
 import time
 from pathlib import Path
 
-import pytest
 
 from successor.agent.bash_stream import BashStreamDetector
-from successor.bash import ToolCard, dispatch_bash, preview_bash
+from successor.bash import dispatch_bash, preview_bash
 from successor.chat import SuccessorChat, _Message
 from successor.providers.llama import (
     ContentChunk,
     LlamaCppRuntimeCapabilities,
     StreamEnded,
-    StreamStarted,
 )
 from successor.render.cells import Grid
 from successor.snapshot import render_grid_to_plain
@@ -761,7 +759,7 @@ def test_cwd_always_injected_into_system_prompt(temp_config_dir: Path) -> None:
     sys_msg = captured["messages"][0]
     assert sys_msg["role"] == "system"
     # The actual process cwd is injected — not a placeholder, not empty
-    assert "Bash working directory" in sys_msg["content"]
+    assert "Working directory" in sys_msg["content"]
     assert f"cwd={os.getcwd()}" in sys_msg["content"]
 
 
@@ -828,8 +826,39 @@ def test_parallel_read_guidance_only_injected_when_provider_supports_it(
     _drive_until_idle(chat)
 
     sys_msg = captured["messages"][0]
-    assert "Parallel read-only bash work" in sys_msg["content"]
-    assert "multiple tool calls before any result has returned" in sys_msg["content"]
+    assert "Parallel tool calls" in sys_msg["content"]
+    assert "multiple `read_file` calls, read-only `bash` checks" in sys_msg["content"]
+
+
+def test_execution_discipline_injected_when_tools_enabled(
+    temp_config_dir: Path,
+) -> None:
+    from successor.profiles import Profile
+
+    chat = SuccessorChat()
+    chat.profile = Profile(
+        name="discipline",
+        tools=("read_file", "bash"),
+        tool_config={},
+    )
+    chat.messages = []
+
+    captured: dict = {}
+
+    class _CapturingClient:
+        def stream_chat(self, messages, **kwargs):
+            captured["messages"] = messages
+            return _FakeStream([_stream_end()])
+
+    chat.client = _CapturingClient()
+    chat.input_buffer = "inspect and verify"
+    chat._submit()
+    _drive_until_idle(chat)
+
+    sys_msg = captured["messages"][0]
+    assert "Execution discipline" in sys_msg["content"]
+    assert "Do not stop early when another tool call would materially improve the result." in sys_msg["content"]
+    assert "make the corresponding tool call in the SAME response" in sys_msg["content"]
 
 
 def test_live_stream_never_exposes_bash_block_mid_stream(
@@ -880,7 +909,6 @@ def test_live_stream_never_exposes_bash_block_mid_stream(
     # state between ContentChunk deliveries. We do this by draining
     # the queue manually one event at a time.
     observed_visible = []
-    orig_drain = fake.drain
 
     def one_at_a_time() -> list:
         if not fake._events:

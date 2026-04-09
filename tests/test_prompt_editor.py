@@ -22,7 +22,6 @@ exercise the editor through the config menu's keystroke dispatch.
 
 from __future__ import annotations
 
-import pytest
 
 from successor.input.keys import Key, KeyEvent, MOD_CTRL, MOD_SHIFT
 from successor.wizard.prompt_editor import (

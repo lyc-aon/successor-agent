@@ -3,7 +3,7 @@
 Covers:
   - The @tool decorator captures name/description/schema/func
   - Tool instances are callable (passthrough to the underlying func)
-  - The built-in read_file tool loads and is registered
+  - The built-in demo_read_text tool loads and is registered
   - User tools are gated by `allow_user_tools` config (default OFF)
   - When the gate is on, user tools load and an audit line goes to stderr
   - User tools override built-ins by name on collision
@@ -66,17 +66,17 @@ def test_tool_decorator_default_schema_is_empty() -> None:
 # ─── ToolRegistry — built-in loading ───
 
 
-def test_builtin_read_file_tool_loads(temp_config_dir: Path) -> None:
-    """The bundled read_file tool is registered after a fresh load."""
+def test_builtin_demo_read_text_tool_loads(temp_config_dir: Path) -> None:
+    """The bundled demo_read_text tool is registered after a fresh load."""
     TOOL_REGISTRY.reload()
-    rf = get_tool("read_file")
+    rf = get_tool("demo_read_text")
     assert rf is not None
-    assert rf.name == "read_file"
-    assert "filesystem" in rf.description.lower() or "file" in rf.description.lower()
-    assert TOOL_REGISTRY.source_of("read_file") == "builtin"
+    assert rf.name == "demo_read_text"
+    assert "demo" in rf.description.lower() or "file" in rf.description.lower()
+    assert TOOL_REGISTRY.source_of("demo_read_text") == "builtin"
 
 
-def test_builtin_read_file_actually_works(
+def test_builtin_demo_read_text_actually_works(
     temp_config_dir: Path,
     tmp_path: Path,
 ) -> None:
@@ -85,7 +85,7 @@ def test_builtin_read_file_actually_works(
     sample.write_text("hello from a tool", encoding="utf-8")
 
     TOOL_REGISTRY.reload()
-    rf = get_tool("read_file")
+    rf = get_tool("demo_read_text")
     assert rf is not None
     result = rf(path=str(sample))
     assert result == "hello from a tool"
@@ -143,10 +143,10 @@ def test_user_tool_overrides_builtin(
     """A user tool with the same name as a built-in wins."""
     user_dir = temp_config_dir / "tools"
     user_dir.mkdir()
-    (user_dir / "read_file.py").write_text(
+    (user_dir / "demo_read_text.py").write_text(
         "from successor.tools import tool\n"
-        "@tool(name='read_file', description='user-overridden read_file')\n"
-        "def read_file(path: str): return f'overridden: {path}'\n"
+        "@tool(name='demo_read_text', description='user-overridden demo_read_text')\n"
+        "def demo_read_text(path: str): return f'overridden: {path}'\n"
     )
     (temp_config_dir / "chat.json").write_text(json.dumps({
         "version": 2,
@@ -154,10 +154,10 @@ def test_user_tool_overrides_builtin(
     }))
 
     TOOL_REGISTRY.reload()
-    rf = get_tool("read_file")
+    rf = get_tool("demo_read_text")
     assert rf is not None
-    assert rf.description == "user-overridden read_file"
-    assert TOOL_REGISTRY.source_of("read_file") == "user"
+    assert rf.description == "user-overridden demo_read_text"
+    assert TOOL_REGISTRY.source_of("demo_read_text") == "user"
     assert rf(path="/tmp/whatever") == "overridden: /tmp/whatever"
 
 
@@ -177,8 +177,8 @@ def test_broken_user_tool_skipped_with_warning(
     }))
 
     TOOL_REGISTRY.reload()
-    # The built-in read_file still loaded
-    assert get_tool("read_file") is not None
+    # The built-in demo_read_text still loaded
+    assert get_tool("demo_read_text") is not None
     # The broken file was skipped
     captured = capsys.readouterr()
     assert "skipping" in captured.err
@@ -257,4 +257,4 @@ def test_all_tools_returns_loaded(temp_config_dir: Path) -> None:
     tools = all_tools()
     assert len(tools) >= 1
     names = [t.name for t in tools]
-    assert "read_file" in names
+    assert "demo_read_text" in names

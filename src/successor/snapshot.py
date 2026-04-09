@@ -94,8 +94,6 @@ def chat_demo_snapshot(
     from .chat import (
         SuccessorChat,
         _Message,
-        SLASH_COMMANDS,
-        find_slash_command,
     )
     from .render.theme import get_theme, normalize_display_mode
     from .chat import find_density

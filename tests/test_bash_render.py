@@ -17,7 +17,6 @@ from successor.bash import (
     dispatch_bash,
     measure_tool_card_height,
     paint_tool_card,
-    parse_bash,
     preview_bash,
 )
 from successor.render.cells import Grid
@@ -218,7 +217,6 @@ def test_long_output_shows_head_window_plus_overflow_marker() -> None:
     the full output is still passed to the model via the tool
     result message. Keeps reads/grep/ls from flooding the chat.
     """
-    from successor.bash import DEFAULT_MAX_OUTPUT_LINES
     card = dispatch_bash("for i in $(seq 1 30); do echo line$i; done")
     g = Grid(20, 80)
     paint_tool_card(g, card, x=0, y=0, w=80, theme=THEME)

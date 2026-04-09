@@ -54,6 +54,7 @@ def test_doctor_reports_llama_runtime_capabilities(
 
     assert cmd_doctor(argparse.Namespace()) == 0
     out = capsys.readouterr().out
+    assert "gen budget  262144 tokens (auto)" in out
     assert "slots       4 total (/slots on)" in out
     assert "tool calls  parallel supported" in out
     assert "recording   auto-record on" in out
@@ -118,6 +119,7 @@ def test_doctor_reports_holonet_browser_and_vision_status(
 
     assert cmd_doctor(argparse.Namespace()) == 0
     out = capsys.readouterr().out
+    assert "tools       holonet, browser, vision" in out
     assert "holonet     default=auto" in out
     assert "holonet ok  europe_pmc, clinicaltrials, biomedical_research" in out
     assert "browser     playwright ready" in out

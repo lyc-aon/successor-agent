@@ -48,13 +48,25 @@ from __future__ import annotations
 import json
 import math
 import os
-import random
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Callable
 
 from . import __version__
 from .config import load_chat_config, save_chat_config
+from .file_tools import (
+    FileReadTracker,
+    FileReadStateEntry,
+    edit_file_preview_card,
+    normalize_file_path,
+    note_non_read_tool_call,
+    read_file_preview_card,
+    run_edit_file,
+    run_read_file,
+    run_write_file,
+    write_file_preview_card,
+)
 from .graphemes import delete_prev_grapheme
 from .playback import RecordingBundle, default_recording_bundle_dir
 from .progress import (
@@ -64,13 +76,9 @@ from .progress import (
     summarize_tool_completion,
 )
 from .input.keys import (
-    InputEvent,
     Key,
     KeyDecoder,
     KeyEvent,
-    MOD_ALT,
-    MOD_CTRL,
-    MOD_SHIFT,
     MouseButton,
     MouseEvent,
 )
@@ -78,11 +86,9 @@ from .profiles import (
     DEFAULT_MAX_AGENT_TURNS,
     PROFILE_REGISTRY,
     Profile,
-    all_profiles,
     get_active_profile,
     get_profile,
     next_profile,
-    set_active_profile,
 )
 from .providers import make_provider
 from .providers.llama import (
@@ -99,21 +105,15 @@ from .render.cells import (
     ATTR_BOLD,
     ATTR_DIM,
     ATTR_ITALIC,
-    ATTR_REVERSE,
-    ATTR_STRIKE,
-    ATTR_UNDERLINE,
     Cell,
     Grid,
     Style,
 )
 from .agent import (
-    BudgetTracker,
-    CompactionError,
     ContextBudget,
     LogMessage,
     MessageLog,
     TokenCounter,
-    compact as agent_compact,
 )
 from .agent.bash_stream import BashStreamDetector
 from .bash import (
@@ -122,10 +122,8 @@ from .bash import (
     MutatingCommandRefused,
     RefusedCommand,
     ToolCard,
-    dispatch_bash,
     measure_tool_card_height,
     paint_tool_card,
-    preview_bash,
     resolve_bash_config,
 )
 from .bash.prepared_output import PreparedToolOutput
@@ -143,6 +141,7 @@ from .tools_registry import (
     build_model_tool_guidance,
     build_native_tool_schemas,
     filter_known,
+    tool_label,
 )
 from .skills import (
     build_skill_card_output,
@@ -205,9 +204,8 @@ from .render.markdown import (
 )
 from .render.paint import fill_region, paint_box, paint_horizontal_divider, paint_text
 from .render.terminal import Terminal
-from .render.text import PreparedText, ease_out_cubic, hard_wrap, lerp_rgb
+from .render.text import ease_out_cubic, hard_wrap, lerp_rgb
 from .render.theme import (
-    THEME_REGISTRY,
     Theme,
     ThemeVariant,
     all_themes,
@@ -567,19 +565,33 @@ def _extract_command_tail(raw_args: str) -> str:
                 if ch == "\\" and i + 1 < len(body):
                     nxt = body[i + 1]
                     if nxt == "n":
-                        out.append("\n"); i += 2; continue
+                        out.append("\n")
+                        i += 2
+                        continue
                     if nxt == "t":
-                        out.append("\t"); i += 2; continue
+                        out.append("\t")
+                        i += 2
+                        continue
                     if nxt == "r":
-                        out.append("\r"); i += 2; continue
+                        out.append("\r")
+                        i += 2
+                        continue
                     if nxt == '"':
-                        out.append('"'); i += 2; continue
+                        out.append('"')
+                        i += 2
+                        continue
                     if nxt == "\\":
-                        out.append("\\"); i += 2; continue
+                        out.append("\\")
+                        i += 2
+                        continue
                     if nxt == "/":
-                        out.append("/"); i += 2; continue
+                        out.append("/")
+                        i += 2
+                        continue
                     # Unknown escape — just emit the backslash and move on
-                    out.append("\\"); i += 1; continue
+                    out.append("\\")
+                    i += 1
+                    continue
                 out.append(ch)
                 i += 1
             return "".join(out)
@@ -853,14 +865,24 @@ def _extract_json_string_field(raw_args: str, field: str) -> str:
             if ch == "\\" and i + 1 < len(body):
                 nxt = body[i + 1]
                 if nxt == "n":
-                    out.append("\n"); i += 2; continue
+                    out.append("\n")
+                    i += 2
+                    continue
                 if nxt == "t":
-                    out.append("\t"); i += 2; continue
+                    out.append("\t")
+                    i += 2
+                    continue
                 if nxt == "r":
-                    out.append("\r"); i += 2; continue
+                    out.append("\r")
+                    i += 2
+                    continue
                 if nxt in ('"', "\\", "/"):
-                    out.append(nxt); i += 2; continue
-                out.append("\\"); i += 1; continue
+                    out.append(nxt)
+                    i += 2
+                    continue
+                out.append("\\")
+                i += 1
+                continue
             out.append(ch)
             i += 1
         return "".join(out)
@@ -1533,8 +1555,7 @@ class _CacheWarmer:
         sets _done. Catches all exceptions silently because warming
         is a transparent optimization that should never crash the chat."""
         from .providers.llama import (
-            ContentChunk, ReasoningChunk,
-            StreamEnded, StreamError, StreamStarted,
+            StreamEnded, StreamError,
         )
         try:
             self._stream = self._client.stream_chat(
@@ -1666,6 +1687,7 @@ class SuccessorChat(App):
         display_mode: str | None = None,
         profile: Profile | None = None,
         terminal: Terminal | None = None,
+        initial_input: str = "",
         recorder=None,
     ) -> None:
         super().__init__(
@@ -1735,6 +1757,8 @@ class SuccessorChat(App):
         # "default" without changing any code.
         self.system_prompt: str = profile.system_prompt
         self._browser_manager: PlaywrightBrowserManager | None = None
+        self._file_read_state: dict[str, FileReadStateEntry] = {}
+        self._file_read_tracker = FileReadTracker()
 
         # ─── Session trace ───
         # Normal chat sessions write a small JSONL trace to the user's
@@ -1879,7 +1903,7 @@ class SuccessorChat(App):
         self._intro_art: object | None = None  # BrailleArt | None
         self._intro_art_resolved: bool = False
 
-        self.input_buffer: str = ""
+        self.input_buffer: str = initial_input
 
         # ─── Streaming state ───
         # The in-flight ChatStream, or None when no response is in flight.
@@ -3192,6 +3216,10 @@ class SuccessorChat(App):
         except Exception:
             return None
 
+    def _tool_working_directory(self) -> str:
+        bash_cfg = resolve_bash_config(self.profile)
+        return bash_cfg.working_directory or os.getcwd()
+
     def _enabled_tools_for_turn(self) -> list[str]:
         """Runtime-enabled native tools for the current turn.
 
@@ -3717,6 +3745,7 @@ class SuccessorChat(App):
         if self._running_tools:
             self._cancel_running_tools()
             self._pending_continuation = False
+        note_non_read_tool_call(self._file_read_tracker)
 
         if text in ("/quit", "/exit", "/q"):
             self.stop()
@@ -4182,17 +4211,18 @@ class SuccessorChat(App):
         #      call, do not re-attempt the exact same tool call"
         #      guidance — same shape, different trigger.
         sys_prompt = self.system_prompt
-        if enabled_tools and "bash" in enabled_tools:
-            bash_cfg = resolve_bash_config(self.profile)
-            effective_cwd = bash_cfg.working_directory or os.getcwd()
+        if enabled_tools and (
+            "bash" in enabled_tools
+            or any(name in {"read_file", "write_file", "edit_file"} for name in enabled_tools)
+        ):
+            effective_cwd = self._tool_working_directory()
             sys_prompt = (
                 f"{sys_prompt}\n\n"
-                f"## Bash working directory\n\n"
-                f"Every bash command you run executes with "
-                f"`cwd={effective_cwd}`. Relative paths resolve from "
-                f"there. If the user asks for a file in a specific "
-                f"location (like `~/Desktop/foo.html`), use the "
-                f"absolute path — do not assume your cwd is what the "
+                f"## Working directory\n\n"
+                f"Native file tools and bash both resolve relative paths "
+                f"from `cwd={effective_cwd}`. If the user asks for a file "
+                f"in a specific location (like `~/Desktop/foo.html`), use "
+                f"the absolute path — do not assume your cwd is what the "
                 f"user had in mind.\n\n"
                 f"## Working with tool results\n\n"
                 f"Before making each tool call, scan the conversation "
@@ -4207,22 +4237,35 @@ class SuccessorChat(App):
                 f"(no tool call) is how you finish the task and "
                 f"return control to the user."
             )
+        if enabled_tools:
+            sys_prompt = (
+                f"{sys_prompt}\n\n"
+                f"## Execution discipline\n\n"
+                f"Use tools whenever they materially improve correctness, "
+                f"completeness, grounding, or verification. Do not stop "
+                f"early when another tool call would materially improve the "
+                f"result. If you say you will inspect, edit, run, verify, or "
+                f"check something, make the corresponding tool call in the "
+                f"SAME response instead of promising future action. If a tool "
+                f"returns partial, empty, or unhelpful results, change "
+                f"strategy instead of blindly repeating the same call. Keep "
+                f"working until the task is complete AND verified, then end "
+                f"with plain text."
+            )
             capabilities = self._detect_client_runtime_capabilities()
             if bool(getattr(capabilities, "supports_parallel_tool_calls", False)):
                 sys_prompt = (
                     f"{sys_prompt}\n\n"
-                    f"## Parallel read-only bash work\n\n"
-                    f"When a task is pure inspection across multiple "
-                    f"independent files, directories, or grep targets, "
-                    f"prefer launching all required read-only `bash` tool "
-                    f"calls in the FIRST assistant turn instead of "
-                    f"serializing them one-by-one. It is valid to emit "
-                    f"multiple tool calls before any result has returned, "
-                    f"and if the user explicitly asks for separate same-turn "
-                    f"calls you should follow that literally. Use this only "
-                    f"for independent read-only checks. Keep dependent "
-                    f"steps, writes, and read-after-write verification "
-                    f"serialized."
+                    f"## Parallel tool calls\n\n"
+                    f"When multiple tool calls are independent and the "
+                    f"result of one does not determine the arguments of "
+                    f"another, emit them in the SAME assistant turn instead "
+                    f"of serializing them one-by-one. This is especially "
+                    f"useful for parallel read-only inspection such as "
+                    f"multiple `read_file` calls, read-only `bash` checks, "
+                    f"or separate `holonet` lookups. Keep dependent steps, "
+                    f"writes, browser interaction sequences, and any "
+                    f"read-after-write verification serialized."
                 )
 
         tool_guidance = build_model_tool_guidance(enabled_tools)
@@ -4963,7 +5006,6 @@ class SuccessorChat(App):
         happens after the worker returns — manual just commits the
         new log; auto re-enters `_begin_agent_turn`.
         """
-        from .agent.compact import DEFAULT_KEEP_RECENT_ROUNDS
         pre_tokens = counter.count_log(log)
         keep_n = min(
             self.profile.compaction.keep_recent_rounds,
@@ -5634,11 +5676,12 @@ class SuccessorChat(App):
         tool_arguments: dict[str, Any],
         raw_label_prefix: str,
         message: str,
+        risk: str = "safe",
     ) -> ToolCard:
         return ToolCard(
             verb=verb,
             params=params,
-            risk="safe",
+            risk=risk,
             raw_command=raw_command,
             confidence=1.0,
             parser_name=f"native-{tool_name}",
@@ -5845,6 +5888,181 @@ class SuccessorChat(App):
         self._scroll_to_bottom()
         return True
 
+    def _spawn_read_file_runner(
+        self,
+        arguments: dict[str, Any],
+        *,
+        tool_call_id: str | None = None,
+    ) -> bool:
+        from .bash.exec import _new_tool_call_id  # noqa: PLC0415
+
+        resolved_call_id = tool_call_id or _new_tool_call_id()
+        working_directory = self._tool_working_directory()
+        requested_path = str(arguments.get("file_path") or "").strip()
+        try:
+            normalized_path = normalize_file_path(
+                requested_path,
+                working_directory=working_directory,
+            )
+        except Exception as exc:
+            card = self._tool_error_card(
+                tool_name="read_file",
+                verb="read-file",
+                raw_command=requested_path or "read_file",
+                tool_call_id=resolved_call_id,
+                params=(("path", requested_path),) if requested_path else (),
+                tool_arguments=dict(arguments),
+                raw_label_prefix="⟫",
+                message=str(exc),
+            )
+            self.messages.append(_Message("tool", "", tool_card=card))
+            return False
+
+        normalized_args = dict(arguments)
+        normalized_args["file_path"] = normalized_path
+        preview = read_file_preview_card(normalized_args, tool_call_id=resolved_call_id)
+        runner = CallableToolRunner(
+            tool_call_id=resolved_call_id,
+            worker=lambda progress: run_read_file(
+                normalized_args,
+                preview=preview,
+                read_state=self._file_read_state,
+                read_tracker=self._file_read_tracker,
+                working_directory=working_directory,
+                progress=progress,
+            ),
+        )
+        msg = _Message("tool", "", tool_card=preview, running_tool=runner)
+        self.messages.append(msg)
+        self._running_tools.append(msg)
+        self._trace_event(
+            "tool_spawn",
+            tool_name="read_file",
+            tool_call_id=resolved_call_id,
+            path=normalized_path,
+            offset=normalized_args.get("offset"),
+            limit=normalized_args.get("limit"),
+        )
+        runner.start()
+        self._scroll_to_bottom()
+        return True
+
+    def _spawn_write_file_runner(
+        self,
+        arguments: dict[str, Any],
+        *,
+        tool_call_id: str | None = None,
+    ) -> bool:
+        from .bash.exec import _new_tool_call_id  # noqa: PLC0415
+
+        resolved_call_id = tool_call_id or _new_tool_call_id()
+        working_directory = self._tool_working_directory()
+        requested_path = str(arguments.get("file_path") or "").strip()
+        try:
+            normalized_path = normalize_file_path(
+                requested_path,
+                working_directory=working_directory,
+            )
+        except Exception as exc:
+            card = self._tool_error_card(
+                tool_name="write_file",
+                verb="write-file",
+                raw_command=requested_path or "write_file",
+                tool_call_id=resolved_call_id,
+                params=(("path", requested_path),) if requested_path else (),
+                tool_arguments=dict(arguments),
+                raw_label_prefix="✎",
+                message=str(exc),
+                risk="mutating",
+            )
+            self.messages.append(_Message("tool", "", tool_card=card))
+            return False
+
+        normalized_args = dict(arguments)
+        normalized_args["file_path"] = normalized_path
+        preview = write_file_preview_card(normalized_args, tool_call_id=resolved_call_id)
+        runner = CallableToolRunner(
+            tool_call_id=resolved_call_id,
+            worker=lambda progress: run_write_file(
+                normalized_args,
+                preview=preview,
+                read_state=self._file_read_state,
+                working_directory=working_directory,
+                progress=progress,
+            ),
+        )
+        msg = _Message("tool", "", tool_card=preview, running_tool=runner)
+        self.messages.append(msg)
+        self._running_tools.append(msg)
+        self._trace_event(
+            "tool_spawn",
+            tool_name="write_file",
+            tool_call_id=resolved_call_id,
+            path=normalized_path,
+            content_length=len(str(normalized_args.get("content") or "")),
+        )
+        runner.start()
+        self._scroll_to_bottom()
+        return True
+
+    def _spawn_edit_file_runner(
+        self,
+        arguments: dict[str, Any],
+        *,
+        tool_call_id: str | None = None,
+    ) -> bool:
+        from .bash.exec import _new_tool_call_id  # noqa: PLC0415
+
+        resolved_call_id = tool_call_id or _new_tool_call_id()
+        working_directory = self._tool_working_directory()
+        requested_path = str(arguments.get("file_path") or "").strip()
+        try:
+            normalized_path = normalize_file_path(
+                requested_path,
+                working_directory=working_directory,
+            )
+        except Exception as exc:
+            card = self._tool_error_card(
+                tool_name="edit_file",
+                verb="edit-file",
+                raw_command=requested_path or "edit_file",
+                tool_call_id=resolved_call_id,
+                params=(("path", requested_path),) if requested_path else (),
+                tool_arguments=dict(arguments),
+                raw_label_prefix="✎",
+                message=str(exc),
+                risk="mutating",
+            )
+            self.messages.append(_Message("tool", "", tool_card=card))
+            return False
+
+        normalized_args = dict(arguments)
+        normalized_args["file_path"] = normalized_path
+        preview = edit_file_preview_card(normalized_args, tool_call_id=resolved_call_id)
+        runner = CallableToolRunner(
+            tool_call_id=resolved_call_id,
+            worker=lambda progress: run_edit_file(
+                normalized_args,
+                preview=preview,
+                read_state=self._file_read_state,
+                working_directory=working_directory,
+                progress=progress,
+            ),
+        )
+        msg = _Message("tool", "", tool_card=preview, running_tool=runner)
+        self.messages.append(msg)
+        self._running_tools.append(msg)
+        self._trace_event(
+            "tool_spawn",
+            tool_name="edit_file",
+            tool_call_id=resolved_call_id,
+            path=normalized_path,
+            replace_all=bool(normalized_args.get("replace_all")),
+        )
+        runner.start()
+        self._scroll_to_bottom()
+        return True
+
     def _spawn_holonet_runner(
         self,
         arguments: dict[str, Any],
@@ -6019,6 +6237,29 @@ class SuccessorChat(App):
             call_id = tc.get("id") or ""
 
             if name != "bash":
+                if name != "read_file":
+                    note_non_read_tool_call(self._file_read_tracker)
+                if name == "read_file":
+                    if isinstance(args, dict) and self._spawn_read_file_runner(
+                        dict(args),
+                        tool_call_id=call_id,
+                    ):
+                        any_ran = True
+                    continue
+                if name == "write_file":
+                    if isinstance(args, dict) and self._spawn_write_file_runner(
+                        dict(args),
+                        tool_call_id=call_id,
+                    ):
+                        any_ran = True
+                    continue
+                if name == "edit_file":
+                    if isinstance(args, dict) and self._spawn_edit_file_runner(
+                        dict(args),
+                        tool_call_id=call_id,
+                    ):
+                        any_ran = True
+                    continue
                 if name == "task":
                     if isinstance(args, dict) and self._spawn_task_runner(
                         dict(args),
@@ -6066,11 +6307,12 @@ class SuccessorChat(App):
                     continue
                 self.messages.append(_Message(
                     "successor",
-                    f"unknown tool {name!r} — supported tools are bash, task, skill, subagent, holonet, browser, and vision",
+                    f"unknown tool {name!r} — supported tools are read_file, write_file, edit_file, bash, task, skill, subagent, holonet, browser, and vision",
                     synthetic=True,
                 ))
                 continue
 
+            note_non_read_tool_call(self._file_read_tracker)
             command = args.get("command") if isinstance(args, dict) else ""
             if not command:
                 self.messages.append(_Message(
@@ -7006,7 +7248,7 @@ class SuccessorChat(App):
         rows.append(("tools", "", True, False))
         if tools:
             for t in tools:
-                rows.append(("", t, False, False))
+                rows.append(("", tool_label(t), False, False))
         else:
             rows.append(("", "(none enabled)", False, False))
         rows.append(("", "", False, False))
@@ -7239,7 +7481,6 @@ class SuccessorChat(App):
         pill_alpha = max(0.0, min(1.0, (materialize_t - 0.6) / 0.4))
         if pill_alpha < 1.0:
             faded_bg = lerp_rgb(theme.bg, base_color, pill_alpha)
-            faded_fg = lerp_rgb(theme.bg, theme.bg, 1.0)  # bg → bg = stay bg
             pill_style = Style(fg=theme.bg if pill_alpha > 0.5 else faded_bg,
                                bg=faded_bg, attrs=ATTR_BOLD)
         paint_text(
@@ -8246,7 +8487,7 @@ class SuccessorChat(App):
         state = self._autocomplete_state()
         if state is None:
             return
-        rows, cols = grid.rows, grid.cols
+        cols = grid.cols
         if cols < 30 or input_y < 4:
             return
 
@@ -8457,7 +8698,7 @@ class SuccessorChat(App):
             valid = ", ".join(state.valid_options)
             lines.append(f"valid: {valid}")
 
-        inner_w = max(len(l) for l in lines)
+        inner_w = max(len(line) for line in lines)
         inner_w = max(inner_w, 32)
         box_w = min(inner_w + 4, cols - 2)
         box_h = len(lines) + 2  # top + bottom borders + lines

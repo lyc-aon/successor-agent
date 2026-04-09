@@ -57,11 +57,10 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Optional
+from typing import Callable
 
 from ..bash import (
     DangerousCommandRefused,
-    ToolCard,
     dispatch_bash,
     preview_bash,
 )
@@ -75,7 +74,7 @@ from ..providers.llama import (
     StreamStarted,
 )
 from .bash_stream import BashStreamDetector
-from .budget import BudgetTracker, ContextBudget
+from .budget import BudgetTracker
 from .compact import CompactionError, compact, MIN_ROUNDS_TO_COMPACT
 from .events import (
     BashBlockDetected,
@@ -96,7 +95,7 @@ from .events import (
     TurnCompleted,
     TurnStarted,
 )
-from .log import ApiRound, LogMessage, MessageLog
+from .log import LogMessage, MessageLog
 from .microcompact import microcompact
 from .tokens import TokenCounter
 

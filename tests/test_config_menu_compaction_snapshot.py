@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from successor.snapshot import config_demo_snapshot, render_grid_to_plain
 from successor.wizard.config import _SETTINGS_TREE

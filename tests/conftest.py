@@ -16,7 +16,6 @@ is the point — the tests exercise the same code path as real use.
 
 from __future__ import annotations
 
-import os
 import tempfile
 from pathlib import Path
 from typing import Iterator

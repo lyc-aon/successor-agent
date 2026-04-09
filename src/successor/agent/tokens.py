@@ -35,7 +35,7 @@ import math
 import urllib.error
 import urllib.request
 from collections import OrderedDict
-from typing import Optional, Protocol
+from typing import Protocol
 
 from .log import ApiRound, LogMessage, MessageLog
 

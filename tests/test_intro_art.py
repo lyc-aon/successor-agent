@@ -105,7 +105,6 @@ def test_bundled_successor_oracle_assets_are_distinct_and_not_solid() -> None:
     """The bundled oracle hero and final held intro frame should be
     distinct assets, and the held frame should not collapse into a
     solid full-screen block."""
-    from pathlib import Path
     from successor.loader import builtin_root
     from successor.render.braille import BrailleArt, load_frame
 

@@ -19,8 +19,6 @@ from successor.bash import (
     DangerousCommandRefused,
     MutatingCommandRefused,
     RefusedCommand,
-    ToolCard,
-    classify_risk,
     dispatch_bash,
     parse_bash,
     preview_bash,

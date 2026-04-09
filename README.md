@@ -7,9 +7,9 @@
 Successor is a terminal chat harness for local language models and
 OpenAI-compatible endpoints. The renderer is a five-layer cell-based
 pipeline where one module owns the screen end to end, the agent loop
-drives bash dispatch in real time, the setup wizard walks first-time
-users through provider configuration with a live preview pane, and
-the autocompactor keeps your context window healthy with
+drives native file tools and shell tools in real time, the setup
+wizard walks first-time users through provider configuration with a
+live preview pane, and the autocompactor keeps your context window healthy with
 percentage-based thresholds you can tune per profile.
 
 ![Successor running multi-tool dispatch in agentic mode](https://github.com/lyc-aon/successor-agent/releases/download/v0.1.3/tool_dispatch.gif)
@@ -26,8 +26,8 @@ successor setup
 The install provides `successor` and the `sx` two-letter alias in the
 current environment's `bin` directory. Python 3.11 or newer. The base
 install has zero third-party runtime dependencies. The renderer, the
-chat surface, the bash dispatch, the autocompactor, and the wizard are
-all pure stdlib.
+chat surface, the native file-tool path, the bash dispatch, the
+autocompactor, and the wizard are all pure stdlib.
 
 If you also want the optional Playwright browser tool, install the
 extra instead:
@@ -69,12 +69,16 @@ When you save, the wizard writes the profile to
 `~/.config/successor/profiles/<name>.json` and drops straight into the
 chat. The context window is auto-detected from the provider on first
 use, so the autocompactor's percentage thresholds resolve to actual
-token counts without you having to set anything manually.
+token counts without you having to set anything manually. Local
+`llama.cpp` profiles also default `provider.max_tokens` to `0`, which
+Successor resolves to the detected local context window so generation
+is not artificially capped unless you pin a smaller ceiling yourself.
 
-The tools step auto-discovers the built-in tool registry. `bash` is on
-by default; `subagent`, `holonet`, `browser`, and `vision` are opt-in.
-If you want bare chat, uncheck everything. If you want API-backed web
-research, a live browser session, or screenshot-based visual
+The tools step auto-discovers the built-in native tool registry.
+`read`, `write`, `edit`, and `bash` are on by default; `subagent`,
+`holonet`, `browser`, and `vision` are opt-in. If you want bare chat,
+uncheck everything. If you want API-backed web research, a live
+browser session, or screenshot-based visual
 inspection, enable them there or later in `/config`.
 
 If you skip the wizard and run `successor chat` directly on a fresh install, you get the
@@ -236,7 +240,10 @@ tool is enabled, Successor uses the Playwright Python package plus the
 profile's configured `channel` or `executable_path` to attach to a real
 Chromium-family browser. One persistent session is kept per profile so
 local app verification, login state, clicks, typing, screenshots, and
-console-error checks all happen in one place.
+console-error checks all happen in one place. Browser `type` is now
+deliberately human-like: it behaves like real keyboard input, so inline
+edit bugs still surface during verification unless the model
+explicitly asks to replace the existing field value first.
 
 `vision` is the screenshot and image-inspection path. It lets a text
 chat model call out to a multimodal endpoint for layout, clipping,
@@ -408,7 +415,7 @@ successor setup           10-step profile creation wizard
 successor config          three-pane profile config menu
 successor doctor          terminal + active profile health check
 successor skills          list loaded skills
-successor tools           list import-registered Python tools
+successor tools           list native chat tools and plugin tools
 successor snapshot        headless render of a chat scenario
 successor record          record a session to a playback bundle
 successor replay          replay a recorded input session
@@ -422,18 +429,48 @@ terminal capabilities, lists the active profile's provider and model,
 probes the configured `base_url` to see if it is reachable, and
 reports the resolved context window. On llama.cpp it also reports the
 visible slot count and whether the server advertises parallel tool-call
-support. When `holonet`, `browser`, or `vision` are enabled on the
-active profile, doctor also reports the enabled provider set,
-Playwright package readiness, the browser channel/executable path, the
-persistent user-data directory, and the configured vision runtime
-status. It now also reports whether local session auto-recording is on
-and, when enabled, which directory receives the bundles. Run it first
-when something is not working.
+support. It also prints the active profile's tool surface. When
+`holonet`, `browser`, or `vision` are enabled on the active profile,
+doctor also reports the enabled provider set, Playwright package
+readiness, the browser channel/executable path, the persistent
+user-data directory, and the configured vision runtime status. It now
+also reports whether local session auto-recording is on and, when
+enabled, which directory receives the bundles. Run it first when
+something is not working.
 
-`successor tools` is a different registry: it lists Python
-import-registered tools from `src/successor/tools/`, not the native
-profile tool picker (`bash`, `subagent`, `holonet`, `browser`,
-`vision`).
+`successor tools` now shows both sections clearly:
+
+- native chat tools from the built-in profile tool picker
+- plugin tools from the Python-import registry under `src/successor/tools/`
+
+The plugin section is separate from the native chat loop unless a
+plugin is explicitly wired into runtime dispatch.
+
+## File Tools
+
+Successor's default authoring path is now native file IO:
+
+- `read_file` for reading local text files with deterministic line numbers
+- `edit_file` for exact-string changes to an existing file
+- `write_file` for new files or full-file replacements
+- `bash` for shell/system work like tests, builds, git, serving, or process inspection
+
+Existing-file writes and edits require a prior full read and fail
+cleanly if the file changed in the meantime. That keeps stale writes
+from silently clobbering user edits or linter rewrites.
+
+Repeated unchanged full-file reads are also compressed down to a short
+stub instead of re-sending the same file content over and over, and the
+runtime now warns then blocks obvious identical read loops with no
+intervening non-read tool call.
+
+When tools are enabled, the system prompt also adds a small execution-
+discipline layer: if the model says it will inspect, run, edit, or
+verify something, it should make the tool call in the same response,
+keep going while tool work would materially improve the result, and only
+finish after verification.
+
+For the full contract, see [docs/file-tools.md](docs/file-tools.md).
 
 Normal `successor chat` sessions also leave a bounded local runtime
 trace under `~/.config/successor/logs/`. These JSONL files record user

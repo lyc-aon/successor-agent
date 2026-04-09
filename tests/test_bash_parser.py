@@ -14,7 +14,6 @@ import pytest
 
 from successor.bash import (
     Risk,
-    ToolCard,
     bash_parser,
     classify_risk,
     has_parser,

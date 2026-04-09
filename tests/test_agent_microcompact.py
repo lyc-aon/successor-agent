@@ -5,7 +5,6 @@ from __future__ import annotations
 from successor.agent.log import LogMessage, MessageLog
 from successor.agent.microcompact import (
     CLEARED_PLACEHOLDER,
-    DEFAULT_KEEP_TOOL_RESULTS,
     microcompact,
 )
 from successor.bash import dispatch_bash

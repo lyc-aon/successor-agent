@@ -12,18 +12,13 @@ Three layers of coverage:
 
 from __future__ import annotations
 
-import pytest
 
 from successor.bash import (
     ToolCard,
     dispatch_bash,
     paint_tool_card,
-    parse_bash,
-    preview_bash,
 )
 from successor.bash.prepared_output import (
-    OutputLine,
-    OutputSpan,
     PreparedToolOutput,
     _parse_grep_line,
     _parse_ls_line,
@@ -179,7 +174,7 @@ def test_prepared_tool_output_stderr_becomes_warn_lines() -> None:
     prep = PreparedToolOutput(card)
     lines = prep.layout(80)
     # At least one stderr-kind row
-    assert any(l.kind == "stderr" for l in lines)
+    assert any(line.kind == "stderr" for line in lines)
 
 
 # ─── No line cap: every wrapped output row is returned ───
@@ -193,8 +188,8 @@ def test_layout_returns_all_lines_when_max_lines_none() -> None:
     card = dispatch_bash("for i in $(seq 1 20); do echo line$i; done")
     prep = PreparedToolOutput(card)
     lines = prep.layout(80)  # max_lines=None by default
-    assert not any(l.kind == "truncated" for l in lines)
-    plain_concat = "\n".join(l.plain for l in lines)
+    assert not any(line.kind == "truncated" for line in lines)
+    plain_concat = "\n".join(line.plain for line in lines)
     for i in range(1, 21):
         assert f"line{i}" in plain_concat
 
@@ -213,7 +208,7 @@ def test_layout_max_lines_caps_head_and_adds_overflow_marker() -> None:
     for i in range(1, 5):
         assert f"line{i}" in clipped[i - 1].plain
     # line5..line20 are NOT in the head
-    head_text = "\n".join(l.plain for l in clipped[:-1])
+    head_text = "\n".join(line.plain for line in clipped[:-1])
     for i in range(5, 21):
         assert f"line{i}" not in head_text
     # Last row is the overflow marker mentioning 16 hidden lines
@@ -230,7 +225,7 @@ def test_layout_max_lines_unchanged_when_output_fits() -> None:
     clipped = prep.layout(80, max_lines=5)
     # 3 lines of output, no marker
     assert len(clipped) == 3
-    assert not any(l.kind == "truncated" for l in clipped)
+    assert not any(line.kind == "truncated" for line in clipped)
 
 
 # ─── Search integration: grep output renders with highlights ───
@@ -256,7 +251,7 @@ def test_search_card_highlights_match_in_rendered_output(tmp_path) -> None:
     prep = PreparedToolOutput(card)
     lines = prep.layout(80)
     # Should have two match-kind lines (one per grep hit)
-    match_rows = [l for l in lines if l.kind == "match"]
+    match_rows = [line for line in lines if line.kind == "match"]
     assert len(match_rows) == 2
     # Each row should contain a match-kind span with "TODO"
     for row in match_rows:
@@ -286,7 +281,7 @@ def test_list_card_produces_entry_markers(tmp_path) -> None:
     )
     prep = PreparedToolOutput(card)
     lines = prep.layout(80)
-    plain = "\n".join(l.plain for l in lines)
+    plain = "\n".join(line.plain for line in lines)
     assert "total 8" in plain
     assert "src" in plain
     assert "README.md" in plain

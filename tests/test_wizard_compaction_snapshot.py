@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from successor.snapshot import render_grid_to_plain, wizard_demo_snapshot
 
@@ -126,9 +125,9 @@ def test_sidebar_includes_compact_step(temp_config_dir: Path) -> None:
     assert "review" in sidebar_text
 
     # Order: tools should appear ABOVE compact, compact ABOVE review
-    tools_idx = next(i for i, l in enumerate(lines) if "tools" in l[:18])
-    compact_idx = next(i for i, l in enumerate(lines) if "compact" in l[:18])
-    review_idx = next(i for i, l in enumerate(lines) if "review" in l[:18])
+    tools_idx = next(i for i, line in enumerate(lines) if "tools" in line[:18])
+    compact_idx = next(i for i, line in enumerate(lines) if "compact" in line[:18])
+    review_idx = next(i for i, line in enumerate(lines) if "review" in line[:18])
     assert tools_idx < compact_idx < review_idx
 
 
@@ -142,7 +141,7 @@ def test_compaction_step_active_marker(temp_config_dir: Path) -> None:
     plain = render_grid_to_plain(g)
 
     lines = plain.splitlines()
-    compact_lines = [l for l in lines if "compact" in l[:18]]
+    compact_lines = [line for line in lines if "compact" in line[:18]]
     assert len(compact_lines) >= 1
     # The active step has ▸ in front
     assert "▸" in compact_lines[0]

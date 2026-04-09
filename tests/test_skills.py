@@ -12,7 +12,6 @@ import pytest
 
 from successor.skills import (
     SKILL_REGISTRY,
-    Skill,
     all_skills,
     build_skill_discovery_section,
     build_skill_hint_section,

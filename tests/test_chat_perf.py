@@ -22,7 +22,6 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-import pytest
 
 from successor.agent import TokenCounter
 from successor.chat import SuccessorChat, _Message

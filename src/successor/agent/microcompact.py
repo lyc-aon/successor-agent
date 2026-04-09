@@ -25,10 +25,9 @@ no global state, no side effects. Tested standalone.
 from __future__ import annotations
 
 import time
-from dataclasses import replace
 from typing import Iterable
 
-from .log import ApiRound, LogMessage, MessageLog
+from .log import ApiRound, MessageLog
 
 
 # ─── Constants ───

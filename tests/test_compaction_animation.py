@@ -29,7 +29,7 @@ from successor.chat import (
     _COMPACT_MATERIALIZE_S,
     _COMPACT_REVEAL_S,
 )
-from successor.render.cells import Grid, Style
+from successor.render.cells import Grid
 from successor.render.paint import paint_horizontal_divider
 from successor.snapshot import render_grid_to_plain
 

@@ -893,7 +893,6 @@ class RecordingBundle:
 
     def finalize(self, *, trace_path: str | Path | None = None) -> dict[str, object]:
         """Write bundle artifacts and return a summary payload."""
-        trace_events: list[dict[str, object]] = []
         if trace_path is not None:
             trace_file = Path(trace_path)
             if trace_file.exists():
@@ -901,7 +900,6 @@ class RecordingBundle:
                     shutil.copyfile(trace_file, self.trace_jsonl_path)
                 except OSError:
                     pass
-                trace_events = load_trace_events(trace_file)
         return self.refresh_viewer(trace_path=trace_path, copy_trace_jsonl=True)
 
     def refresh_viewer(

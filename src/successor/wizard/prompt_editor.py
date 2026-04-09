@@ -42,7 +42,7 @@ modern text editor's multi-line selection look.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable
 
 from ..graphemes import (
@@ -54,14 +54,10 @@ from ..graphemes import (
 from ..input.keys import (
     Key,
     KeyEvent,
-    MOD_CTRL,
-    MOD_SHIFT,
 )
 from ..render.cells import (
     ATTR_BOLD,
     ATTR_DIM,
-    ATTR_ITALIC,
-    ATTR_REVERSE,
     Cell,
     Grid,
     Style,
@@ -249,7 +245,7 @@ class PromptEditor:
         return self.selection_anchor is not None
 
     def char_count(self) -> int:
-        return sum(len(l) for l in self.lines) + max(0, len(self.lines) - 1)
+        return sum(len(line) for line in self.lines) + max(0, len(self.lines) - 1)
 
     def get_selection_text(self) -> str:
         """Extract the selected text. Returns empty string if no selection."""
@@ -816,18 +812,6 @@ class PromptEditor:
         # cells past the chunk text with the selection bg so the
         # highlight extends to the right edge of the text area.
         if sel_start is not None and sel_end is not None:
-            chunk_end_col = chunk.source_col_start + len(chunk.text)
-            row_fully_selected_after = (
-                source_row > sel_start[0]
-                and source_row < sel_end[0]
-            ) or (
-                source_row == sel_start[0]
-                and source_row < sel_end[0]
-            ) or (
-                source_row == sel_end[0]
-                and source_row > sel_start[0]
-                and chunk_end_col < sel_end[1]
-            )
             # The trailing-cells highlight kicks in for any visible chunk
             # whose source row is between sel_start[0] and sel_end[0]
             # exclusive — these are the "interior" rows whose entire

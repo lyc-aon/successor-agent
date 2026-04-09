@@ -13,11 +13,9 @@ from __future__ import annotations
 
 import math
 
-import pytest
 
 from successor.agent.log import LogMessage, MessageLog
 from successor.agent.tokens import (
-    DEFAULT_CACHE_SIZE,
     HEURISTIC_CHARS_PER_TOKEN,
     TokenCounter,
 )
@@ -141,7 +139,6 @@ def test_count_falls_back_to_heuristic_when_endpoint_unreachable(monkeypatch) ->
 
 def test_endpoint_failures_reset_on_success(monkeypatch) -> None:
     """Successful endpoint hits reset the failure counter."""
-    import successor.agent.tokens as tokens_mod
 
     # Patch _count_via_endpoint to alternate fail/succeed
     class _AlternatingCounter(TokenCounter):

@@ -69,11 +69,8 @@ something the renderer already had.
 
 from __future__ import annotations
 
-import json
-import time
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
 from typing import Callable
 
 from ..config import save_chat_config, load_chat_config, write_local_json
@@ -88,8 +85,6 @@ from ..profiles import (
     DEFAULT_MAX_AGENT_TURNS,
     PROFILE_REGISTRY,
     Profile,
-    get_active_profile,
-    get_profile,
 )
 from ..render.app import App
 from ..render.braille import BrailleArt, load_frame
@@ -97,7 +92,6 @@ from ..render.cells import (
     ATTR_BOLD,
     ATTR_DIM,
     ATTR_ITALIC,
-    ATTR_REVERSE,
     Cell,
     Grid,
     Style,
@@ -112,19 +106,16 @@ from ..render.terminal import Terminal
 from ..render.text import ease_out_cubic, lerp_rgb
 from ..render.theme import (
     THEME_REGISTRY,
-    Theme,
     ThemeVariant,
     all_themes,
-    blend_variants,
     find_theme_or_fallback,
-    normalize_display_mode,
-    toggle_display_mode,
 )
 from ..skills import recommended_skills_for_tools
 from ..tools_registry import (
     AVAILABLE_TOOLS,
     default_enabled_tools,
     selectable_tool_names,
+    tool_label,
 )
 
 
@@ -170,18 +161,19 @@ _DEFAULT_SYSTEM_PROMPT = (
     "\"Solution:\", \"Verification:\", \"Note:\", or trailing checkmark "
     "summaries. If a topic genuinely needs multiple distinct points, use "
     "a list; if it doesn't, write a sentence.\n\n"
-    "If bash tool calls are available you may use them to read files, run "
-    "quick checks, or verify your work before answering. Cite file paths "
-    "as `file.py:123` when discussing code so the user can navigate. Show "
-    "your reasoning when it helps the user follow along, hide it when it "
-    "doesn't."
+    "Use native file tools for normal authoring work: `read_file` to inspect "
+    "files, `edit_file` for targeted changes, and `write_file` for new files "
+    "or full rewrites. Use `bash` for shell and system work like tests, git, "
+    "builds, or serving apps. Cite file paths as `file.py:123` when discussing "
+    "code so the user can navigate. Show your reasoning when it helps the user "
+    "follow along, hide it when it doesn't."
 )
 
 _DEFAULT_PROVIDER = {
     "type": "llamacpp",
     "base_url": "http://localhost:8080",
     "model": "local",
-    "max_tokens": 32768,
+    "max_tokens": 0,
     "temperature": 0.7,
 }
 
@@ -346,11 +338,12 @@ class _WizardState:
     def _build_provider_dict(self) -> dict:
         """Construct the provider config dict from the wizard state.
 
-        Local llamacpp uses the historical default. OpenAI and OpenRouter
-        both use the openai_compat client with provider-specific defaults
-        for base_url and model. context_window is intentionally NOT set —
-        the chat detects it from the provider on first use (OpenRouter's
-        /v1/models for OpenRouter, the hardcoded fallback table for OpenAI).
+        Local llamacpp uses `max_tokens=0`, meaning "auto-budget against the
+        detected local context window". OpenAI and OpenRouter both use the
+        openai_compat client with provider-specific defaults for base_url and
+        model. context_window is intentionally NOT set — the chat detects it
+        from the provider on first use (OpenRouter's /v1/models for
+        OpenRouter, the hardcoded fallback table for OpenAI).
         """
         if self.provider_kind == "openrouter":
             return {
@@ -386,7 +379,7 @@ class _WizardState:
         recommended_skills = recommended_skills_for_tools(self.enabled_tools)
         return Profile(
             name=self.name.strip().lower() or "untitled",
-            description=f"created via successor setup",
+            description="created via successor setup",
             theme=self.theme_name,
             display_mode=self.display_mode,
             density=self.density,
@@ -1411,7 +1404,7 @@ class SuccessorSetup(App):
         # How many characters total should be visible by now?
         # Joined length of all lines is the budget; we count chars
         # incrementally and stop when we run out.
-        total_chars = sum(len(l) for l in intro_lines)
+        total_chars = sum(len(line) for line in intro_lines)
         visible_chars = min(total_chars, int(elapsed * WELCOME_TYPEWRITER_CPS))
 
         cursor = 0
@@ -2113,7 +2106,7 @@ class SuccessorSetup(App):
 
         # Field summary in two columns
         if self.state.enabled_tools:
-            tools_label = ", ".join(self.state.enabled_tools)
+            tools_label = ", ".join(tool_label(name) for name in self.state.enabled_tools)
         else:
             tools_label = "(none — chat-only)"
         skills = recommended_skills_for_tools(self.state.enabled_tools)

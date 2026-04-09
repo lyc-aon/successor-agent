@@ -40,7 +40,6 @@ from ..render.cells import (
     ATTR_BOLD,
     ATTR_DIM,
     ATTR_ITALIC,
-    Cell,
     Grid,
     Style,
 )
@@ -53,8 +52,8 @@ from ..render.paint import (
 from ..render.text import lerp_rgb
 from ..render.theme import ThemeVariant, oklch_to_rgb
 from .cards import Risk, ToolCard
-from .prepared_output import OutputLine, OutputSpan, PreparedToolOutput
-from .verbclass import VerbClass, glyph_for_class, verb_class_for
+from .prepared_output import OutputLine, PreparedToolOutput
+from .verbclass import glyph_for_class, verb_class_for
 
 
 # Spinner frames shared with the chat's "thinking" indicator. Imported
@@ -612,7 +611,6 @@ def paint_tool_card_running(
         return 0
 
     # ─── Pulsing border color ───
-    base_border = _border_color(preview_card.risk, theme)
     pulse_t = 0.5 + 0.5 * math.sin(now * 2 * math.pi * _RUNNER_PULSE_HZ)
     pulse_t = pulse_t * 0.55 + 0.20  # bias toward accent_warm
     border = lerp_rgb(theme.bg_input, theme.accent_warm, pulse_t)

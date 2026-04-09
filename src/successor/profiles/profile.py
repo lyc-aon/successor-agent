@@ -209,7 +209,6 @@ class CompactionConfig:
         if not isinstance(data, dict):
             return cls()
 
-        defaults = cls()
         kwargs: dict[str, Any] = {}
 
         # Float fields
@@ -292,7 +291,8 @@ class Profile:
       tools             ordered tuple of enabled tool names. This
                         controls model-visible native tools plus the
                         tool docs injected into the system prompt
-                        (`bash`, `subagent`, `holonet`, `browser`, `vision`)
+                        (`read_file`, `write_file`, `edit_file`,
+                        `bash`, `subagent`, `holonet`, `browser`, `vision`)
       tool_config       per-tool configuration dict. `bash`,
                         `holonet`, `browser`, and `vision` all read
                         this live;

@@ -49,13 +49,14 @@ def cmd_chat(args: argparse.Namespace) -> int:
     first_launch = True
 
     while True:
+        initial_input = ""
         # Intro only on the very first launch in this session — re-entry
         # after the config menu skips it.
         if first_launch and profile.intro_animation:
-            _play_intro_animation(profile.intro_animation)
+            initial_input = _play_intro_animation(profile.intro_animation)
         first_launch = False
 
-        chat = SuccessorChat(profile=profile)
+        chat = SuccessorChat(profile=profile, initial_input=initial_input)
         chat.run()
 
         if getattr(chat, "_pending_action", None) == "config":
@@ -136,7 +137,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return 0
 
 
-def _play_intro_animation(name: str) -> None:
+def _play_intro_animation(name: str) -> str:
     """Play a registered intro animation, blocking until it finishes.
 
     For v0, only "successor" is supported — it plays the bundled
@@ -149,14 +150,14 @@ def _play_intro_animation(name: str) -> None:
     """
     if name != "successor":
         # Future: walk ~/.config/successor/intros/<name>/ for user intros.
-        return
+        return ""
     from .intros import run_successor_intro
 
     try:
-        run_successor_intro()
+        return run_successor_intro()
     except RuntimeError:
         # Frames dir missing on this install — skip silently.
-        return
+        return ""
 
 
 def cmd_skills(args: argparse.Namespace) -> int:
@@ -214,37 +215,45 @@ def cmd_skills(args: argparse.Namespace) -> int:
 
 
 def cmd_tools(args: argparse.Namespace) -> int:
-    """List Python-import tools from the ToolRegistry with source.
-
-    This registry is distinct from the built-in `bash` capability,
-    which is already wired into the chat via `tools_registry.py`.
-    `successor tools` inventories the dynamic Python-import tool
-    loader (`read_file`, future user tools, etc.), which is not yet
-    dispatched by the chat loop.
-    """
+    """List both native chat tools and Python-import plugin tools."""
     from .tools import TOOL_REGISTRY
+    from .tools_registry import AVAILABLE_TOOLS, selectable_tool_names
 
     TOOL_REGISTRY.reload()
-    tools = TOOL_REGISTRY.all()
-    if not tools:
-        print("successor: no tools registered")
-        print("  bash is still available via profiles + the chat tool path.")
-        from .loader import builtin_root, config_dir
+    plugin_tools = TOOL_REGISTRY.all()
 
-        print(f"  builtin: {builtin_root() / 'tools'}")
-        print(f"  user:    {config_dir() / 'tools'}")
-        return 0
-
-    print(f"successor · tools ({len(tools)} registered)")
+    print("successor · tools")
     print()
-    name_w = max(len(t.name) for t in tools)
-    for tool in tools:
-        source = TOOL_REGISTRY.source_of(tool.name) or "?"
-        print(f"  {tool.name:<{name_w}}  {source:>7}")
-        if tool.description:
-            indent = " " * (4 + name_w)
-            print(f"{indent}{tool.description}")
+    native_names = selectable_tool_names()
+    print(f"  native chat tools ({len(native_names)})")
+    print()
+    native_label_w = max(len(AVAILABLE_TOOLS[name].label) for name in native_names)
+    native_name_w = max(len(name) for name in native_names)
+    for name in native_names:
+        descriptor = AVAILABLE_TOOLS[name]
+        print(
+            f"  {descriptor.label:<{native_label_w}}  "
+            f"{name:<{native_name_w}}  native",
+        )
+        if descriptor.description:
+            indent = " " * (4 + native_label_w + 2 + native_name_w + 8)
+            print(f"{indent}{descriptor.description}")
         print()
+
+    print(f"  plugin tools ({len(plugin_tools)})")
+    print()
+    if not plugin_tools:
+        print("  (none)")
+    else:
+        name_w = max(len(t.name) for t in plugin_tools)
+        for tool in plugin_tools:
+            source = TOOL_REGISTRY.source_of(tool.name) or "?"
+            print(f"  {tool.name:<{name_w}}  {source:>7}")
+            if tool.description:
+                indent = " " * (4 + name_w)
+                print(f"{indent}{tool.description}")
+            print()
+    print("  plugin tools are loaded from the Python-import registry and are not dispatched by the native chat loop unless wired in explicitly.")
     return 0
 
 
@@ -295,7 +304,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         intro_frames = successor_intro_frame_paths(intro_dir)
         print(f"  intro       {len(intro_frames)} successor emergence frames")
         if (intro_dir / "hero.txt").exists():
-            print(f"  hero        chat empty-state hero art present")
+            print("  hero        chat empty-state hero art present")
         print(f"  intro_dir   {intro_dir}")
 
     # ─── Active profile + provider connectivity check ───
@@ -325,6 +334,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"    name        {profile.name}")
         provider_cfg = profile.provider or {}
         provider_type = provider_cfg.get("type", "<unset>")
+        provider_type_norm = str(provider_type).strip().lower()
         base_url = provider_cfg.get("base_url", "<unset>")
         model = provider_cfg.get("model", "<unset>")
         api_key = provider_cfg.get("api_key", "")
@@ -357,13 +367,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         except Exception:  # noqa: BLE001
             health_ok = False
         if health_ok:
-            print(f"    status      reachable")
+            print("    status      reachable")
         elif health_ok is False:
-            print(f"    status      UNREACHABLE — is the server running?")
+            print("    status      UNREACHABLE — is the server running?")
         else:
-            print(f"    status      unknown (no health check on this provider)")
+            print("    status      unknown (no health check on this provider)")
 
         # Context window detection
+        ctx: int | None = None
         detect = getattr(client, "detect_context_window", None)
         if callable(detect):
             try:
@@ -376,7 +387,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             elif isinstance(ctx, int) and ctx > 0:
                 print(f"    ctx window  {ctx} tokens (auto-detected)")
             else:
-                print(f"    ctx window  unknown — falls back to 262144 default")
+                print("    ctx window  unknown — falls back to 262144 default")
+
+        raw_max_tokens = provider_cfg.get("max_tokens")
+        gen_budget: int | None = None
+        gen_note: str | None = None
+        if isinstance(raw_max_tokens, int) and raw_max_tokens > 0:
+            gen_budget = raw_max_tokens
+            gen_note = "profile"
+        elif provider_type_norm in {"llamacpp", "llama", "llama.cpp"}:
+            gen_budget = ctx if isinstance(ctx, int) and ctx > 0 else 262144
+            gen_note = "auto"
+        if isinstance(gen_budget, int) and gen_budget > 0:
+            note = f" ({gen_note})" if gen_note else ""
+            print(f"    gen budget  {gen_budget} tokens{note}")
 
         detect_caps = getattr(client, "detect_runtime_capabilities", None)
         if callable(detect_caps):
@@ -399,6 +423,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 )
 
         tools = tuple(profile.tools or ())
+        if tools:
+            from .tools_registry import tool_label
+
+            print("    tools       " + ", ".join(tool_label(name) for name in tools))
         if "holonet" in tools:
             holo_cfg = resolve_holonet_config(profile)
             holo_status = available_provider_status(holo_cfg)

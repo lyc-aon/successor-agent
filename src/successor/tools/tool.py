@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -79,7 +79,7 @@ def tool(
 
     Use:
         @tool(
-            name="read_file",
+            name="demo_read_text",
             description="Read a file from disk and return its contents.",
             schema={
                 "type": "object",
@@ -89,7 +89,7 @@ def tool(
                 "required": ["path"],
             },
         )
-        def read_file(path: str) -> str:
+        def demo_read_text(path: str) -> str:
             return Path(path).read_text(encoding="utf-8")
 
     Returns the Tool object (not the original function). Calling the
@@ -111,7 +111,7 @@ def tool(
 
 
 # Make Tool instances directly callable so user code that does
-#   result = read_file(path="/etc/hostname")
+#   result = demo_read_text(path="/etc/hostname")
 # works after the @tool wrapping. The .func attribute is also exposed
 # for callers that want to introspect the underlying function.
 Tool.__call__ = lambda self, *args, **kwargs: self.func(*args, **kwargs)  # type: ignore[attr-defined]

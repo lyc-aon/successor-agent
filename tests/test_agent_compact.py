@@ -10,17 +10,13 @@ client lets each test control:
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
-from typing import Iterable
 
 import pytest
 
 from successor.agent.compact import (
     CompactionError,
-    DEFAULT_KEEP_RECENT_ROUNDS,
     MIN_ROUNDS_TO_COMPACT,
-    PromptTooLongError,
     compact,
 )
 from successor.agent.log import LogMessage, MessageLog
@@ -323,7 +319,7 @@ def test_compact_re_attaches_recently_seen_files() -> None:
         # Use a real cat to populate attachments
         log.append_to_current_round(LogMessage(
             role="tool", content="",
-            tool_card=dispatch_bash(f"cat tests/test_agent_log.py"),
+            tool_card=dispatch_bash("cat tests/test_agent_log.py"),
         ))
 
     counter = TokenCounter()

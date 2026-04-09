@@ -10,11 +10,10 @@ from __future__ import annotations
 import json
 from html import escape
 from pathlib import Path
-from typing import Any
 
 from .config import load_chat_config
 from .loader import builtin_root
-from .render.theme import Theme, ThemeVariant, all_themes, normalize_theme_name
+from .render.theme import ThemeVariant, all_themes, normalize_theme_name
 
 
 def _rgb_hex(value: int) -> str:

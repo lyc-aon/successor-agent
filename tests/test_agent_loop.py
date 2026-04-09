@@ -7,17 +7,14 @@ transitions deterministically.
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 
-import pytest
 
 from successor.agent.budget import BudgetTracker, ContextBudget
 from successor.agent.events import (
     BashBlockDetected,
     BlockingLimitReached,
     Compacted,
-    CompactionFailed,
     CompactionStarted,
     ContentChunk as ContentChunkEv,
     LoopErrored,

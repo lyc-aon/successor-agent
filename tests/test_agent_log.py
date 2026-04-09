@@ -9,7 +9,7 @@ from successor.agent.log import (
     LogMessage,
     MessageLog,
 )
-from successor.bash import dispatch_bash, preview_bash
+from successor.bash import dispatch_bash
 
 
 # ─── LogMessage ───

@@ -23,7 +23,6 @@ from pathlib import Path
 import pytest
 
 from successor.profiles import (
-    PROFILE_REGISTRY,
     CompactionConfig,
     Profile,
     parse_profile_file,

@@ -87,6 +87,37 @@ def test_changed_file_summary_is_high_signal() -> None:
     assert "updated src/app.js" == update.text
 
 
+def test_native_write_file_summary_is_high_signal() -> None:
+    card = ToolCard(
+        verb="write-file",
+        tool_name="write_file",
+        exit_code=0,
+        tool_arguments={"file_path": "/tmp/demo.txt"},
+        change_artifact=ChangeArtifact(
+            files=(ChangedFile(path="/tmp/demo.txt", status="modified"),),
+        ),
+    )
+
+    update = summarize_tool_completion(card)
+    assert update is not None
+    assert update.important is True
+    assert "updated /tmp/demo.txt" == update.text
+
+
+def test_native_read_file_summary_is_low_signal() -> None:
+    card = ToolCard(
+        verb="read-file",
+        tool_name="read_file",
+        exit_code=0,
+        tool_arguments={"file_path": "README.md"},
+    )
+
+    update = summarize_tool_completion(card)
+    assert update is not None
+    assert update.important is False
+    assert update.text == "read file README.md"
+
+
 def test_failed_changed_file_summary_mentions_partial_failure() -> None:
     card = ToolCard(
         verb="write-file",

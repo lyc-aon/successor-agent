@@ -11,6 +11,73 @@ unit on top of phase 0.
 
 ---
 
+## Unreleased, loop hardening from free-code + Hermes synthesis (2026-04-09)
+
+This pass does not try to copy either reference wholesale.
+
+The synthesis is:
+
+- keep Successor's native file-tool surface and recorded local-runtime posture
+- copy free-code's strongest file-read discipline
+- copy Hermes' strongest anti-loop guard for repeated reads
+- tighten browser verification so "human-emulated" input is actually human-like
+
+### Deterministic references
+
+- `/home/lycaon/dev/archive/free-code-main/src/constants/prompts.ts:291`
+  - dedicated tools over shell when a dedicated path exists
+- `/home/lycaon/dev/archive/free-code-main/src/tools/FileReadTool/prompt.ts:1`
+  - read contract and line-numbered output posture
+- `/home/lycaon/dev/archive/free-code-main/src/tools/FileReadTool/FileReadTool.ts:500`
+  - unchanged-read dedupe instead of re-sending the same file
+- `/home/lycaon/dev/ai/hermes-reference/tests/tools/test_read_loop_detection.py:1`
+  - warn/block shape for consecutive identical read loops
+- `/home/lycaon/dev/ai/hermes-reference/model_tools.py:39`
+  - keep async/tool orchestration durable rather than rebuilding fragile loop state every call
+
+### What landed
+
+- `src/successor/file_tools.py`
+  - unchanged full-file re-reads now collapse to a deterministic stub
+  - added a chat-scoped repeated-read tracker
+  - third identical read with no intervening non-read tool call warns
+  - fourth identical read hard-fails
+- `src/successor/chat.py`
+  - wires the repeated-read tracker into the live native tool loop
+  - resets the tracker on new user submissions and non-read tool calls
+  - generalizes the model guidance for parallel independent tool calls
+  - adds a small execution-discipline layer so the model is reminded to
+    act in the same response, keep going while tool work would
+    materially improve the result, and finish only after verification
+- `src/successor/web/browser.py`
+  - targeted browser `type` no longer uses `fill()`
+  - the tool now focuses the target and types through the keyboard path
+  - added explicit `replace_existing=true` for intentional overwrite flows
+- `src/successor/tools_registry.py`
+  - browser docs + schema now describe human-like typing and explicit overwrite
+- docs
+  - updated `README.md`
+  - updated `CHANGELOG.md`
+  - updated `docs/file-tools.md`
+
+### Verification
+
+- lint:
+  - `ruff check src tests`
+- focused regression slice:
+  - `PYTHONPATH=src pytest -q tests/test_file_tools.py tests/test_browser_tool.py tests/test_cli_doctor.py tests/test_config_menu.py tests/test_wizard.py`
+  - `186 passed in 0.56s`
+- direct human-emulated browser verification against a real model-built local app
+  - confirmed add / drag / reload persistence / delete
+  - confirmed the harness now exposes append-vs-replace edit bugs instead of masking them
+- recorded supervised runtime session
+  - native `write_file` / `edit_file` replaced bash heredoc authoring
+  - bash usage stayed limited to server start and shell verification
+  - no bash file-write attempts appeared in the trace
+- fresh-config doctor check:
+  - `SUCCESSOR_CONFIG_DIR=$(mktemp -d) PYTHONPATH=src python3 -m successor.cli doctor`
+  - reports default tools as `read, write, edit, bash`
+
 ## v0.1.24, frontend-backed recordings manager + shared reviewer app (2026-04-09)
 
 The old bundle reviewer kept failing for the same reason: it was still a
@@ -4640,3 +4707,32 @@ get oriented faster.
 Tests: 864 → 881 (17 new for the empty-state painter + the
 intro art loader's 4-tier resolution + `_is_empty_chat` predicate
 edge cases).
+
+## Native File Tools Default Path (2026-04-09)
+
+Successor's default authoring path is now native file IO instead of
+shell redirection.
+
+### What changed
+
+- Added native `read_file`, `write_file`, and `edit_file` tools to the
+  built-in tool registry and enabled them by default alongside `bash`.
+- Added chat-scoped file read-state tracking so existing-file writes and
+  edits require a prior full read and reject stale content.
+- Implemented `read_file` with deterministic line-numbered output plus
+  optional `offset` / `limit`.
+- Implemented `write_file` as full-file replacement with diff-backed
+  mutation cards.
+- Implemented `edit_file` as exact-string replacement with ambiguous
+  match failures, stale-file checks, and preserved line endings.
+- Added first-class native tool cards, progress summaries, trace events,
+  and playback-visible artifacts for the new file tools.
+- Updated wizard, config, intro, builtin profiles, `successor doctor`,
+  and `successor tools` so the user-visible tool surface is consistent.
+- Renamed the old Python-import example tool to `demo_read_text` so the
+  native `read_file` name has one clear owner in the project.
+
+### Docs
+
+- Added `docs/file-tools.md`
+- Updated README quick-start, command descriptions, and tool-surface docs

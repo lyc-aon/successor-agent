@@ -49,7 +49,7 @@ means teaching the painter how to color them — kept small on purpose.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .cards import ToolCard
 from .diff_artifact import ChangeArtifact, ChangedFile, parse_unified_diff

@@ -4,19 +4,20 @@ Phase 6 ships the SCAFFOLD only:
   - Tool dataclass + @tool decorator
   - ToolRegistry that imports Python files and harvests decorated funcs
   - Gated user-tool loading (default off, audit to stderr when on)
-  - `successor tools list` inventory command
-  - One example built-in tool (read_file) so the loader has something
-    to load and you can see what the API looks like
+  - `successor tools` inventory command
+  - One example built-in plugin tool (`demo_read_text`) so the loader
+    has something to load and you can see what the API looks like
 
 What phase 6 deliberately does NOT do:
   - Dispatch these Python-import tools from the chat loop yet
   - Implement any dispatch / execution / sandboxing
   - Register the example tool with any model
 
-The built-in `bash` capability is separate and already wired through
-`tools_registry.py`. This module is only about the Python-import tool
-loader. Those tools are visible via `successor tools list` but still
-inert at runtime.
+The native chat tool surface (`read_file`, `write_file`, `edit_file`,
+`bash`, etc.) is separate and already wired through `tools_registry.py`
+and `chat.py`. This module is only about the Python-import plugin tool
+loader. Those tools are visible via `successor tools` but still inert
+at runtime unless explicitly integrated.
 
 Public surface:
     Tool             dataclass: name, description, schema, callable, source_path

@@ -256,9 +256,12 @@ a {
 .status-chip {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  min-height: 22px;
   padding: 4px 8px;
   border: 1px solid currentColor;
   font-size: 11px;
+  line-height: 1;
   text-transform: uppercase;
   letter-spacing: 0.12em;
 }
@@ -340,6 +343,10 @@ a {
 }
 
 .inspector-stats div {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-width: 0;
   padding-top: 10px;
   border-top: 1px solid color-mix(in oklab, var(--theme-fg) 10%, transparent);
 }
@@ -400,6 +407,8 @@ a {
 }
 
 .action-secondary {
+  border-color: color-mix(in oklab, var(--theme-fg) 18%, transparent);
+  background: color-mix(in oklab, var(--theme-bg) 99%, white);
   color: var(--theme-fg);
 }
 
@@ -615,12 +624,14 @@ a {
   color: color-mix(in oklab, var(--theme-fg-dim) 92%, var(--theme-fg));
   font-size: clamp(10px, calc(13px * var(--desktop-scale)), 13px);
   line-height: 1.28;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .turn-row.is-active {
   color: var(--theme-accent);
   background: color-mix(in oklab, var(--theme-accent) 7%, var(--theme-bg));
-  box-shadow: inset 2px 0 0 color-mix(in oklab, var(--theme-accent) 72%, black);
+  box-shadow: inset 4px 0 0 color-mix(in oklab, var(--theme-accent) 72%, black);
 }
 
 .workspace {
@@ -903,59 +914,68 @@ a {
   overflow: auto;
   display: grid;
   align-content: start;
-  grid-template-columns: repeat(auto-fit, minmax(clamp(148px, 14vw, 220px), 1fr));
-  gap: calc(5px * var(--desktop-scale));
+  grid-auto-rows: min-content;
+  gap: 0;
   padding:
-    calc(7px * var(--desktop-scale))
+    0
     calc(10px * var(--desktop-scale))
     calc(10px * var(--desktop-scale));
 }
 
 .timeline-card {
   display: grid;
-  gap: calc(4px * var(--desktop-scale));
+  grid-template-columns:
+    minmax(0, clamp(124px, calc(172px * var(--desktop-scale)), 172px))
+    minmax(0, clamp(64px, calc(92px * var(--desktop-scale)), 92px))
+    minmax(0, 1fr);
+  align-items: start;
+  column-gap: calc(10px * var(--desktop-scale));
+  row-gap: 0;
   padding:
     calc(6px * var(--desktop-scale))
-    calc(7px * var(--desktop-scale));
-  border: 1px solid color-mix(in oklab, var(--theme-fg) 12%, transparent);
+    0;
+  border: none;
+  border-bottom: 1px solid color-mix(in oklab, var(--theme-fg) 10%, transparent);
   background: transparent;
   color: var(--theme-fg);
   text-align: left;
 }
 
 .timeline-card-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  align-items: baseline;
+  display: contents;
 }
 
 .timeline-card-head strong {
   display: block;
+  min-width: 0;
   font-size: clamp(9px, calc(12px * var(--desktop-scale)), 12px);
   letter-spacing: 0.12em;
   text-transform: uppercase;
 }
 
 .timeline-card-head span {
+  display: block;
+  min-width: 0;
   color: color-mix(in oklab, var(--theme-fg-subtle) 90%, var(--theme-fg));
   font-family: "SFMono-Regular", "Berkeley Mono", Consolas, monospace;
   font-size: clamp(8px, calc(11px * var(--desktop-scale)), 11px);
 }
 
 .timeline-card-copy {
-  display: -webkit-box;
+  min-width: 0;
+  display: block;
   overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 1;
   font-size: clamp(9px, calc(12px * var(--desktop-scale)), 12px);
   line-height: 1.22;
+  color: color-mix(in oklab, var(--theme-fg-dim) 92%, var(--theme-fg));
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .timeline-card.is-active {
   background: color-mix(in oklab, var(--theme-accent) 8%, var(--theme-bg));
   border-color: color-mix(in oklab, var(--theme-accent) 48%, transparent);
-  box-shadow: inset 2px 0 0 color-mix(in oklab, var(--theme-accent) 72%, black);
+  box-shadow: inset 4px 0 0 color-mix(in oklab, var(--theme-accent) 72%, black);
 }
 
 .timeline-card.tone-accent {

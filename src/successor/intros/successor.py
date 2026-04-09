@@ -129,12 +129,18 @@ class SuccessorIntro(App):
         self._emerge_total_s = self._n_transitions * EMERGE_PER_FRAME_S
         self._hold_final_s = HOLD_FINAL_S
         self._total_s = self._emerge_total_s + self._hold_final_s
+        # Only preserve a leading slash across the intro->chat handoff.
+        # Replaying arbitrary skip keys would leak stray input into the
+        # first prompt, so keep this intentionally narrow.
+        self._forward_input: str = ""
 
     # ─── Input ───
 
     def on_key(self, byte: int) -> None:
         # Any key skips the intro. Ctrl+C is also caught by the App
         # base class's quit_keys for consistency with everything else.
+        if byte == ord("/"):
+            self._forward_input = "/"
         self.stop()
 
     # ─── Per-frame state resolution ───
@@ -248,7 +254,7 @@ class SuccessorIntro(App):
 # ─── Public entry ───
 
 
-def run_successor_intro(*, terminal: Terminal | None = None) -> None:
+def run_successor_intro(*, terminal: Terminal | None = None) -> str:
     """Run the intro to completion. Blocking. Returns when done.
 
     Use the `terminal` argument to share a Terminal context with the
@@ -256,3 +262,4 @@ def run_successor_intro(*, terminal: Terminal | None = None) -> None:
     """
     intro = SuccessorIntro(terminal=terminal)
     intro.run()
+    return intro._forward_input

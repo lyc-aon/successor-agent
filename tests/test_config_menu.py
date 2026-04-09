@@ -28,7 +28,6 @@ from successor.wizard.config import (
     SuccessorConfig,
     _SETTINGS_TREE,
     _profile_to_json_dict,
-    run_config_menu,
 )
 from successor.wizard.prompt_editor import PromptEditor
 
@@ -675,6 +674,21 @@ def test_number_int_field_commits_int(temp_config_dir: Path) -> None:
     value = menu._current_profile().provider["max_tokens"]
     assert isinstance(value, int)
     assert value == 65536
+
+
+def test_provider_max_tokens_zero_displays_auto(temp_config_dir: Path) -> None:
+    menu = SuccessorConfig()
+    menu._focus = Focus.SETTINGS
+    menu._settings_cursor = _field_idx("provider_max_tokens")
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+    while menu._inline_text_edit.cursor > 0:
+        menu._handle_key(KeyEvent(key=Key.BACKSPACE))
+    menu._handle_key(KeyEvent(char="0"))
+    menu._handle_key(KeyEvent(key=Key.ENTER))
+
+    field = _SETTINGS_TREE[_field_idx("provider_max_tokens")]
+    display = menu._profile_value_for_field(menu._current_profile(), field)
+    assert display == "auto (ctx window)"
 
 
 def test_number_field_invalid_buffer_warns(temp_config_dir: Path) -> None:
@@ -1613,6 +1627,9 @@ def test_toggling_tools_off_snaps_cursor_off_bash_rows(temp_config_dir: Path) ->
     # Save cursor state before opening tools overlay
     menu._settings_cursor = tools_idx
     menu._begin_edit()
+    assert menu._tools_edit is not None
+    bash_cursor = menu._multi_select_names(_SETTINGS_TREE[tools_idx]).index("bash")
+    menu._tools_edit.cursor = bash_cursor
     # The space toggle lives in _handle_tools_edit_key
     menu._handle_tools_edit_key(KeyEvent(char=" "))  # toggle bash off
     menu._handle_tools_edit_key(KeyEvent(key=Key.ENTER))  # commit

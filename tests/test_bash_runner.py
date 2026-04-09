@@ -14,14 +14,11 @@ from __future__ import annotations
 
 import time
 
-import pytest
 
 from successor.bash.runner import (
     BashRunner,
     OutputLine,
     RunnerCompleted,
-    RunnerErrored,
-    RunnerStarted,
 )
 
 

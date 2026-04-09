@@ -494,14 +494,17 @@ def _execute_browser_action(
             text = str(arguments.get("text", "") or "")
             if _has_target(arguments):
                 locator = _resolve_type_locator(page, arguments)
-                locator = _fill_locator_with_fallback(
+                locator = _prepare_locator_for_typing(
                     page,
                     arguments,
                     locator=locator,
-                    text=text,
+                    replace_existing=bool(arguments.get("replace_existing", False)),
                 )
-                if bool(arguments.get("press_enter", False)):
-                    locator.press("Enter")
+                _type_into_focused_target(
+                    page,
+                    text,
+                    press_enter=bool(arguments.get("press_enter", False)),
+                )
                 prefix = "Typed into target."
             else:
                 _type_into_focused_target(
@@ -936,21 +939,23 @@ def _resolve_type_locator(page: Any, arguments: dict[str, Any]):
     return _resolve_locator(page, retry_args, prefer_inputs=True)
 
 
-def _fill_locator_with_fallback(
+def _prepare_locator_for_typing(
     page: Any,
     arguments: dict[str, Any],
     *,
     locator: Any,
-    text: str,
+    replace_existing: bool,
 ):
-    """Fill a locator, retrying once through auto input resolution.
+    """Focus a locator for typing, retrying once through auto resolution.
 
     This keeps the browser tool tolerant of slightly wrong human-target
-    hints while still respecting explicit CSS selectors.
+    hints while still respecting explicit CSS selectors. Unlike `fill()`,
+    this preserves human-like typing semantics so inline-edit bugs remain
+    visible during verification.
     """
     kind = str(arguments.get("target_kind", "auto") or "auto").strip().lower()
     try:
-        locator.fill(text)
+        _focus_locator_for_typing(page, locator, replace_existing=replace_existing)
         return locator
     except Exception:
         if kind not in {"label", "placeholder", "text"}:
@@ -960,8 +965,27 @@ def _fill_locator_with_fallback(
         retry_locator = _resolve_locator(page, retry_args, prefer_inputs=True)
         if retry_locator is locator:
             raise
-        retry_locator.fill(text)
+        _focus_locator_for_typing(
+            page,
+            retry_locator,
+            replace_existing=replace_existing,
+        )
         return retry_locator
+
+
+def _focus_locator_for_typing(page: Any, locator: Any, *, replace_existing: bool) -> None:
+    try:
+        locator.click()
+    except Exception:
+        focus = getattr(locator, "focus", None)
+        if callable(focus):
+            focus()
+        else:
+            raise
+    if not _active_element_is_editable(page):
+        raise RuntimeError("target is not an editable control")
+    if replace_existing and not _select_all_in_active_editable(page):
+        raise RuntimeError("could not select the focused editable content for replacement")
 
 
 def _active_element_is_editable(page: Any) -> bool:
@@ -999,6 +1023,56 @@ def _type_into_focused_target(page: Any, text: str, *, press_enter: bool) -> Non
     page.keyboard.type(text)
     if press_enter:
         page.keyboard.press("Enter")
+
+
+def _select_all_in_active_editable(page: Any) -> bool:
+    try:
+        return bool(page.evaluate(
+            """() => {
+                const el = document.activeElement;
+                if (!el) return false;
+                if (el.isContentEditable) {
+                    const selection = window.getSelection();
+                    if (!selection) return false;
+                    const range = document.createRange();
+                    range.selectNodeContents(el);
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    return true;
+                }
+                const tag = (el.tagName || "").toLowerCase();
+                if (tag === "textarea") {
+                    el.focus();
+                    el.select();
+                    return true;
+                }
+                if (tag === "input") {
+                    const type = (el.getAttribute("type") || "text").toLowerCase();
+                    if ([
+                        "button",
+                        "checkbox",
+                        "color",
+                        "file",
+                        "hidden",
+                        "image",
+                        "radio",
+                        "range",
+                        "reset",
+                        "submit",
+                    ].includes(type)) {
+                        return false;
+                    }
+                    el.focus();
+                    if (typeof el.select === "function") {
+                        el.select();
+                    }
+                    return true;
+                }
+                return false;
+            }"""
+        ))
+    except Exception:
+        return False
 
 
 def _clear_page_storage(page: Any, scope: str) -> None:

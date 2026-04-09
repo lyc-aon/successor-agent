@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 
 from successor.profiles import (
     PROFILE_REGISTRY,
@@ -70,6 +69,14 @@ def test_chat_uses_explicit_profile_arg(temp_config_dir: Path) -> None:
     assert chat.system_prompt == "custom prompt"
     assert chat.display_mode == "light"
     assert chat.density.name == "compact"
+
+
+def test_chat_accepts_initial_input_prefill(temp_config_dir: Path) -> None:
+    """A caller can prefill the first prompt buffer before the chat starts."""
+    from successor.chat import SuccessorChat
+
+    chat = SuccessorChat(profile=Profile(name="prefill-test"), initial_input="/")
+    assert chat.input_buffer == "/"
 
 
 def test_saved_config_overrides_profile_defaults(temp_config_dir: Path) -> None:

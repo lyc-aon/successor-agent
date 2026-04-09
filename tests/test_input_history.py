@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from successor.chat import INPUT_HISTORY_MAX, SuccessorChat
 from successor.input.keys import Key, KeyEvent

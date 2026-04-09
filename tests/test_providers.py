@@ -129,6 +129,18 @@ def test_factory_translates_max_tokens_key() -> None:
     assert provider.default_max_tokens == 65536
 
 
+def test_llamacpp_auto_max_tokens_uses_detected_context_window(monkeypatch) -> None:
+    client = LlamaCppClient(default_max_tokens=0)
+    monkeypatch.setattr(client, "detect_context_window", lambda: 131072)
+    assert client.effective_max_tokens() == 131072
+
+
+def test_llamacpp_auto_max_tokens_falls_back_when_detection_misses(monkeypatch) -> None:
+    client = LlamaCppClient(default_max_tokens=0)
+    monkeypatch.setattr(client, "detect_context_window", lambda: None)
+    assert client.effective_max_tokens() == 262144
+
+
 def test_factory_translates_temperature_key() -> None:
     provider = make_provider({
         "type": "llamacpp",

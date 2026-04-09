@@ -26,7 +26,6 @@ import json
 import stat
 from pathlib import Path
 
-import pytest
 
 from successor.input.keys import Key, KeyEvent
 from successor.profiles import PROFILE_REGISTRY, get_profile
@@ -37,8 +36,6 @@ from successor.wizard.setup import (
     Step,
     _WizardState,
     _DENSITY_OPTIONS,
-    _MODE_OPTIONS,
-    _INTRO_OPTIONS,
 )
 
 
@@ -248,7 +245,6 @@ def test_handle_theme_cycles_with_arrows(temp_config_dir: Path) -> None:
     THEME_REGISTRY.reload()
     wizard = SuccessorSetup()
     wizard._enter_step(Step.THEME)
-    initial = wizard.state.theme_name
     wizard._handle_theme(KeyEvent(key=Key.DOWN))
     # After arrow, theme_name should reflect the new cursor position
     # (may be same name if only one theme is loaded — check regardless)
@@ -364,7 +360,7 @@ def test_full_save_flow_writes_json_file(temp_config_dir: Path) -> None:
     wizard._handle_provider(KeyEvent(key=Key.RIGHT))
     assert wizard.current_step == Step.TOOLS
 
-    # Accept the default tool selection (bash enabled)
+    # Accept the default tool selection (native file tools + bash enabled)
     wizard._handle_tools(KeyEvent(key=Key.ENTER))
     assert wizard.current_step == Step.COMPACTION
 
@@ -388,7 +384,7 @@ def test_full_save_flow_writes_json_file(temp_config_dir: Path) -> None:
     assert payload["name"] == "smoketest"
     assert payload["theme"] == "steel"
     assert payload["display_mode"] == "dark"
-    assert payload["tools"] == ["bash"]
+    assert payload["tools"] == ["read_file", "write_file", "edit_file", "bash"]
     # Compaction defaults round-trip
     assert "compaction" in payload
     assert payload["compaction"]["enabled"] is True
@@ -498,16 +494,19 @@ def test_snapshot_theme_step_shows_live_preview(temp_config_dir: Path) -> None:
 
 def test_snapshot_tools_step_shows_checkboxes(temp_config_dir: Path) -> None:
     """The tools step paints a checklist of registered tools, with
-    bash enabled by default."""
+    native file tools and bash enabled by default."""
     g = wizard_demo_snapshot(
         rows=30, cols=100, step="tools", name="tools-prof",
     )
     plain = render_grid_to_plain(g)
     assert "enable tools" in plain
+    assert "read" in plain
+    assert "write" in plain
+    assert "edit" in plain
     assert "bash" in plain
     assert "subagent" in plain
     assert "[✓]" in plain  # default: bash checked
-    assert "1 tool enabled" in plain
+    assert "4 tools enabled" in plain
 
 
 def test_snapshot_tools_step_chat_only_mode(temp_config_dir: Path) -> None:
@@ -527,16 +526,16 @@ def test_handle_tools_toggle_flow(temp_config_dir: Path) -> None:
     """Space toggles the cursor'd tool; enter advances to review."""
     wizard = SuccessorSetup()
     wizard._enter_step(Step.TOOLS)
-    # Default state is bash enabled
-    assert "bash" in wizard.state.enabled_tools
+    # Default state includes native file tools + bash. Cursor starts on read_file.
+    assert "read_file" in wizard.state.enabled_tools
 
-    # Toggle bash off
+    # Toggle read_file off
     wizard._handle_tools(KeyEvent(char=" "))
-    assert "bash" not in wizard.state.enabled_tools
+    assert "read_file" not in wizard.state.enabled_tools
 
-    # Toggle bash back on
+    # Toggle read_file back on
     wizard._handle_tools(KeyEvent(char=" "))
-    assert "bash" in wizard.state.enabled_tools
+    assert "read_file" in wizard.state.enabled_tools
 
     # Enter advances to COMPACTION (then REVIEW after one more advance)
     wizard._handle_tools(KeyEvent(key=Key.ENTER))

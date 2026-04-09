@@ -242,7 +242,7 @@ def _build_summary_prompt(
             "[harness instruction — please follow exactly, do not "
             "address me as the user, do not begin with a greeting]\n\n"
             + instructions
-            + f"\n\nProduce a summary of every turn of this conversation "
+            + "\n\nProduce a summary of every turn of this conversation "
             + f"EXCEPT {keep_phrase}, which the harness is preserving "
             + "verbatim. Begin the summary directly — no preface, "
             + "no \"Here is the summary\", no first-person address."

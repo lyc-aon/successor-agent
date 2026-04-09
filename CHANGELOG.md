@@ -3,6 +3,46 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
+## Unreleased
+
+Hardened the core local-model loop in the two places the recorded E2E
+runs exposed most clearly: repeated file re-reads and browser input
+realism.
+
+### What changed
+
+- `read_file` now reuses the earlier result when the model asks for the
+  same unchanged full-file read again instead of resending duplicate
+  content into context
+- identical `read_file` calls with no intervening non-read tool call
+  now warn on the third repeat and hard-fail on the fourth, which makes
+  read loops visible instead of silently burning turns
+- browser `type` now uses human-like keyboard typing even when a target
+  is specified, so inline-edit and append-vs-replace bugs remain
+  observable during verification
+- added explicit browser `replace_existing=true` support for the cases
+  where the model genuinely intends to overwrite a populated field
+- added a small execution-discipline prompt layer so the model is told
+  to act in the same response, avoid stopping early when more tool work
+  would materially improve the result, and finish only after
+  verification
+- system-prompt tool guidance now tells the model to use parallel tool
+  calls for independent read-only inspection and research work when the
+  provider supports parallel tool calls
+
+### Verification
+
+- `ruff check src tests`
+- focused regression slice:
+  `PYTHONPATH=src pytest -q tests/test_file_tools.py tests/test_browser_tool.py tests/test_cli_doctor.py tests/test_config_menu.py tests/test_wizard.py`
+- direct manual browser verification against a real model-built local
+  app to confirm the harness now exposes append-vs-replace bugs instead
+  of masking them
+- supervised recorded runtime session showing native file tools
+  replacing bash heredoc authoring
+- fresh-config `successor doctor` check confirming new installs expose
+  `read`, `write`, `edit`, and `bash` by default
+
 ## v0.1.24 — 2026-04-09
 
 Rebuilt the recordings surface as a real frontend-backed recordings

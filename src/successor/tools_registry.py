@@ -97,31 +97,26 @@ normal and means it worked.
 ### How to invoke
 
 Put every command you want to run in a fenced bash block. The
-block may contain a single command, a multi-command script, a
-heredoc file write, or any valid bash — the whole block is handed
-to `bash` as one script.
+block may contain a single command or a multi-command script — the
+whole block is handed to `bash` as one script.
 
 Example — read a file:
 
     ```bash
-    cat README.md
+    git status
     ```
 
-Example — write a file with a heredoc:
+Example — run tests:
 
     ```bash
-    cat > index.html <<'EOF'
-    <!DOCTYPE html>
-    <html>...</html>
-    EOF
+    pytest tests/test_chat_bash.py
     ```
 
 Example — a multi-step script:
 
     ```bash
-    mkdir -p src/lib
-    touch src/lib/__init__.py
-    echo "done"
+    npm install
+    npm run build
     ```
 
 ### Reading tool responses
@@ -161,9 +156,10 @@ commands WILL run. Mutating commands (`mkdir`, `touch`, `rm`,
 `git add`, etc.) run by default unless the profile is in
 read-only mode.
 
-Use bash freely for read-only operations. For mutating operations
-think briefly about whether the user actually wants the change
-before invoking.
+Use bash for shell and system work: builds, tests, package managers,
+git, process inspection, servers, and one-off system commands.
+Prefer the native `read_file`, `write_file`, and `edit_file` tools
+for normal file IO.
 """
 
 _BASH_TOOL_SCHEMA: dict[str, Any] = {
@@ -171,11 +167,10 @@ _BASH_TOOL_SCHEMA: dict[str, Any] = {
     "function": {
         "name": "bash",
         "description": (
-            "Execute a shell command (or multi-line script / heredoc) "
+            "Execute a shell command or multi-line script "
             "in the user's working directory and return its stdout, "
-            "stderr, and exit code. Successful commands may produce "
-            "no stdout — that is normal for writes, redirects, mkdir, "
-            "touch, chmod, and most mutating commands."
+            "stderr, and exit code. Prefer read_file, write_file, and "
+            "edit_file for normal file IO."
         ),
         "parameters": {
             "type": "object",
@@ -184,7 +179,7 @@ _BASH_TOOL_SCHEMA: dict[str, Any] = {
                     "type": "string",
                     "description": (
                         "The bash command to execute. Pipes, redirects, "
-                        "substitutions, heredocs, and multi-step scripts "
+                        "substitutions, and multi-step scripts "
                         "all work because the harness runs the string with "
                         "shell=True."
                     ),
@@ -194,6 +189,161 @@ _BASH_TOOL_SCHEMA: dict[str, Any] = {
         },
     },
 }
+
+READ_FILE_DOC = """\
+### read_file — read a text file from disk
+
+Use `read_file` to inspect local text files directly instead of
+shelling out to `cat`, `head`, `tail`, or `sed`.
+
+Call it with:
+
+- `file_path` — absolute path preferred
+- `offset` — optional starting line number (1-based)
+- `limit` — optional number of lines to return
+
+Results come back with deterministic line numbers so you can quote
+or patch exact regions later.
+"""
+
+WRITE_FILE_DOC = """\
+### write_file — create or fully replace a text file
+
+Use `write_file` to create new files or replace an existing file's
+entire contents in one call.
+
+Call it with:
+
+- `file_path` — absolute path preferred
+- `content` — full file contents to write
+
+Existing files must be fully read first. If the file changed since
+you read it, the tool refuses the write and tells you to read again.
+"""
+
+EDIT_FILE_DOC = """\
+### edit_file — make an exact text replacement in a file
+
+Use `edit_file` for targeted changes to an existing file instead of
+shell text surgery with `sed`, `awk`, or inline Python.
+
+Call it with:
+
+- `file_path`
+- `old_string`
+- `new_string`
+- `replace_all` — optional; false by default
+
+The tool requires a prior full read, refuses stale files, and fails
+when `old_string` matches more than one location unless
+`replace_all=true`.
+"""
+
+_READ_FILE_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "read_file",
+        "description": (
+            "Read a local UTF-8 text file with deterministic line numbers. "
+            "Prefer this over cat, head, tail, or sed for file inspection."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "Absolute path to the file to read.",
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional starting line number (1-based).",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional maximum number of lines to return.",
+                },
+            },
+            "required": ["file_path"],
+        },
+    },
+}
+
+_WRITE_FILE_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "write_file",
+        "description": (
+            "Create a new UTF-8 text file or fully replace an existing one. "
+            "Prefer this over heredocs, echo redirection, or shell file writes."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "Absolute path to the file to write.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Full file contents to write.",
+                },
+            },
+            "required": ["file_path", "content"],
+        },
+    },
+}
+
+_EDIT_FILE_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "edit_file",
+        "description": (
+            "Edit an existing UTF-8 text file by replacing one exact string "
+            "with another. Prefer this over sed, awk, perl, or inline Python "
+            "for targeted file edits."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "Absolute path to the file to edit.",
+                },
+                "old_string": {
+                    "type": "string",
+                    "description": "The exact text to replace.",
+                },
+                "new_string": {
+                    "type": "string",
+                    "description": "The replacement text.",
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": (
+                        "Replace every exact match instead of requiring a unique match."
+                    ),
+                },
+            },
+            "required": ["file_path", "old_string", "new_string"],
+        },
+    },
+}
+
+FILE_TOOLS_MODEL_GUIDANCE = """\
+## Working with local files
+
+Use native file tools for file work and reserve `bash` for shell work.
+
+- Use `read_file` instead of `cat`, `head`, `tail`, or `sed` when you need file contents.
+- Use `edit_file` instead of `sed`, `awk`, `perl`, or inline Python when you need to change an existing file.
+- Use `write_file` instead of heredocs, `echo >`, or shell redirection when you need to create a file or replace one completely.
+- Existing files must be read before you edit or overwrite them.
+- If you already read a file and nothing external changed, do not re-read the same full file again unless you genuinely need fresh context.
+- Prefer absolute paths in file-tool calls.
+- Use `offset` and `limit` on `read_file` when you only need a specific region of a long file.
+"""
 
 SUBAGENT_DOC = """\
 ### subagent — fork a background worker
@@ -594,7 +744,7 @@ the current chat.
 - `open` — navigate to a URL
 - `inspect` — list visible controls and stable selector hints for the current page
 - `click` — click a visible target
-- `type` — fill an input or textarea, or type into the focused field
+- `type` — type into an input, textarea, contenteditable field, or the currently focused editable target
 - `press` — send a keyboard key like `Enter` or `Escape`
 - `select` — choose an option in a `<select>` or similar form control
 - `storage_state` — inspect local/session storage for the current page
@@ -641,6 +791,10 @@ Example — commit an inline edit in the focused field:
 
     {"action": "type", "text": "Keyboard navigation bug", "press_enter": true}
 
+Example — replace an existing field value before typing:
+
+    {"action": "type", "target": "Issue title", "target_kind": "label", "text": "Keyboard navigation bug", "replace_existing": true}
+
 Example — scope a repeated button label to one row:
 
     {"action": "click", "target": "li:has-text(\"Keyboard navigation bug\") button.status-btn", "target_kind": "selector"}
@@ -666,6 +820,9 @@ Example — scope a repeated button label to one row:
 - For inline-edit or keyboard-driven flows, use `press` or
   `press_enter` instead of pretending the change is verified while the
   input is merely focused.
+- `type` behaves like real keyboard typing. If the target already has a
+  value, your text will append unless the app selects the text for you
+  or you pass `replace_existing=true`.
 """
 
 BROWSER_MODEL_GUIDANCE = """\
@@ -689,7 +846,9 @@ When an input is already focused, `type` may omit `target`. If the next
 step is simply Enter, prefer one `type` call with `press_enter=true`
 instead of a separate `press`. Use `press` mainly for keys like
 `Escape` or for keyboard-only flows that are not just "type, then
-Enter". When a button label is repeated, prefer a scoped selector such as
+Enter". `type` is human-like: it does not silently clear an existing
+value unless the page already selected the text or you explicitly set
+`replace_existing=true`. When a button label is repeated, prefer a scoped selector such as
 `li:has-text("Issue title") button.status-btn`.
 
 For local fixtures or pages you just built, prefer stable ids/classes
@@ -766,6 +925,10 @@ _BROWSER_TOOL_SCHEMA: dict[str, Any] = {
                 "press_enter": {
                     "type": "boolean",
                     "description": "Press Enter after typing. Useful for inline-edit save and form submit flows.",
+                },
+                "replace_existing": {
+                    "type": "boolean",
+                    "description": "Select the focused editable target's existing contents before typing so the new text replaces the current value instead of appending.",
                 },
                 "path": {
                     "type": "string",
@@ -865,10 +1028,34 @@ _VISION_TOOL_SCHEMA: dict[str, Any] = {
 
 
 AVAILABLE_TOOLS: Mapping[str, ToolDescriptor] = {
+    "read_file": ToolDescriptor(
+        name="read_file",
+        label="read",
+        description="Read local UTF-8 text files with deterministic line numbers.",
+        default_enabled=True,
+        schema=_READ_FILE_TOOL_SCHEMA,
+        system_prompt_doc=READ_FILE_DOC,
+    ),
+    "write_file": ToolDescriptor(
+        name="write_file",
+        label="write",
+        description="Create new files or fully replace existing text files.",
+        default_enabled=True,
+        schema=_WRITE_FILE_TOOL_SCHEMA,
+        system_prompt_doc=WRITE_FILE_DOC,
+    ),
+    "edit_file": ToolDescriptor(
+        name="edit_file",
+        label="edit",
+        description="Make exact string replacements in existing text files.",
+        default_enabled=True,
+        schema=_EDIT_FILE_TOOL_SCHEMA,
+        system_prompt_doc=EDIT_FILE_DOC,
+    ),
     "bash": ToolDescriptor(
         name="bash",
         label="bash",
-        description="Run shell commands. Dangerous commands refused automatically.",
+        description="Run shell and system commands. Prefer native file tools for file IO.",
         default_enabled=True,
         schema=_BASH_TOOL_SCHEMA,
         system_prompt_doc=BASH_DOC,
@@ -969,6 +1156,14 @@ def selectable_tool_names() -> tuple[str, ...]:
     )
 
 
+def tool_label(name: str) -> str:
+    """Human-facing short label for a tool name."""
+    descriptor = AVAILABLE_TOOLS.get(name)
+    if descriptor is None:
+        return name
+    return descriptor.label
+
+
 def build_native_tool_schemas(
     enabled_tools: list[str] | tuple[str, ...],
 ) -> list[dict[str, Any]]:
@@ -991,6 +1186,8 @@ def build_model_tool_guidance(
 ) -> str:
     """Concatenate extra system-prompt guidance for enabled tools."""
     sections: list[str] = []
+    if any(name in {"read_file", "write_file", "edit_file"} for name in enabled_tools):
+        sections.append(FILE_TOOLS_MODEL_GUIDANCE.strip())
     for name in enabled_tools:
         descriptor = AVAILABLE_TOOLS.get(name)
         if descriptor is None or not descriptor.model_guidance:
@@ -1030,9 +1227,9 @@ def build_system_prompt_tools_section(
     sections.append("")
     sections.append(
         "You have access to the following tools. Use them when they "
-        "would help answer the user's question. The harness parses "
-        "your fenced code blocks, executes them, and feeds the "
-        "results back to you in subsequent turns."
+        "would help answer the user's question. Native tool calls "
+        "execute directly and their results come back to you in "
+        "subsequent turns."
     )
     sections.append("")
 

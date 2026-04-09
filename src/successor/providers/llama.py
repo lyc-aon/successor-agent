@@ -46,6 +46,13 @@ from dataclasses import dataclass
 from typing import Iterable
 
 
+# `0` means "auto-budget against the detected local context window".
+# This keeps local llama.cpp sessions from inheriting an arbitrary old
+# generation ceiling when the server was launched with a much larger `-c`.
+AUTO_MAX_TOKENS = 0
+AUTO_MAX_TOKENS_FALLBACK = 262_144
+
+
 # ─── Event types ───
 
 
@@ -479,7 +486,7 @@ class LlamaCppClient:
         *,
         base_url: str = "http://localhost:8080",
         model: str = "local",
-        default_max_tokens: int = 32768,
+        default_max_tokens: int = AUTO_MAX_TOKENS,
         default_temperature: float = 0.7,
         default_timeout: float = 600.0,
         connect_timeout: float = 5.0,
@@ -502,6 +509,20 @@ class LlamaCppClient:
         if self.base_url.endswith("/v1") or "/v1/" in self.base_url:
             return self.base_url
         return f"{self.base_url}/v1"
+
+    def effective_max_tokens(self, requested_max_tokens: int | None = None) -> int:
+        """Resolve the actual generation ceiling for this request."""
+        resolved = (
+            requested_max_tokens
+            if requested_max_tokens is not None
+            else self.default_max_tokens
+        )
+        if isinstance(resolved, int) and resolved > 0:
+            return resolved
+        detected = self.detect_context_window()
+        if isinstance(detected, int) and detected > 0:
+            return detected
+        return AUTO_MAX_TOKENS_FALLBACK
 
     def stream_chat(
         self,
@@ -553,7 +574,7 @@ class LlamaCppClient:
             "model": self.model,
             "messages": serialized_messages,
             "stream": True,
-            "max_tokens": max_tokens if max_tokens is not None else self.default_max_tokens,
+            "max_tokens": self.effective_max_tokens(max_tokens),
             "temperature": (
                 temperature if temperature is not None else self.default_temperature
             ),

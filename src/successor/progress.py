@@ -33,6 +33,8 @@ def summarize_tool_completion(
         return _summarize_holonet(card)
     if tool_name == "vision":
         return _summarize_vision(card)
+    if tool_name in {"read_file", "write_file", "edit_file"}:
+        return _summarize_file_tool(card)
     if tool_name == "bash":
         return _summarize_bash(card)
     return None
@@ -258,6 +260,64 @@ def _summarize_bash(card: ToolCard) -> ProgressUpdate | None:
             important=False,
         )
     return None
+
+
+def _summarize_file_tool(card: ToolCard) -> ProgressUpdate | None:
+    path = str(card.tool_arguments.get("file_path") or _first_param(card, "path")).strip()
+    label = _clip_target(path) or card.verb
+    failed = card.exit_code not in (None, 0)
+
+    if card.tool_name == "read_file":
+        return ProgressUpdate(
+            text=f"read file {label}",
+            source="file",
+            important=False,
+        )
+
+    if card.change_artifact is not None and card.change_artifact.files:
+        files = [
+            file.path
+            for file in card.change_artifact.files
+            if file.path and file.path != "(patch)"
+        ]
+        if failed:
+            if len(files) == 1:
+                return ProgressUpdate(
+                    text=f"{card.tool_name.replace('_', ' ')} failed after touching {_clip_target(files[0])}",
+                    source="file",
+                    important=True,
+                )
+            if len(files) > 1:
+                return ProgressUpdate(
+                    text=f"{card.tool_name.replace('_', ' ')} failed after touching {len(files)} files",
+                    source="file",
+                    important=True,
+                )
+        if len(files) == 1:
+            return ProgressUpdate(
+                text=f"updated {_clip_target(files[0])}",
+                source="file",
+                important=True,
+            )
+        if len(files) > 1:
+            return ProgressUpdate(
+                text=f"updated {len(files)} files",
+                source="file",
+                important=True,
+            )
+
+    if failed:
+        return ProgressUpdate(
+            text=f"{card.tool_name.replace('_', ' ')} failed for {label}",
+            source="file",
+            important=True,
+        )
+
+    return ProgressUpdate(
+        text=f"{card.tool_name.replace('_', ' ')} {label}",
+        source="file",
+        important=True,
+    )
 
 
 def _first_param(card: ToolCard, name: str) -> str:

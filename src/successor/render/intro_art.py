@@ -33,7 +33,6 @@ frame; that's the chat's concern, not ours.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from .braille import BrailleArt, load_frame

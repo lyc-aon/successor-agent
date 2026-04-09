@@ -25,7 +25,7 @@ Layout (resize-aware, three panes + footer):
   │                     │     model       local           │ │                  │ │
   │                     │     base_url    localhost…      │ │ ctx 48/256k loc… │ │
   │                     │     temperature 0.7             │ └──────────────────┘ │
-  │                     │     max_tokens  32768           │                      │
+  │                     │     max_tokens  auto            │                      │
   │                     │                                 │                      │
   │                     │ extensions                      │                      │
   │                     │     skills      (0)             │                      │
@@ -63,10 +63,9 @@ saved overrides manually).
 
 from __future__ import annotations
 
-import json
 import math
 from copy import deepcopy
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -92,12 +91,10 @@ from ..profiles import (
 )
 from ..skills import SKILL_REGISTRY, all_skills, get_skill, recommended_skills_for_tools
 from ..render.app import App
-from ..render.braille import BrailleArt
 from ..render.cells import (
     ATTR_BOLD,
     ATTR_DIM,
     ATTR_ITALIC,
-    ATTR_REVERSE,
     Cell,
     Grid,
     Style,
@@ -112,16 +109,13 @@ from ..render.terminal import Terminal
 from ..render.text import ease_out_cubic, lerp_rgb
 from ..render.theme import (
     THEME_REGISTRY,
-    Theme,
     ThemeVariant,
     all_themes,
-    blend_variants,
     find_theme_or_fallback,
     normalize_display_mode,
-    toggle_display_mode,
 )
 from ..subagents.config import SUBAGENT_STRATEGIES
-from ..tools_registry import AVAILABLE_TOOLS, selectable_tool_names
+from ..tools_registry import AVAILABLE_TOOLS, selectable_tool_names, tool_label
 from ..web.config import (
     HOLO_DEFAULT_PROVIDER_OPTIONS,
     VISION_MODE_OPTIONS,
@@ -845,7 +839,7 @@ class SuccessorConfig(App):
         if field.name == "tools":
             if not profile.tools:
                 return "(none — chat only)"
-            return ", ".join(profile.tools)
+            return ", ".join(tool_label(name) for name in profile.tools)
         if field.name.startswith("bash_"):
             raw = self._profile_value_for_field_raw(profile, field)
             if field.name == "bash_allow_dangerous":
@@ -920,6 +914,13 @@ class SuccessorConfig(App):
             return "(default)"
 
         raw = self._profile_value_for_field_raw(profile, field)
+
+        if field.name == "provider_max_tokens":
+            if raw is None:
+                return "(default)"
+            if isinstance(raw, (int, float)) and int(raw) == 0:
+                return "auto (ctx window)"
+            return str(raw)
 
         # SECRET masks the value for display
         if field.kind == FieldKind.SECRET:
@@ -1022,7 +1023,6 @@ class SuccessorConfig(App):
             # set higher than warning_pct), CompactionConfig.__post_init__
             # raises ValueError — we catch it and surface as a toast so
             # the user sees the rejection without crashing the menu.
-            from ..profiles import CompactionConfig
             key = field.name.removeprefix("compaction_")
             try:
                 new_compaction = replace(old_profile.compaction, **{key: new_value})
@@ -1096,7 +1096,6 @@ class SuccessorConfig(App):
             # mirrored from BashConfig. Missing entries mean "default"
             # so the dirty-compare vs initial is stable.
             from ..bash.exec import (
-                BashConfig,
                 DEFAULT_TIMEOUT_S,
                 MAX_OUTPUT_BYTES,
             )
@@ -1831,14 +1830,15 @@ class SuccessorConfig(App):
         if event.is_char and event.char == " ":
             # Toggle the highlighted tool on/off in the live profile
             name = option_names[edit.cursor]
-            current = list(
+            current = set(
                 self._profile_value_for_field_raw(self._current_profile(), field) or ()
             )
             if name in current:
-                current.remove(name)
+                current.discard(name)
             else:
-                current.append(name)
-            self._set_field_on_profile(self._profile_cursor, field, tuple(current))
+                current.add(name)
+            ordered = tuple(option for option in option_names if option in current)
+            self._set_field_on_profile(self._profile_cursor, field, ordered)
             return
 
     # ─── Render ───
@@ -2053,7 +2053,6 @@ class SuccessorConfig(App):
                 break
 
             is_cursor = i == self._profile_cursor and self._focus == Focus.PROFILES
-            is_active_in_config = i == self._active_idx
             is_active_now = profile.name == active_now
             has_dirty = self._is_dirty(profile.name)
 

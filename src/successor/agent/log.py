@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Literal, Optional
+from typing import Iterator, Literal
 
 from ..bash.cards import ToolCard
 from ..subagents.cards import SubagentToolCard

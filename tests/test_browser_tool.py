@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from successor.tool_runner import ToolExecutionResult
 from successor.web.browser import (
-    BrowserRuntimeStatus,
     PlaywrightBrowserManager,
     _BrowserProgressTracker,
     _execute_browser_action,
-    _fill_locator_with_fallback,
+    _prepare_locator_for_typing,
     _resolve_type_locator,
     _select_locator_option,
     browser_preview_card,
@@ -66,6 +65,8 @@ class _FakeLocator:
         self._fill_error = fill_error
         self.filled: list[str] = []
         self.pressed: list[str] = []
+        self.clicked = 0
+        self.focused = 0
         self._inner_text = "Issue Desk"
         self.first = self
 
@@ -79,6 +80,12 @@ class _FakeLocator:
 
     def press(self, key: str) -> None:
         self.pressed.append(key)
+
+    def click(self) -> None:
+        self.clicked += 1
+
+    def focus(self) -> None:
+        self.focused += 1
 
     def inner_text(self) -> str:
         return self._inner_text
@@ -160,6 +167,8 @@ class _FakeActionPage(_FakePage):
             if scope in ("session", "both"):
                 self.session_storage.clear()
             return None
+        if "range.selectNodeContents" in script or "typeof el.select" in script:
+            return self._active_editable
         if "successor-storage-state" in script:
             return {
                 "local": [
@@ -193,28 +202,35 @@ def test_resolve_type_locator_falls_back_from_missing_placeholder() -> None:
     assert locator is label
 
 
-def test_fill_locator_with_fallback_retries_auto_resolution() -> None:
+def test_prepare_locator_for_typing_retries_auto_resolution() -> None:
     label = _FakeLocator(count_value=1)
-    placeholder = _FakeLocator(
-        count_value=1,
-        fill_error=RuntimeError("placeholder lookup failed"),
-    )
+    placeholder = _FakeLocator(count_value=1)
+
+    def _broken_click() -> None:
+        raise RuntimeError("placeholder lookup failed")
+
+    def _broken_focus() -> None:
+        raise RuntimeError("placeholder lookup failed")
+
+    placeholder.click = _broken_click  # type: ignore[method-assign]
+    placeholder.focus = _broken_focus  # type: ignore[method-assign]
     page = _FakePage({
         "label:Message": label,
         "placeholder:Message": placeholder,
         "role:textbox:Message": _FakeLocator(count_value=0),
         "text:Message": _FakeLocator(count_value=0),
     })
+    action_page = _FakeActionPage(page._mapping)
 
-    locator = _fill_locator_with_fallback(
-        page,
+    locator = _prepare_locator_for_typing(
+        action_page,
         {"target": "Message", "target_kind": "placeholder"},
         locator=placeholder,
-        text="successor",
+        replace_existing=False,
     )
 
     assert locator is label
-    assert label.filled == ["successor"]
+    assert label.clicked == 1
 
 
 class _FakeSelectLocator(_FakeLocator):
@@ -262,6 +278,52 @@ def test_type_action_can_use_focused_editable_without_target(tmp_path) -> None:
     assert result.exit_code == 0
     assert page.keyboard.typed == ["Keyboard navigation bug"]
     assert page.keyboard.pressed == ["Enter"]
+
+
+def test_type_action_with_target_uses_human_typing_not_fill(tmp_path) -> None:
+    locator = _FakeLocator(count_value=1)
+    page = _FakeActionPage({"label:Issue title": locator}, active_editable=True)
+
+    result = _execute_browser_action(
+        page=page,
+        arguments={
+            "action": "type",
+            "target": "Issue title",
+            "target_kind": "label",
+            "text": "Keyboard navigation bug",
+        },
+        console_errors=[],
+        user_data_dir=tmp_path,
+        config=BrowserConfig(),
+    )
+
+    assert result.exit_code == 0
+    assert locator.clicked == 1
+    assert locator.filled == []
+    assert page.keyboard.typed == ["Keyboard navigation bug"]
+
+
+def test_type_action_replace_existing_selects_before_typing(tmp_path) -> None:
+    locator = _FakeLocator(count_value=1)
+    page = _FakeActionPage({"label:Issue title": locator}, active_editable=True)
+
+    result = _execute_browser_action(
+        page=page,
+        arguments={
+            "action": "type",
+            "target": "Issue title",
+            "target_kind": "label",
+            "text": "Replaced title",
+            "replace_existing": True,
+        },
+        console_errors=[],
+        user_data_dir=tmp_path,
+        config=BrowserConfig(),
+    )
+
+    assert result.exit_code == 0
+    assert locator.clicked == 1
+    assert page.keyboard.typed == ["Replaced title"]
 
 
 def test_press_action_without_target_uses_keyboard(tmp_path) -> None:

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import pytest
 
 from successor.agent.compact import compact
 from successor.agent.log import BoundaryMarker, LogMessage, MessageLog
