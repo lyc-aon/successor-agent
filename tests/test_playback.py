@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from successor.chat import SuccessorChat
-from successor.cli import cmd_playback, cmd_record
+from successor.cli import build_parser, cmd_playback, cmd_record
 from successor.config import load_chat_config, save_chat_config
 from successor.playback import (
     RecordingBundle,
@@ -76,6 +76,40 @@ def test_playback_html_escapes_embedded_script_terminators(tmp_path: Path) -> No
     assert "\\u003c/script\\u003e" in html
     assert "alert('x')" in html
     assert "Keyboard: Space play/pause" in html
+    assert "Successor Session Reviewer" in html
+
+
+def test_playback_html_includes_bundle_artifacts_and_visuals(tmp_path: Path) -> None:
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+    (bundle_root / "index.md").write_text("# demo\n", encoding="utf-8")
+    (bundle_root / "summary.json").write_text('{"frame_count": 1}\n', encoding="utf-8")
+    (bundle_root / "turn_01_plain.txt").write_text("hello\n", encoding="utf-8")
+    (bundle_root / "visuals").mkdir()
+    image_path = bundle_root / "visuals" / "frame.png"
+    image_path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        b"\x00\x00\x00\rIHDR"
+        b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00"
+        b"\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc```\x00\x00\x00\x04\x00\x01"
+        b"\x0b\xe7\x02\x9d\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+
+    html_path = write_playback_html(
+        bundle_root / "playback.html",
+        title="Bundle Demo",
+        description="artifact pass",
+        frames=[],
+        trace_events=[],
+        bundle_root=bundle_root,
+    )
+    html = html_path.read_text(encoding="utf-8")
+
+    assert "index.md" in html
+    assert "summary.json" in html
+    assert "turn_01_plain.txt" in html
+    assert "visuals/frame.png" in html
+    assert "local-only artifact" in html
 
 
 def test_recording_bundle_writes_artifacts_and_dedupes_identical_frames(tmp_path: Path) -> None:
@@ -171,6 +205,12 @@ def test_recording_bundle_marks_repo_local_via_git_info_exclude(tmp_path: Path) 
     exclude = repo / ".git" / "info" / "exclude"
     text = exclude.read_text(encoding="utf-8")
     assert "artifacts/session-a/" in text
+
+
+def test_review_alias_parses_to_cmd_playback() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["review"])
+    assert args.func is cmd_playback
 
 
 def test_chat_autorecord_defaults_on_and_slash_command_can_disable(

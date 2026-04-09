@@ -293,6 +293,117 @@ _SUBAGENT_TOOL_SCHEMA: dict[str, Any] = {
     },
 }
 
+TASK_DOC = """\
+### task — update the session task ledger
+
+Use `task` to keep a compact session-local ledger for multi-step work.
+This is the structured place to track what is pending, what is actively
+in progress, and what has been completed.
+
+### How to invoke
+
+Call `task` with the full current task list in priority order. The tool
+replaces the previous ledger; it is not a patch operation.
+
+Each task item contains:
+
+- `content` — short task text
+- `active_form` — present-tense wording for the active task
+- `status` — `pending`, `in_progress`, or `completed`
+
+Example — start a multi-step implementation:
+
+    {"items": [
+      {"content": "Inspect the current browser loop", "active_form": "inspecting the current browser loop", "status": "completed"},
+      {"content": "Implement a task ledger", "active_form": "implementing a task ledger", "status": "in_progress"},
+      {"content": "Run recorded E2E verification", "active_form": "running recorded E2E verification", "status": "pending"}
+    ]}
+
+### Critical rules
+
+- Use `task` for multi-step work that spans several tool calls,
+  edits, or verification passes.
+- Keep the list compact and concrete.
+- Keep at most one task `in_progress`.
+- When you stop because the work is done or blocked on user input,
+  clear the active task by updating the ledger first.
+"""
+
+TASK_MODEL_GUIDANCE = """\
+## Using the task ledger
+
+Some turns expose an internal `task` tool for structured session-local
+task tracking.
+
+### Task-ledger rules
+
+- For multi-step work, create or update the task ledger early.
+- If the work clearly requires 3 or more distinct actions, or includes
+  build + verify + fix phases, calling `task` is usually the first
+  real step after you understand the request.
+- Prefer coarse tasks that match meaningful phases of work, not
+  bookkeeping for every individual file or click.
+- Keep the list short and concrete; do not dump a full essay into it.
+- Mark one task `in_progress` BEFORE you begin substantive work, and
+  keep exactly one task `in_progress` while you are actively working.
+- Mark tasks completed immediately after finishing them; do not batch
+  several completions together later.
+- If you already know the next substantive tool action, update the
+  ledger and make that tool call in the same response instead of
+  spending a whole turn on task bookkeeping alone.
+- If you are done or waiting on the user, do not leave a task
+  `in_progress`.
+- Update the ledger when you switch focus, complete work, or hand
+  control back.
+- Skip the task ledger only for single trivial tasks or purely
+  conversational replies. When in doubt, use it.
+"""
+
+_TASK_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "task",
+        "description": (
+            "Replace the current session task ledger with a compact list "
+            "of pending, in-progress, and completed tasks."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "description": (
+                        "Full replacement list for the session task ledger. "
+                        "Use an empty array to clear it."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "content": {
+                                "type": "string",
+                                "description": "Short task text.",
+                            },
+                            "active_form": {
+                                "type": "string",
+                                "description": (
+                                    "Present-tense wording for the active task."
+                                ),
+                            },
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "in_progress", "completed"],
+                                "description": "Task status.",
+                            },
+                        },
+                        "required": ["content", "status"],
+                    },
+                },
+            },
+            "required": ["items"],
+        },
+    },
+}
+
 SKILL_DOC = """\
 ### skill — load an enabled skill on demand
 
@@ -761,6 +872,16 @@ AVAILABLE_TOOLS: Mapping[str, ToolDescriptor] = {
         default_enabled=True,
         schema=_BASH_TOOL_SCHEMA,
         system_prompt_doc=BASH_DOC,
+    ),
+    "task": ToolDescriptor(
+        name="task",
+        label="task",
+        description="Internal session task ledger for multi-step work.",
+        default_enabled=False,
+        schema=_TASK_TOOL_SCHEMA,
+        system_prompt_doc=TASK_DOC,
+        model_guidance=TASK_MODEL_GUIDANCE,
+        user_visible=False,
     ),
     "skill": ToolDescriptor(
         name="skill",

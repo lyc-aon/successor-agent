@@ -48,6 +48,7 @@ src/successor/render/        the rendering engine
 src/successor/loader.py      generic Registry[T] pattern shared by every kind
 src/successor/config.py      ~/.config/successor/chat.json load/save + v1→v2 migration
 src/successor/tool_runner.py generic native-tool runner for non-bash tools
+src/successor/tasks.py       session-local task ledger for structured autonomy
 
 src/successor/profiles/      Profile dataclass + JSON loader + active-profile resolver
 src/successor/providers/     ChatProvider protocol + factory + llamacpp/openai_compat
@@ -94,7 +95,7 @@ src/successor/session_trace.py normal chat runtime JSONL traces for postmortem d
 src/successor/cli.py         argparse subcommand dispatch (`successor` binary)
 src/successor/__main__.py    `python -m successor` entry point
 
-tests/                       pytest suite  1110+ tests, hermetic via SUCCESSOR_CONFIG_DIR
+tests/                       pytest suite, hermetic via SUCCESSOR_CONFIG_DIR
 
 scripts/                     manual-run scripts (no auto-execution)
   e2e_chat_driver.py     scripted scenarios that drive a real chat against
@@ -106,6 +107,7 @@ docs/                        architectural docs (read these)
   concepts.md                features enabled by the architecture
   llamacpp-protocol.md       what we send / what we get back from llama.cpp
   web-tools.md               holonet + Playwright browser install/config guide
+  autonomy-plan.md           staged autonomy/task-ledger/controller plan
   changelog.md               per-phase notes
 ```
 
@@ -147,8 +149,10 @@ successor doctor       terminal capabilities + measure samples
 successor skills       list loaded skills
 successor tools        list import-registered Python tools
 successor snapshot     headless render of a chat scenario
-successor record       record an input session to JSONL
-successor replay       replay a recorded session
+successor record       record a session to a playback bundle (or JSONL with --input-only)
+successor replay       replay a recorded input stream
+successor playback     reopen a playback bundle reviewer
+successor review       alias for playback
 successor bench        renderer benchmark (no TTY needed)
 ```
 
@@ -166,8 +170,14 @@ page path for local apps, clicks, screenshots, and JS-heavy pages.
 
 `successor tools` is separate from the native profile tool picker. It
 lists Python import-registered tools from `src/successor/tools/`, not
-the built-in native tool surface (`bash`, `subagent`, `holonet`,
-`browser`).
+the built-in native tool surface (`bash`, internal `task`, `subagent`,
+`holonet`, `browser`, `vision`).
+
+Longer agentic runs now have an internal session-local `task` ledger as
+well. It is not user-toggleable and is not persisted to config/profile
+JSON. The model can use it to keep explicit pending / in-progress /
+completed work, and the chat loop can issue one guarded continuation
+reminder when a task is still marked `in_progress`.
 
 Subagent scheduling is now profile-driven: `serial` keeps one
 background model lane, `slots` uses llama.cpp slot capacity with one

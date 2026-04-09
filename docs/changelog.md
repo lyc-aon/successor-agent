@@ -11,6 +11,182 @@ unit on top of phase 0.
 
 ---
 
+## v0.1.20, session reviewer shell + playback alias (2026-04-08)
+
+The original playback bundle path was already useful for debugging, but
+it still read like an internal scrubber rather than a product surface.
+This pass upgrades it into a real session reviewer while preserving the
+good architecture: one self-contained HTML artifact, regenerated from
+the bundle, with no second frontend stack to maintain.
+
+### Deterministic references
+
+The visual and structural choices were grounded in local references, not
+freehand UI guessing:
+
+- `src/successor/playback.py`
+  - existing shared bundle/viewer seam that both normal recording and
+    E2E already use
+- `/home/lycaon/dev/skills/skills/design-system.md`
+  - tokenized shell design, grain treatment, no one-off color chaos
+- `/home/lycaon/dev/skills/skills/frontend-patterns.md`
+  - panel hierarchy and product-shell rhythm
+- `/home/lycaon/dev/ai/copycat/index.html`
+  - strong headline / panel shell contrast and internal-tool seriousness
+- `/home/lycaon/dev/web/lycaonwtf/src/routes/gallery/+page.svelte`
+  - restrained grain, tight monochrome card system, staggered gallery
+- `/home/lycaon/dev/web/lycaonwtf/src/app.css`
+  - sparse root-token discipline
+
+### What landed
+
+- `src/successor/playback.py`
+  - bundle-aware payload builder for:
+    - summary stats
+    - turn summaries
+    - event-type counts
+    - curated artifact discovery
+    - screenshot/still-image galleries
+  - upgraded `playback.html` from a two-column scrubber into a
+    three-rail session reviewer
+  - automatic initial event selection so the detail pane is useful on
+    first load
+  - typed event-tone cues plus JSON highlighting in the trace rail
+  - curated turn-file limits so the reviewer stays readable even when
+    the bundle contains lots of per-turn exports
+- `src/successor/cli.py`
+  - `successor playback` help text now describes the reviewer
+  - new `successor review` alias for the same path
+- docs
+  - updated `README.md`
+  - updated `CLAUDE.md`
+  - updated top-level `CHANGELOG.md`
+
+### Verification
+
+- `PYTHONPATH=src pytest -q tests/test_playback.py`
+  - `8 passed`
+- `python3 -m py_compile src/successor/playback.py src/successor/cli.py`
+- CLI smoke:
+  - `PYTHONPATH=src python3 -m successor playback --help`
+  - `PYTHONPATH=src python3 -m successor review --help`
+- real browser verification in Chromium against:
+  - `/home/lycaon/.local/share/successor/e2e/successor_studio_supervised/20260408-214220/playback.html`
+  - no page errors
+  - no console errors
+  - overview, turn navigation, artifact rail, visuals rail, and event
+    detail all rendered correctly
+- local screenshot critique through the Gemini image-review path:
+  - first pass highlighted panel-density and trace-detail issues
+  - final pass folded in the useful parts of that critique rather than
+    blindly copying it
+
+## v0.1.19, session task ledger + guarded continuation scaffold (2026-04-08)
+
+This is the first real autonomy-controller slice, not just another
+prompt tweak.
+
+The immediate goal was to bridge one concrete gap with the local
+`free-code` reference: Successor had tool execution, subagents,
+browser/vision skills, and strong playback, but it still lacked a
+structured session task ledger. That meant long runs had to keep their
+plan alive in free text, which made it harder to continue cleanly and
+harder to debug afterward.
+
+The phase was scoped deliberately:
+
+- add explicit task state
+- make the runtime use that state for one narrow continuation decision
+- keep the whole thing visible in trace + playback
+
+This is Phase 1 from [`docs/autonomy-plan.md`](autonomy-plan.md).
+
+### Deterministic references
+
+The implementation was shaped directly by these local `free-code`
+surfaces:
+
+- `src/tools/TodoWriteTool/prompt.ts`
+  - proactive task use for 3+ step work
+  - keep one item in progress
+  - mark progress immediately
+- `src/tools/TaskCreateTool/prompt.ts`
+  - create task state early after receiving new instructions
+- `src/constants/prompts.ts`
+  - task tools as first-class organization primitives in the main
+    system prompt
+- `src/cli/print.ts`
+  - autonomy is a runtime loop concern, not only prompt wording
+
+### What landed
+
+- new `src/successor/tasks.py`:
+  - `SessionTask`
+  - `SessionTaskLedger`
+  - validation for model-emitted task payloads
+  - prompt/card/result builders
+- `src/successor/tools_registry.py`:
+  - new internal native `task` tool
+  - model guidance for when to use it, when not to use it, and how to
+    keep task granularity reasonable
+- `src/successor/chat.py`:
+  - runtime auto-enables the internal `task` tool on agentic turns
+  - task-ledger state is injected into the system prompt each turn
+  - synchronous `task` tool dispatch now renders normal tool cards and
+    emits trace events
+  - one guarded continuation reminder now fires when a turn ends while
+    a task is still explicitly `in_progress`
+  - the reminder is single-use per user turn, so it cannot spiral into
+    an unbounded self-kick
+- docs:
+  - new `docs/autonomy-plan.md`
+  - updated `README.md`
+  - updated `CLAUDE.md`
+
+### Verification
+
+- new tests:
+  - `tests/test_tasks.py`
+  - `tests/test_chat_tasks.py`
+- updated neighboring coverage:
+  - `tests/test_chat_web_tools.py`
+  - `tests/test_chat_subagents.py`
+- focused slices:
+  - `PYTHONPATH=src pytest -q tests/test_tasks.py tests/test_chat_tasks.py tests/test_chat_web_tools.py tests/test_chat_subagents.py`
+  - `26 passed`
+  - `PYTHONPATH=src pytest -q tests/test_chat_bash.py tests/test_session_trace.py`
+  - `44 passed`
+- full suite:
+  - `PYTHONPATH=src pytest -q`
+  - `1152 passed`
+
+### Recorded live evaluation
+
+I ran the existing supervised local-browser scenario:
+
+- `PYTHONPATH=src python3 scripts/e2e_chat_driver.py --scenario issue_desk_supervised ...`
+
+What the recordings showed:
+
+1. Before the stronger task-routing wording, the model simply ignored
+   the new internal tool in the live run.
+2. After the routing update, the model adopted `task` immediately and
+   emitted real task-ledger cards in the recording and trace.
+3. That improved observability and continuity, but also revealed the
+   next gap clearly: the model can still over-spend turns on task-only
+   bookkeeping instead of combining ledger updates with the next real
+   tool action.
+
+That is a useful result, not a failure to learn anything:
+
+- the task ledger is working
+- the continuation scaffold is working
+- the remaining autonomy problem is now narrower and better defined
+
+The next phase remains the stricter progress/browser verification
+controller, plus better guidance around coarse task batching and
+same-turn task + tool calls.
+
 ## v0.1.18, local autorecord default + git-safe session bundles (2026-04-08)
 
 The first-class recording bundle pass made playback genuinely useful,

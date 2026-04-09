@@ -153,6 +153,13 @@ as a background-task notification. The bundled `successor-dev` profile
 ships with the model-visible tool on; the plain `default` profile keeps
 manual `/fork` available but leaves model delegation off by default.
 
+Multi-step agentic runs also get an internal session-local `task`
+ledger. It is not a profile toggle and is never written to disk. The
+model uses it to keep one explicit `in_progress` task during longer
+jobs, playback bundles show each ledger update as a normal tool card,
+and the runtime can use that structured state to continue one more turn
+when the model stops too early.
+
 ## Web, Browser, And Vision Tools
 
 Successor now ships three more built-in tool families alongside `bash`
@@ -267,6 +274,13 @@ through the internal `skill` tool only when the task clearly matches
 it. That keeps the base prompt lean while still giving the model
 focused browser/research workflows when those tools are enabled.
 
+Longer jobs no longer have to rely entirely on free-form prose memory.
+The internal `task` tool maintains a compact session ledger for
+pending, in-progress, and completed work. If a turn ends while a task
+is still explicitly marked `in_progress`, the loop can issue one
+guarded continuation reminder instead of silently dropping momentum or
+spinning forever.
+
 Background scheduling is now explicit per profile: `serial` keeps one
 background model lane, `slots` uses llama.cpp's reported slot count
 with one slot reserved for the parent chat, and `manual` trusts the
@@ -323,7 +337,8 @@ successor tools           list import-registered Python tools
 successor snapshot        headless render of a chat scenario
 successor record          record a session to a playback bundle
 successor replay          replay a recorded input session
-successor playback        reopen or open a playback bundle viewer
+successor playback        reopen or open a playback bundle reviewer
+successor review          alias for playback
 successor bench           renderer benchmark, no TTY required
 ```
 
@@ -359,7 +374,9 @@ input-byte dump. With no arguments it writes a timestamped bundle under
 - `input.jsonl` with the raw input stream
 - `timeline.json` with captured rendered frames
 - `session_trace.jsonl` and `session_trace.json` with runtime events
-- `playback.html`, a self-contained browser scrubber
+- `playback.html`, a self-contained browser session reviewer with
+  playback controls, turn cards, trace explorer, artifact links, and
+  screenshot galleries when a bundle contains still images
 
 Use it like this:
 
@@ -368,6 +385,7 @@ successor record
 successor record ~/incoming/hang-debug
 successor playback
 successor playback ~/incoming/hang-debug --open
+successor review ~/incoming/hang-debug --open
 ```
 
 Normal `successor chat` sessions also auto-record to that same local
@@ -382,10 +400,11 @@ trait:
   that bundle path to the repo's local `.git/info/exclude` so it stays
   uncommitted by default
 
-The viewer is interactive, not a video. Open `playback.html` directly
-or use `successor playback --open` and scrub frame-by-frame with trace
-events alongside it. Keyboard shortcuts are built in: Space
-play/pause, Left/Right step, Home/End jump.
+The reviewer is interactive, not a video. Open `playback.html`
+directly or use `successor playback --open` / `successor review --open`
+and scrub frame-by-frame with trace events, turn summaries, artifact
+links, and event detail alongside it. Keyboard shortcuts are built in:
+Space play/pause, Left/Right step, Home/End jump.
 
 If you want the old minimal repro path, pass a `.jsonl` output or use
 `--input-only`:

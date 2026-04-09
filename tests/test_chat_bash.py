@@ -12,6 +12,7 @@ shell builtins (echo, true, pwd) so no mocks.
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -1172,6 +1173,68 @@ def test_provider_finalize_handles_invalid_json_gracefully() -> None:
     assert len(final) == 1
     assert final[0]["arguments"] == {}
     assert final[0]["raw_arguments"] == '{"command": "ls'
+    assert final[0]["arguments_parse_error"] == "Unterminated string starting at"
+    assert final[0]["arguments_parse_error_pos"] == 12
+
+
+def test_native_tool_call_invalid_json_reports_truncation_cleanly(
+    temp_config_dir: Path,
+) -> None:
+    """Malformed native bash arguments should log a concise note
+    instead of dumping the full raw payload into the transcript."""
+    from successor.profiles import Profile
+
+    raw = '{"command":"cat > styles.css << \'EOF\'\\n:root {\\n  --space-1: 4px;\\n  --space-2: 8px;'
+    chat = SuccessorChat()
+    chat.profile = Profile(
+        name="yolo",
+        tools=("bash",),
+        tool_config={"bash": {"allow_dangerous": True, "allow_mutating": True}},
+    )
+    chat.messages = []
+    chat._stream_bash_detector = None
+    chat._stream = _FakeStream([
+        StreamEnded(
+            finish_reason="length",
+            finish_reason_reported=True,
+            usage=None,
+            timings=None,
+            full_reasoning="",
+            full_content="",
+            tool_calls=({
+                "id": "call_bad",
+                "name": "bash",
+                "arguments": {},
+                "raw_arguments": raw,
+                "arguments_parse_error": "Unterminated string starting at",
+                "arguments_parse_error_pos": 11,
+            },),
+        ),
+    ])
+    chat._pump_stream()
+
+    tool_msgs = [m for m in chat.messages if m.tool_card is not None]
+    assert tool_msgs == []
+    notes = [
+        m for m in chat.messages
+        if m.synthetic and "malformed or truncated before dispatch" in m.raw_text
+    ]
+    assert len(notes) == 1
+    note = notes[0].raw_text
+    assert "finish_reason=length" in note
+    assert "Retry with a smaller command" in note
+    assert "{\"command\":\"cat > styles.css" in note
+    assert len(note) < 500
+
+    events = [
+        json.loads(line)
+        for line in chat.session_trace_path.read_text().splitlines()
+        if line.strip()
+    ]
+    stream_end = next(ev for ev in events if ev.get("type") == "stream_end")
+    assert stream_end["finish_reason"] == "length"
+    assert stream_end["finish_reason_reported"] is True
+    assert stream_end["native_tool_calls"][0]["arguments_parse_error"] == "Unterminated string starting at"
 
 
 # ─── Async runner integration with the chat tick loop ───

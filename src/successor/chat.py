@@ -144,6 +144,16 @@ from .skills import (
     build_skill_tool_result,
     enabled_profile_skills,
 )
+from .tasks import (
+    SessionTaskLedger,
+    TaskLedgerError,
+    build_task_card_output,
+    build_task_continue_nudge,
+    build_task_prompt_section,
+    build_task_tool_result,
+    parse_task_items,
+    task_items_to_payload,
+)
 from .subagents.cards import SubagentToolCard
 from .subagents.manager import (
     SubagentManager,
@@ -847,6 +857,9 @@ def _extract_json_string_field(raw_args: str, field: str) -> str:
 def _tool_preview_text(name: str, raw_args: str) -> str:
     if name == "bash":
         return _extract_command_tail(raw_args)
+    if name == "task":
+        content = _extract_json_string_field(raw_args, "content")
+        return f"update tasks {content}" if content else "update tasks"
     if name == "skill":
         skill = _extract_json_string_field(raw_args, "skill")
         task = _extract_json_string_field(raw_args, "task")
@@ -891,7 +904,7 @@ def _tool_name_for_card(card: ToolArtifact) -> str:
     return "subagent" if isinstance(card, SubagentToolCard) else card.tool_name
 
 
-def _tool_arguments_for_card(card: ToolArtifact) -> dict[str, str]:
+def _tool_arguments_for_card(card: ToolArtifact) -> dict[str, Any]:
     if isinstance(card, SubagentToolCard):
         payload = {"prompt": card.directive}
         if card.name:
@@ -919,11 +932,36 @@ def _trace_tool_call_summary(tc: dict[str, Any]) -> dict[str, object]:
         "id": str(tc.get("id") or ""),
         "name": name,
     }
+    raw_arguments = str(tc.get("raw_arguments") or "")
+    parse_error = str(tc.get("arguments_parse_error") or "").strip()
+    parse_error_pos = tc.get("arguments_parse_error_pos")
+    if raw_arguments:
+        entry["raw_arguments_len"] = len(raw_arguments)
+    if parse_error:
+        entry["arguments_parse_error"] = parse_error
+        if isinstance(parse_error_pos, int):
+            entry["arguments_parse_error_pos"] = parse_error_pos
     if name == "bash" and isinstance(args, dict):
         entry["command_excerpt"] = _trace_clip_text(
             str(args.get("command") or ""),
             limit=320,
         )
+    elif name == "bash" and raw_arguments:
+        entry["raw_arguments_excerpt"] = _trace_clip_text(raw_arguments, limit=320)
+    elif name == "task" and isinstance(args, dict):
+        items = args.get("items")
+        if isinstance(items, list):
+            entry["task_count"] = len(items)
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("status") or "").strip().lower() != "in_progress":
+                    continue
+                entry["active_task"] = _trace_clip_text(
+                    str(item.get("active_form") or item.get("content") or ""),
+                    limit=320,
+                )
+                break
     elif name == "skill" and isinstance(args, dict):
         entry["skill_name"] = str(args.get("skill") or "")
         task = str(args.get("task") or "")
@@ -952,6 +990,43 @@ def _trace_tool_call_summary(tc: dict[str, Any]) -> dict[str, object]:
     elif args:
         entry["arguments_excerpt"] = _trace_clip_text(str(args), limit=320)
     return entry
+
+
+def _native_tool_call_failure_message(
+    tc: dict[str, Any],
+    *,
+    finish_reason: str,
+    finish_reason_reported: bool,
+) -> str:
+    """Compact user-facing note for malformed native tool-call payloads."""
+    name = str(tc.get("name") or "tool")
+    raw_arguments = str(tc.get("raw_arguments") or "")
+    parse_error = str(tc.get("arguments_parse_error") or "").strip()
+    parse_error_pos = tc.get("arguments_parse_error_pos")
+    details: list[str] = []
+    if finish_reason == "length":
+        details.append("finish_reason=length")
+    elif not finish_reason_reported:
+        details.append("stream ended without final finish_reason")
+    if parse_error:
+        if isinstance(parse_error_pos, int):
+            details.append(f"{parse_error} at char {parse_error_pos}")
+        else:
+            details.append(parse_error)
+    if raw_arguments:
+        details.append(f"raw_len={len(raw_arguments)}")
+    preview = _trace_clip_text(raw_arguments, limit=220) if raw_arguments else ""
+    lead = f"{name} tool call arguments were malformed or truncated before dispatch"
+    if name == "bash":
+        lead = "bash tool call was malformed or truncated before dispatch"
+    msg = lead
+    if details:
+        msg += f" ({'; '.join(details)})"
+    if preview:
+        msg += f". Preview: {preview}"
+    if name == "bash":
+        msg += " Retry with a smaller command or split the write into multiple steps."
+    return msg
 
 
 # ─── Autocomplete state machine ───
@@ -1815,6 +1890,9 @@ class SuccessorChat(App):
         # the model can react to its own tool output. Hard-capped
         # at MAX_AGENT_TURNS to bound runaway loops.
         self._agent_turn: int = 0
+        self._task_ledger = SessionTaskLedger()
+        self._task_continue_nudged_this_turn: bool = False
+        self._task_continue_nudge: str | None = None
         # In-flight BashRunner instances. Each entry is a _Message
         # whose `running_tool` field points at a BashRunner that
         # hasn't completed yet. on_tick polls this list every frame,
@@ -3034,6 +3112,8 @@ class SuccessorChat(App):
             status = vision_runtime_status(vision_cfg, client=self.client)
             if not status.tool_available:
                 enabled_tools = [name for name in enabled_tools if name != "vision"]
+        if (enabled_tools or self._task_ledger.has_items()) and "task" not in enabled_tools:
+            enabled_tools.append("task")
         if self._enabled_skills_for_turn(enabled_tools) and "skill" not in enabled_tools:
             enabled_tools.append("skill")
         return enabled_tools
@@ -3709,6 +3789,8 @@ class SuccessorChat(App):
         self.messages.append(_Message("user", text))
         self._scroll_to_bottom()
         self._agent_turn = 0
+        self._task_continue_nudged_this_turn = False
+        self._task_continue_nudge = None
         # Reset the per-turn autocompact guard so a new user message
         # gets exactly one autocompact attempt before falling through
         # to the API (which may then trip reactive PTL recovery).
@@ -3832,6 +3914,10 @@ class SuccessorChat(App):
         tool_guidance = build_model_tool_guidance(enabled_tools)
         if tool_guidance:
             sys_prompt = f"{sys_prompt}\n\n{tool_guidance}"
+        if "task" in enabled_tools:
+            task_section = build_task_prompt_section(self._task_ledger)
+            if task_section:
+                sys_prompt = f"{sys_prompt}\n\n{task_section}"
         skill_hints = build_skill_hint_section(enabled_skills)
         if skill_hints:
             sys_prompt = f"{sys_prompt}\n\n{skill_hints}"
@@ -3841,6 +3927,13 @@ class SuccessorChat(App):
         )
         if skill_discovery:
             sys_prompt = f"{sys_prompt}\n\n{skill_discovery}"
+        if self._task_continue_nudge:
+            sys_prompt = (
+                f"{sys_prompt}\n\n"
+                f"## Continuation Reminder\n\n"
+                f"{self._task_continue_nudge}"
+            )
+            self._task_continue_nudge = None
 
         # Build the conversation history for the model in NATIVE Qwen
         # tool-call shape. Each pass through the message list pairs an
@@ -4777,6 +4870,8 @@ class SuccessorChat(App):
                 self._trace_event(
                     "stream_end",
                     turn=self._agent_turn,
+                    finish_reason=ev.finish_reason,
+                    finish_reason_reported=bool(getattr(ev, "finish_reason_reported", True)),
                     assistant_excerpt=_trace_clip_text(raw_content, limit=400),
                     reasoning_chars=self._stream_reasoning_chars,
                     native_tool_calls=[
@@ -4830,7 +4925,13 @@ class SuccessorChat(App):
                 # when the LAST runner in this batch completes.
                 any_ran = False
                 if native_calls:
-                    any_ran |= self._dispatch_native_tool_calls(native_calls)
+                    any_ran |= self._dispatch_native_tool_calls(
+                        native_calls,
+                        stream_finish_reason=ev.finish_reason,
+                        stream_finish_reason_reported=bool(
+                            getattr(ev, "finish_reason_reported", True)
+                        ),
+                    )
                 if legacy_blocks:
                     any_ran |= self._dispatch_streamed_bash_blocks(legacy_blocks)
                 self._trace_event(
@@ -4867,6 +4968,25 @@ class SuccessorChat(App):
                         )
                         self._begin_agent_turn()
                     return
+
+                if (
+                    self._agent_turn > 0
+                    and self._task_ledger.has_in_progress()
+                    and not self._task_continue_nudged_this_turn
+                ):
+                    nudge = build_task_continue_nudge(self._task_ledger)
+                    if nudge:
+                        self._task_continue_nudged_this_turn = True
+                        self._task_continue_nudge = nudge
+                        active = self._task_ledger.in_progress_task()
+                        self._trace_event(
+                            "task_continue_nudge",
+                            turn=self._agent_turn,
+                            active_task=active.active_form if active else "",
+                            assistant_excerpt=_trace_clip_text(raw_content, limit=320),
+                        )
+                        self._begin_agent_turn()
+                        return
 
                 # No tool calls OR nothing successfully ran — turn
                 # ends here. Reset the agent-turn counter so the next
@@ -5311,6 +5431,90 @@ class SuccessorChat(App):
         self._scroll_to_bottom()
         return True
 
+    def _spawn_task_runner(
+        self,
+        arguments: dict[str, Any],
+        *,
+        tool_call_id: str | None = None,
+    ) -> bool:
+        from .bash.exec import _new_tool_call_id  # noqa: PLC0415
+
+        resolved_call_id = tool_call_id or _new_tool_call_id()
+        try:
+            items = parse_task_items(arguments.get("items"))
+        except TaskLedgerError as exc:
+            card = self._tool_error_card(
+                tool_name="task",
+                verb="task-ledger",
+                raw_command="update tasks",
+                tool_call_id=resolved_call_id,
+                params=(),
+                tool_arguments={"items": arguments.get("items")},
+                raw_label_prefix="#",
+                message=str(exc),
+            )
+            self.messages.append(_Message("tool", "", tool_card=card))
+            return False
+
+        self._task_ledger.replace(items)
+        active = self._task_ledger.in_progress_task()
+        params: list[tuple[str, str]] = [("tasks", str(len(items)))]
+        if active is not None:
+            active_value = active.content
+            if len(active_value) > 64:
+                active_value = active_value[:63].rstrip() + "…"
+            params.append(("active", active_value))
+        raw_command = "clear" if not items else f"update {len(items)} tasks"
+        payload = {"items": task_items_to_payload(items)}
+        preview = ToolCard(
+            verb="task-ledger",
+            params=tuple(params),
+            risk="safe",
+            raw_command=raw_command,
+            confidence=1.0,
+            parser_name="native-task",
+            tool_name="task",
+            tool_arguments=payload,
+            raw_label_prefix="#",
+            tool_call_id=resolved_call_id,
+        )
+        final_card = replace(
+            preview,
+            output=build_task_card_output(self._task_ledger),
+            exit_code=0,
+            duration_ms=0.0,
+            api_content_override=build_task_tool_result(self._task_ledger),
+        )
+        self._trace_event(
+            "tool_spawn",
+            tool_name="task",
+            tool_call_id=resolved_call_id,
+            task_count=len(items),
+            active_task=active.active_form if active else "",
+        )
+        self._trace_event(
+            "task_ledger_updated",
+            tool_call_id=resolved_call_id,
+            task_count=len(items),
+            open_count=self._task_ledger.open_count(),
+            completed_count=self._task_ledger.completed_count(),
+            active_task=active.active_form if active else "",
+        )
+        self._trace_event(
+            "tool_runner_finished",
+            tool_name="task",
+            tool_call_id=resolved_call_id,
+            exit_code=0,
+            error="",
+            duration_ms=0.0,
+            stdout_excerpt=_trace_clip_text(final_card.output, limit=320),
+            stderr_excerpt="",
+            truncated=False,
+        )
+        self.messages.append(_Message("tool", "", tool_card=final_card))
+        self._scroll_to_bottom()
+        return True
+
     def _spawn_holonet_runner(
         self,
         arguments: dict[str, Any],
@@ -5461,7 +5665,13 @@ class SuccessorChat(App):
         self._scroll_to_bottom()
         return True
 
-    def _dispatch_native_tool_calls(self, tool_calls: list[dict]) -> bool:
+    def _dispatch_native_tool_calls(
+        self,
+        tool_calls: list[dict],
+        *,
+        stream_finish_reason: str = "stop",
+        stream_finish_reason_reported: bool = True,
+    ) -> bool:
         """Spawn a BashRunner for each native tool_call from the
         model's structured `delta.tool_calls` stream. Mirrors the
         legacy path but propagates the model-provided call id onto
@@ -5479,6 +5689,13 @@ class SuccessorChat(App):
             call_id = tc.get("id") or ""
 
             if name != "bash":
+                if name == "task":
+                    if isinstance(args, dict) and self._spawn_task_runner(
+                        dict(args),
+                        tool_call_id=call_id,
+                    ):
+                        any_ran = True
+                    continue
                 if name == "skill":
                     if isinstance(args, dict) and self._spawn_skill_runner(
                         dict(args),
@@ -5519,7 +5736,7 @@ class SuccessorChat(App):
                     continue
                 self.messages.append(_Message(
                     "successor",
-                    f"unknown tool {name!r} — supported tools are bash, skill, subagent, holonet, browser, and vision",
+                    f"unknown tool {name!r} — supported tools are bash, task, skill, subagent, holonet, browser, and vision",
                     synthetic=True,
                 ))
                 continue
@@ -5528,7 +5745,11 @@ class SuccessorChat(App):
             if not command:
                 self.messages.append(_Message(
                     "successor",
-                    f"bash tool call had no command (raw_arguments={tc.get('raw_arguments','')!r})",
+                    _native_tool_call_failure_message(
+                        tc,
+                        finish_reason=stream_finish_reason,
+                        finish_reason_reported=stream_finish_reason_reported,
+                    ),
                     synthetic=True,
                 ))
                 continue

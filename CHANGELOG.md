@@ -3,6 +3,81 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
+## v0.1.20 — 2026-04-08
+
+Turned the playback bundle viewer into a real session reviewer instead
+of a thin scrubber.
+
+### What changed
+
+- rebuilt `playback.html` as a richer bundle-aware reviewer with:
+  - summary cards
+  - turn cards
+  - trace filtering
+  - event detail
+  - artifact links
+  - screenshot / still-image gallery when the bundle contains visuals
+- kept the product architecture clean by upgrading the shared
+  `src/successor/playback.py` generator instead of creating a second
+  viewer path
+- added a low-risk `successor review` CLI alias on top of
+  `successor playback`
+- curated noisy bundle listings so per-turn stream dumps do not swamp
+  the reviewer
+- improved the trace rail with automatic event selection, typed event
+  tone cues, and JSON highlighting for event detail
+- refreshed docs so recording bundles are described as a session
+  reviewer path rather than just a playback viewer
+
+### Verification
+
+- playback regressions: `8 passed`
+- `python3 -m py_compile src/successor/playback.py src/successor/cli.py`
+- `PYTHONPATH=src python3 -m successor playback --help`
+- `PYTHONPATH=src python3 -m successor review --help`
+- real Chromium verification against the recorded
+  `successor_studio_supervised` bundle:
+  - bundle artifacts resolved
+  - no browser console/runtime errors
+  - overview, turn navigation, and event-detail states rendered cleanly
+- local screenshot review with the Gemini image-review path to catch
+  layout / hierarchy polish issues before finalizing the shell
+
+## v0.1.19 — 2026-04-08
+
+Added the first autonomy foundation slice: a session-local task ledger
+plus one guarded continuation nudge for longer agentic runs.
+
+### What changed
+
+- added an internal native `task` tool that lets the model keep a
+  compact pending / in-progress / completed task ledger for the current
+  chat session
+- the active task ledger now appears in the system prompt and in normal
+  playback / trace artifacts, so long-run state is visible instead of
+  living only in free-form prose
+- if a turn ends while a task is still explicitly marked
+  `in_progress`, the loop can issue one structured continuation
+  reminder instead of stopping early
+- documented the staged autonomy architecture in
+  [`docs/autonomy-plan.md`](docs/autonomy-plan.md)
+- refreshed local docs to reflect the internal task ledger and the
+  current playback workflow in [`README.md`](README.md) and
+  [`CLAUDE.md`](CLAUDE.md)
+
+### Verification
+
+- focused autonomy/chat slices: `70 passed`
+- full local suite: `1152 passed`
+- live recorded `issue_desk_supervised` run against local llama.cpp:
+  - baseline recording showed the model still ignoring the new tool
+  - follow-on recording showed immediate `task` adoption with real
+    task-ledger cards and trace events
+  - remaining observed gap: the model can still spend too many turns on
+    task bookkeeping, so the next pass remains the stricter progress /
+    browser verification controller documented in
+    [`docs/autonomy-plan.md`](docs/autonomy-plan.md)
+
 ## v0.1.18 — 2026-04-08
 
 Made local session auto-recording a default user-facing feature instead of a hidden

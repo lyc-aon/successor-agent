@@ -81,6 +81,7 @@ class StreamEnded:
     Empty list when the model emitted text-only.
     """
     finish_reason: str
+    finish_reason_reported: bool = True
     usage: dict | None = None
     timings: dict | None = None
     full_reasoning: str = ""
@@ -262,6 +263,7 @@ class ChatStream:
         `finish_reason: "tool_calls"` instead of "stop".
         """
         finish_reason = "stop"
+        finish_reason_reported = False
         usage: dict | None = None
         timings: dict | None = None
         # Tool call accumulators keyed by `index` from the streaming
@@ -276,6 +278,7 @@ class ChatStream:
             if self._stop.is_set():
                 self._emit_end(
                     finish_reason="cancelled",
+                    finish_reason_reported=True,
                     usage=usage,
                     timings=timings,
                     tool_calls=self._finalize_tool_calls(pending_tool_calls),
@@ -354,6 +357,7 @@ class ChatStream:
             fr = choice.get("finish_reason")
             if fr:
                 finish_reason = fr
+                finish_reason_reported = True
                 # Some servers include usage in the final chunk.
                 if "usage" in chunk:
                     usage = chunk["usage"]
@@ -363,6 +367,7 @@ class ChatStream:
 
         self._emit_end(
             finish_reason=finish_reason,
+            finish_reason_reported=finish_reason_reported,
             usage=usage,
             timings=timings,
             tool_calls=self._finalize_tool_calls(pending_tool_calls),
@@ -400,17 +405,23 @@ class ChatStream:
         for idx in sorted(pending.keys()):
             slot = pending[idx]
             raw = "".join(slot["args_buf"])
+            parse_error = ""
+            parse_error_pos: int | None = None
             try:
                 parsed = json.loads(raw) if raw else {}
                 if not isinstance(parsed, dict):
                     parsed = {"_value": parsed}
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
                 parsed = {}
+                parse_error = exc.msg
+                parse_error_pos = exc.pos
             out.append({
                 "id": slot["id"],
                 "name": slot["name"],
                 "arguments": parsed,
                 "raw_arguments": raw,
+                "arguments_parse_error": parse_error,
+                "arguments_parse_error_pos": parse_error_pos,
             })
         return tuple(out)
 
@@ -418,6 +429,7 @@ class ChatStream:
         self,
         *,
         finish_reason: str,
+        finish_reason_reported: bool,
         usage: dict | None,
         timings: dict | None,
         tool_calls: tuple = (),
@@ -425,6 +437,7 @@ class ChatStream:
         self._queue.put(
             StreamEnded(
                 finish_reason=finish_reason,
+                finish_reason_reported=finish_reason_reported,
                 usage=usage,
                 timings=timings,
                 full_reasoning=self.reasoning_so_far,

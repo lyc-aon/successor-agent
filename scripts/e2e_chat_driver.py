@@ -71,6 +71,7 @@ TICK_SLEEP_S = 0.05  # how long to sleep between _pump_stream calls
 DEFAULT_FRAME_INTERVAL_S = 0.25  # capture a frame every N seconds while a stream is open
 DEFAULT_BASE_URL = "http://localhost:8080"
 DEFAULT_MODEL = "local"
+DEFAULT_E2E_MAX_TOKENS = int(os.environ.get("SUCCESSOR_E2E_MAX_TOKENS", "32768"))
 ARTIFACT_ROOT = Path.home() / ".local" / "share" / "successor" / "e2e"
 
 
@@ -196,7 +197,7 @@ def build_profile(
             "type": "llamacpp",
             "base_url": base_url,
             "model": model,
-            "max_tokens": 4096,
+            "max_tokens": DEFAULT_E2E_MAX_TOKENS,
             "temperature": 0.2,
         },
         skills=(),

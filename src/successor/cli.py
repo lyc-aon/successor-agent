@@ -11,7 +11,8 @@ Subcommands:
     successor tools          — list registered tools
     successor record         — record a session (bundle or raw input JSONL)
     successor replay         — replay a recorded input stream
-    successor playback       — inspect or open a recording bundle viewer
+    successor playback       — inspect or open a recording bundle reviewer
+    successor review         — alias for playback
     successor snapshot       — headless render of a chat scenario
     successor bench          — renderer benchmark
 """
@@ -561,7 +562,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
 
 
 def cmd_playback(args: argparse.Namespace) -> int:
-    """Inspect or open a recording bundle viewer."""
+    """Inspect or open a recording bundle reviewer."""
     from .playback import latest_recording_bundle_dir, load_trace_events, write_playback_html
 
     requested = args.input.strip() if isinstance(args.input, str) else ""
@@ -588,7 +589,7 @@ def cmd_playback(args: argparse.Namespace) -> int:
         if not viewer_path.exists():
             if not timeline_path.exists():
                 print(
-                    "successor: no playback viewer found and no timeline.json to regenerate from",
+                    "successor: no playback reviewer found and no timeline.json to regenerate from",
                     file=sys.stderr,
                 )
                 return 1
@@ -620,6 +621,7 @@ def cmd_playback(args: argparse.Namespace) -> int:
                 description=description,
                 frames=frames if isinstance(frames, list) else [],
                 trace_events=trace_events if isinstance(trace_events, list) else [],
+                bundle_root=bundle_root,
             )
     print(f"bundle    {bundle_root}")
     print(f"viewer    {viewer_path}")
@@ -882,7 +884,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_playback = sub.add_parser(
         "playback",
-        help="inspect or open a recording bundle viewer",
+        help="inspect or open a recording bundle reviewer",
     )
     p_playback.add_argument(
         "input",
@@ -892,9 +894,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_playback.add_argument(
         "--open",
         action="store_true",
-        help="open the viewer in the default browser",
+        help="open the reviewer in the default browser",
     )
     p_playback.set_defaults(func=cmd_playback)
+
+    p_review = sub.add_parser(
+        "review",
+        help="alias for playback; open a recording bundle reviewer",
+    )
+    p_review.add_argument(
+        "input",
+        nargs="?",
+        default="",
+        help="bundle directory or playback.html (defaults to the latest bundle)",
+    )
+    p_review.add_argument(
+        "--open",
+        action="store_true",
+        help="launch the reviewer in the default browser after regeneration",
+    )
+    p_review.set_defaults(func=cmd_playback)
 
     return p
 
