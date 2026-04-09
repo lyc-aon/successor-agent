@@ -97,6 +97,37 @@ def _chat_config_path() -> Path:
     return _config_dir() / CHAT_CONFIG_FILE
 
 
+def _mkdir_private(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+
+
+def write_local_json(path: Path, payload: dict[str, Any]) -> bool:
+    """Write a local JSON config file with user-only permissions when possible."""
+    try:
+        _mkdir_private(path.parent)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        tmp.replace(path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return True
+    except OSError:
+        return False
+
+
 def load_chat_config() -> dict[str, Any]:
     """Read the chat config file, migrating v1 → v2 if needed.
 
@@ -211,14 +242,4 @@ def save_chat_config(data: dict[str, Any]) -> bool:
     payload = dict(data)
     payload.setdefault("autorecord", True)
     payload["version"] = CURRENT_SCHEMA_VERSION
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps(payload, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        tmp.replace(path)
-        return True
-    except OSError:
-        return False
+    return write_local_json(path, payload)

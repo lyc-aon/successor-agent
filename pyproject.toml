@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "successor"
-version = "0.1.20"
-description = "Terminal chat harness for local LLMs and OpenAI-compatible endpoints. Five-layer cell renderer, async tool dispatch, API-backed research, optional Playwright browser and vision tools, configurable autocompactor, and a live-preview setup wizard. Pure Python 3.11 stdlib at the base install."
+version = "0.1.21"
+description = "Terminal harness for local LLMs and OpenAI-compatible endpoints. Five-layer cell renderer, async tools, API-backed research, optional Playwright browser and vision tools, recording bundles with a session reviewer, configurable autocompactor, and a live-preview setup wizard. Pure Python 3.11 stdlib at the base install."
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.11"

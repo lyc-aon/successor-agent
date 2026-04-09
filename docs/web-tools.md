@@ -53,6 +53,15 @@ The config menu exposes:
 - inline API key fields
 - API key file paths
 
+Profiles created through `successor setup` live under
+`~/.config/successor/profiles/<name>.json`, outside the repo. The
+cleanest local pattern is:
+
+- keep API keys in `~/.config/successor/secrets/`
+- point `*_api_key_file` fields at those paths from `/config`
+- leave inline key fields empty unless you explicitly want the secret
+  embedded in the local profile JSON
+
 Key resolution order:
 
 1. inline profile value
@@ -61,8 +70,8 @@ Key resolution order:
 
 Environment variables:
 
-- `SUCCESSOR_BRAVE_API_KEY`
-- `SUCCESSOR_FIRECRAWL_API_KEY`
+- `SUCCESSOR_BRAVE_API_KEY` or `BRAVE_API_KEY`
+- `SUCCESSOR_FIRECRAWL_API_KEY` or `FIRECRAWL_API_KEY`
 
 ## Browser
 
@@ -149,6 +158,12 @@ exposes:
 - `timeout_s`
 - `max_tokens`
 - `detail`
+
+Vision API keys use the same resolution order as holonet:
+
+1. inline profile value
+2. configured key file
+3. `SUCCESSOR_VISION_API_KEY` or `OPENAI_API_KEY`
 
 Mode semantics:
 

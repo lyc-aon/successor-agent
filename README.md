@@ -201,13 +201,28 @@ path the harness can read. The config supports two modes:
   `llama.cpp` sidecar launched with `--mmproj`
 
 All three tools are configured under `/config` once enabled.
-`holonet` has per-provider toggles plus inline key / key-file fields.
+Profiles created through `successor setup` live under
+`~/.config/successor/profiles/<name>.json`, so any tool config you save
+there is local-only and outside the git repo. `holonet` has
+per-provider toggles plus inline key / key-file fields.
 `browser` has `headless`, `channel`, `python_executable`,
 `executable_path`, `user_data_dir`, viewport, timeout, and
 `screenshot_on_error`. `vision` has `mode`, provider type, base URL,
 model, optional API key / key file, timeout, max tokens, and detail
 level. The full reference is in
 [`docs/web-tools.md`](docs/web-tools.md).
+
+Recommended local secret path:
+
+- keep provider keys in `~/.config/successor/secrets/`
+- point the profile at those files via `/config`
+- Successor writes `chat.json` and profile JSON with user-only file
+  permissions, so inline keys stay local too, but key files are the
+  cleaner default
+- supported env fallbacks:
+  `SUCCESSOR_BRAVE_API_KEY` / `BRAVE_API_KEY`,
+  `SUCCESSOR_FIRECRAWL_API_KEY` / `FIRECRAWL_API_KEY`,
+  and `SUCCESSOR_VISION_API_KEY` / `OPENAI_API_KEY`
 
 Successor also ships focused helper skills for these tools:
 

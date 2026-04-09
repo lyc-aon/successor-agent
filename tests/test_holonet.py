@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import pytest
 
-from successor.web import HolonetConfig, resolve_route, run_holonet
+from successor.web import HolonetConfig, HolonetError, resolve_route, run_holonet
 
 
 class _JsonResponse:
@@ -31,6 +32,55 @@ def test_resolve_route_auto_prefers_biomedical_for_research_query() -> None:
     )
     route = resolve_route({"query": "semaglutide obesity clinical research"}, cfg)
     assert route.provider == "biomedical_research"
+
+
+def test_resolve_route_reports_missing_brave_credentials_clearly() -> None:
+    cfg = HolonetConfig(
+        brave_enabled=True,
+        brave_api_key="",
+        firecrawl_enabled=False,
+        europe_pmc_enabled=True,
+        clinicaltrials_enabled=True,
+    )
+
+    with pytest.raises(HolonetError) as exc:
+        resolve_route({"provider": "brave_news", "query": "what's happening in iran"}, cfg)
+
+    assert "brave_news requires Brave credentials" in str(exc.value)
+    assert "brave_api_key_file" in str(exc.value)
+    assert "BRAVE_API_KEY" in str(exc.value)
+
+
+def test_resolve_route_reports_disabled_brave_provider_clearly() -> None:
+    cfg = HolonetConfig(
+        brave_enabled=False,
+        firecrawl_enabled=False,
+        europe_pmc_enabled=True,
+        clinicaltrials_enabled=True,
+    )
+
+    with pytest.raises(HolonetError) as exc:
+        resolve_route({"provider": "brave_search", "query": "llama.cpp"}, cfg)
+
+    assert "brave_search is disabled" in str(exc.value)
+    assert "brave_enabled" in str(exc.value)
+
+
+def test_auto_provider_reports_keyless_routes_when_no_keys_are_available() -> None:
+    cfg = HolonetConfig(
+        brave_enabled=False,
+        firecrawl_enabled=False,
+        europe_pmc_enabled=False,
+        clinicaltrials_enabled=False,
+        biomedical_enabled=False,
+    )
+
+    with pytest.raises(HolonetError) as exc:
+        resolve_route({"query": "latest iran news"}, cfg)
+
+    assert "no holonet providers are available" in str(exc.value)
+    assert "configure Brave/Firecrawl credentials" in str(exc.value)
+    assert "europe_pmc / clinicaltrials" in str(exc.value)
 
 
 def test_run_holonet_formats_brave_results(monkeypatch) -> None:

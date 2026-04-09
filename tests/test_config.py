@@ -12,6 +12,7 @@ need to touch the filesystem at all.
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 
 from successor.config import (
@@ -89,6 +90,15 @@ def test_save_is_atomic(temp_config_dir: Path) -> None:
     # No leftover .tmp file after a successful write
     tmp_files = list(temp_config_dir.glob("*.tmp"))
     assert tmp_files == []
+
+
+def test_save_writes_private_permissions_when_supported(temp_config_dir: Path) -> None:
+    save_chat_config({"theme": "steel"})
+
+    config_dir_mode = stat.S_IMODE(temp_config_dir.stat().st_mode)
+    file_mode = stat.S_IMODE((temp_config_dir / "chat.json").stat().st_mode)
+    assert config_dir_mode == 0o700
+    assert file_mode == 0o600
 
 
 # ─── migrate_config (pure function tests, no filesystem) ───

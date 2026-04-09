@@ -76,7 +76,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable
 
-from ..config import save_chat_config, load_chat_config
+from ..config import save_chat_config, load_chat_config, write_local_json
 from ..graphemes import delete_prev_grapheme
 from ..input.keys import (
     Key,
@@ -660,13 +660,16 @@ class SuccessorSetup(App):
 
         target_path = target_dir / f"{name}.json"
         try:
-            target_path.write_text(
-                json.dumps(self.state.to_json_dict(), indent=2) + "\n",
-                encoding="utf-8",
-            )
+            ok = write_local_json(target_path, self.state.to_json_dict())
         except OSError as exc:
             self._toast = _Toast(
                 text=f"save failed: {exc}",
+                started_at=self.elapsed,
+            )
+            return
+        if not ok:
+            self._toast = _Toast(
+                text="save failed",
                 started_at=self.elapsed,
             )
             return

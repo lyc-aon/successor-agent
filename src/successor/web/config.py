@@ -36,6 +36,14 @@ def _read_secret_file(path: str | None) -> str:
     return text.strip()
 
 
+def _first_nonempty_env(*names: str) -> str:
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
 @dataclass(frozen=True, slots=True)
 class HolonetConfig:
     default_provider: str = "auto"
@@ -53,14 +61,14 @@ class HolonetConfig:
         return (
             self.brave_api_key.strip()
             or _read_secret_file(self.brave_api_key_file)
-            or os.environ.get("SUCCESSOR_BRAVE_API_KEY", "").strip()
+            or _first_nonempty_env("SUCCESSOR_BRAVE_API_KEY", "BRAVE_API_KEY")
         )
 
     def effective_firecrawl_key(self) -> str:
         return (
             self.firecrawl_api_key.strip()
             or _read_secret_file(self.firecrawl_api_key_file)
-            or os.environ.get("SUCCESSOR_FIRECRAWL_API_KEY", "").strip()
+            or _first_nonempty_env("SUCCESSOR_FIRECRAWL_API_KEY", "FIRECRAWL_API_KEY")
         )
 
 
@@ -109,7 +117,7 @@ class VisionConfig:
         return (
             self.api_key.strip()
             or _read_secret_file(self.api_key_file)
-            or os.environ.get("SUCCESSOR_VISION_API_KEY", "").strip()
+            or _first_nonempty_env("SUCCESSOR_VISION_API_KEY", "OPENAI_API_KEY")
         )
 
 

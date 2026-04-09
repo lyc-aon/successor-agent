@@ -23,6 +23,7 @@ is glue, not logic.
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 
 import pytest
@@ -379,6 +380,8 @@ def test_full_save_flow_writes_json_file(temp_config_dir: Path) -> None:
     # The profile JSON file landed on disk
     target = temp_config_dir / "profiles" / "smoketest.json"
     assert target.exists()
+    assert stat.S_IMODE(target.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
     payload = json.loads(target.read_text())
     assert payload["name"] == "smoketest"
     assert payload["theme"] == "steel"

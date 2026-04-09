@@ -71,7 +71,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from ..config import load_chat_config, save_chat_config
+from ..config import load_chat_config, save_chat_config, write_local_json
 from ..graphemes import (
     delete_next_grapheme,
     delete_prev_grapheme,
@@ -1198,13 +1198,16 @@ class SuccessorConfig(App):
                 continue
             try:
                 path = target_dir / f"{profile.name}.json"
-                path.write_text(
-                    json.dumps(_profile_to_json_dict(profile), indent=2) + "\n",
-                    encoding="utf-8",
-                )
+                ok = write_local_json(path, _profile_to_json_dict(profile))
             except OSError as exc:
                 self._toast = _Toast(
                     f"save failed for '{profile.name}': {exc}",
+                    self.elapsed, kind="warn",
+                )
+                return
+            if not ok:
+                self._toast = _Toast(
+                    f"save failed for '{profile.name}'",
                     self.elapsed, kind="warn",
                 )
                 return

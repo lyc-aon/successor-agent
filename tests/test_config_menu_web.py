@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from dataclasses import replace
 from pathlib import Path
 
@@ -109,6 +110,8 @@ def test_config_menu_save_writes_holonet_browser_and_vision_settings(temp_config
 
     target = temp_config_dir / "profiles" / f"{profile.name}.json"
     payload = json.loads(target.read_text())
+    assert stat.S_IMODE(target.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert payload["tools"] == ["holonet", "browser", "vision"]
     assert payload["tool_config"]["holonet"]["default_provider"] == "firecrawl_search"
     assert payload["tool_config"]["holonet"]["firecrawl_api_key_file"] == "~/keys/firecrawl.txt"

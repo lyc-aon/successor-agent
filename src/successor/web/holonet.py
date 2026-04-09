@@ -62,6 +62,45 @@ _PROVIDER_ALIASES = {
 }
 
 
+def _provider_unavailable_message(provider: str, config: HolonetConfig) -> str:
+    if provider in {"brave_search", "brave_news"}:
+        if not config.brave_enabled:
+            return (
+                f"{provider} is disabled. Enable tool_config.holonet.brave_enabled "
+                "or switch to a keyless route like europe_pmc / clinicaltrials."
+            )
+        return (
+            f"{provider} requires Brave credentials. Set "
+            "tool_config.holonet.brave_api_key, "
+            "tool_config.holonet.brave_api_key_file, "
+            "SUCCESSOR_BRAVE_API_KEY, or BRAVE_API_KEY."
+        )
+    if provider in {"firecrawl_search", "firecrawl_scrape"}:
+        if not config.firecrawl_enabled:
+            return (
+                f"{provider} is disabled. Enable tool_config.holonet.firecrawl_enabled "
+                "or switch to another route."
+            )
+        return (
+            f"{provider} requires Firecrawl credentials. Set "
+            "tool_config.holonet.firecrawl_api_key, "
+            "tool_config.holonet.firecrawl_api_key_file, "
+            "SUCCESSOR_FIRECRAWL_API_KEY, or FIRECRAWL_API_KEY."
+        )
+    if provider == "biomedical_research":
+        if not config.biomedical_enabled:
+            return "biomedical_research is disabled in tool_config.holonet.biomedical_enabled."
+        return (
+            "biomedical_research is unavailable because both europe_pmc and "
+            "clinicaltrials are disabled."
+        )
+    if provider == "europe_pmc":
+        return "europe_pmc is disabled in tool_config.holonet.europe_pmc_enabled."
+    if provider == "clinicaltrials":
+        return "clinicaltrials is disabled in tool_config.holonet.clinicaltrials_enabled."
+    return f"{provider} is unavailable."
+
+
 class HolonetError(RuntimeError):
     """Raised when a holonet request cannot be completed."""
 
@@ -123,7 +162,7 @@ def resolve_route(arguments: dict[str, Any], config: HolonetConfig) -> HolonetRo
     if provider == "auto":
         provider = auto_provider(query=query, url=url, config=config)
     if not provider_enabled(provider, config):
-        raise HolonetError(f"{provider} is disabled or missing required credentials")
+        raise HolonetError(_provider_unavailable_message(provider, config))
     if provider == "firecrawl_scrape" and not url:
         raise HolonetError("firecrawl_scrape requires a url")
     if provider != "firecrawl_scrape" and not query:
@@ -191,7 +230,10 @@ def auto_provider(*, query: str, url: str, config: HolonetConfig) -> str:
         return "europe_pmc"
     if provider_enabled("clinicaltrials", config):
         return "clinicaltrials"
-    raise HolonetError("no holonet providers are available")
+    raise HolonetError(
+        "no holonet providers are available; configure Brave/Firecrawl credentials "
+        "or use the keyless europe_pmc / clinicaltrials routes"
+    )
 
 
 def run_holonet(

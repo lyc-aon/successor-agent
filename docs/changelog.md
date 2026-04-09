@@ -11,6 +11,65 @@ unit on top of phase 0.
 
 ---
 
+## v0.1.21, local profile secrets + clearer holonet setup guidance (2026-04-08)
+
+The web-tool surface already supported per-profile key files, but the
+real user experience still had two rough edges:
+
+- local profile writes were not trying to tighten permissions
+- missing-credential holonet failures did not tell the user how to fix
+  the problem
+
+This pass closes both gaps without adding a second config path or
+special-case secret store. Profiles stay local under
+`~/.config/successor/profiles/`, and the product now leans harder into
+that architecture instead of asking users to infer it.
+
+### What landed
+
+- `src/successor/config.py`
+  - added a shared local JSON writer that creates config dirs and tries
+    to apply `0700`/`0600` permissions where the platform allows it
+  - `save_chat_config()` now routes through that helper
+- `src/successor/wizard/config.py`
+  - profile saves now use the shared local JSON writer instead of raw
+    `write_text(...)`
+- `src/successor/wizard/setup.py`
+  - setup-created profiles now use the same private local JSON write
+    path
+- `src/successor/web/config.py`
+  - holonet key resolution now accepts:
+    - `SUCCESSOR_BRAVE_API_KEY` or `BRAVE_API_KEY`
+    - `SUCCESSOR_FIRECRAWL_API_KEY` or `FIRECRAWL_API_KEY`
+  - vision key resolution now accepts:
+    - `SUCCESSOR_VISION_API_KEY` or `OPENAI_API_KEY`
+- `src/successor/web/holonet.py`
+  - provider resolution now reports explicit fix-up guidance for:
+    - missing Brave credentials
+    - missing Firecrawl credentials
+    - disabled per-provider toggles
+    - the keyless Europe PMC / ClinicalTrials routes
+- docs
+  - updated `README.md`
+  - updated `docs/web-tools.md`
+  - documented the recommended local secrets path:
+    `~/.config/successor/secrets/`
+
+### Verification
+
+- targeted regressions:
+  - `PYTHONPATH=src pytest -q tests/test_config.py tests/test_web_config.py tests/test_holonet.py tests/test_config_menu_web.py tests/test_wizard.py`
+  - `92 passed`
+- full suite:
+  - `PYTHONPATH=src pytest -q`
+  - `1161 passed in 12.41s`
+- local runtime smoke:
+  - `successor doctor`
+  - local `michael` profile pointed at
+    `~/.config/successor/secrets/brave-api-key` and
+    `~/.config/successor/secrets/firecrawl-api-key`
+  - verified those local-only files live outside the repo
+
 ## v0.1.20, session reviewer shell + playback alias (2026-04-08)
 
 The original playback bundle path was already useful for debugging, but

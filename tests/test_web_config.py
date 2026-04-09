@@ -1,7 +1,6 @@
 """Config resolution coverage for holonet, browser, and vision tools."""
 
 from __future__ import annotations
-
 from pathlib import Path
 
 from successor.profiles import Profile
@@ -33,6 +32,24 @@ def test_resolve_holonet_config_reads_keys_and_files(
     assert cfg.default_provider == "firecrawl_search"
     assert cfg.brave_enabled is False
     assert cfg.effective_firecrawl_key() == "fc-secret"
+
+
+def test_resolve_holonet_config_falls_back_to_generic_env_vars(
+    temp_config_dir: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("SUCCESSOR_BRAVE_API_KEY", raising=False)
+    monkeypatch.delenv("SUCCESSOR_FIRECRAWL_API_KEY", raising=False)
+    monkeypatch.setenv("BRAVE_API_KEY", "brave-from-env")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "firecrawl-from-env")
+    profile = Profile(
+        name="holonet-env-config",
+        tool_config={"holonet": {"default_provider": "brave_search"}},
+    )
+
+    cfg = resolve_holonet_config(profile)
+    assert cfg.effective_brave_key() == "brave-from-env"
+    assert cfg.effective_firecrawl_key() == "firecrawl-from-env"
 
 
 def test_resolve_browser_config_uses_defaults(temp_config_dir: Path) -> None:
@@ -100,6 +117,21 @@ def test_resolve_vision_config_reads_keys_and_files(
     assert cfg.timeout_s == 90.0
     assert cfg.max_tokens == 2048
     assert cfg.detail == "high"
+
+
+def test_resolve_vision_config_falls_back_to_openai_api_key(
+    temp_config_dir: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("SUCCESSOR_VISION_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "vision-openai-env")
+    profile = Profile(
+        name="vision-env-config",
+        tool_config={"vision": {"mode": "endpoint", "provider_type": "openai_compat"}},
+    )
+
+    cfg = resolve_vision_config(profile)
+    assert cfg.effective_api_key() == "vision-openai-env"
 
 
 def test_resolve_vision_config_uses_defaults_and_clamps(temp_config_dir: Path) -> None:

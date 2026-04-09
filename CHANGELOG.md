@@ -3,6 +3,37 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
+## v0.1.21 — 2026-04-08
+
+Tightened local profile credential handling and made holonet setup
+errors tell the user what to do next.
+
+### What changed
+
+- local `chat.json` and profile JSON writes now try to use user-only
+  permissions, so `/config` and the setup wizard keep local secrets
+  outside the repo and private by default
+- holonet now reports explicit missing-credential guidance instead of
+  the old vague `disabled or missing required credentials` error
+- web config resolution now accepts the generic `BRAVE_API_KEY`,
+  `FIRECRAWL_API_KEY`, and `OPENAI_API_KEY` fallbacks alongside the
+  Successor-prefixed env vars
+- refreshed docs so local profile paths, recommended
+  `~/.config/successor/secrets/` key files, and env fallbacks are
+  clearly documented
+
+### Verification
+
+- targeted config/web/wizard regressions:
+  `92 passed`
+- full suite:
+  `1161 passed in 12.41s`
+- local smoke:
+  - `successor doctor` against the local `michael` profile
+  - verified `~/.config/successor/profiles/michael.json` points at
+    local-only secret-file paths
+  - confirmed local config/profile files are not tracked by git
+
 ## v0.1.20 — 2026-04-08
 
 Turned the playback bundle viewer into a real session reviewer instead
