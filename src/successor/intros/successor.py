@@ -2,13 +2,15 @@
 
 Plays the bundled successor braille animation frames sequentially with
 smooth Bayer-dot interpolation between adjacent frames, then holds the
-final title frame for a couple of seconds before auto-exiting. Any
+final oracle frame for a couple of seconds before auto-exiting. Any
 keypress skips ahead.
 
 The animation frames live in `src/successor/builtin/intros/successor/`
 as 11 numbered text files (`00-emerge.txt` through `10-title.txt`).
 `hero.txt` lives in the same directory for the chat's empty-state
-panel, but it is NOT part of the intro animation sequence.
+panel, but it is NOT part of the intro animation sequence. `10-title`
+is a legacy filename now; the bundled sequence ends on the settled
+oracle hold frame rather than title text.
 
 Renderer features used:
   - BrailleArt prepare/layout cache (Pretext-shaped) — re-runs of the
@@ -36,7 +38,6 @@ from ..render.braille import (
 from ..render.cells import ATTR_BOLD, ATTR_DIM, Grid, Style
 from ..render.paint import fill_region, paint_lines, paint_text
 from ..render.terminal import Terminal
-from ..render.text import ease_in_out_cubic
 from ..render.theme import (
     THEME_REGISTRY,
     ThemeVariant,
@@ -51,8 +52,8 @@ from ..render.theme import (
 # so total emerge time = 10 * EMERGE_PER_FRAME_S.
 EMERGE_PER_FRAME_S = 0.32
 
-# How long to hold the final title frame before auto-exiting.
-HOLD_FINAL_S = 2.4
+# How long to hold the final oracle frame before auto-exiting.
+HOLD_FINAL_S = 0.9
 
 # Optional fade-in over the very first transition so the first emerge
 # frame doesn't pop in hard.
@@ -144,8 +145,9 @@ class SuccessorIntro(App):
         Returns (frame_lines, cells_w, cells_h).
 
         Time model:
-          - elapsed in [0, emerge_total_s): morph between frame i and
-            frame i+1, where i = floor(elapsed / EMERGE_PER_FRAME_S)
+          - elapsed in [0, emerge_total_s): morph continuously across
+            the full numbered frame sequence with no per-frame easing
+            reset, so the motion doesn't "park" on every keyframe
           - elapsed in [emerge_total_s, total_s): hold the final frame
           - elapsed >= total_s: stop the App
         """
@@ -172,18 +174,17 @@ class SuccessorIntro(App):
             final_lines = self._arts[-1].layout(cells_w, cells_h)
             return (final_lines, cells_w, cells_h)
 
-        # Emerge phase — find which two frames we're between, compute t
+        # Emerge phase — move linearly across the entire sequence so
+        # interpolation stays in motion all the way through the oracle
+        # reveal instead of easing into every numbered keyframe.
         idx_f = elapsed / EMERGE_PER_FRAME_S
         idx_a = int(idx_f)
         idx_b = min(idx_a + 1, len(self._arts) - 1)
         t = idx_f - idx_a
-        # Smooth the t with ease_in_out so the transitions feel chill
-        # rather than mechanically linear
-        t_eased = ease_in_out_cubic(t)
 
         a_lines = self._arts[idx_a].layout(cells_w, cells_h)
         b_lines = self._arts[idx_b].layout(cells_w, cells_h)
-        morphed = interpolate_frame(a_lines, b_lines, t_eased)
+        morphed = interpolate_frame(a_lines, b_lines, t)
         return (morphed, cells_w, cells_h)
 
     # ─── Render ───

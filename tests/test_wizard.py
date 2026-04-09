@@ -58,6 +58,7 @@ def test_wizard_state_defaults() -> None:
     assert state.intro_animation == "successor"
     assert state.chat_intro_art == "successor"
     assert state.autorecord is True
+    assert state.max_agent_turns == 80
 
 
 def test_wizard_state_to_profile_uses_name() -> None:
@@ -88,6 +89,7 @@ def test_wizard_state_to_json_dict_round_trips() -> None:
     assert parsed["theme"] == "steel"
     assert parsed["display_mode"] == "light"
     assert parsed["density"] == "compact"
+    assert parsed["max_agent_turns"] == 80
     assert parsed["intro_animation"] == "successor"
     assert parsed["provider"]["type"] == "llamacpp"
 
@@ -424,6 +426,20 @@ def test_review_can_toggle_autorecord_before_save(temp_config_dir: Path) -> None
     assert chat_cfg["autorecord"] is False
 
 
+def test_review_can_adjust_max_agent_turns_before_save(temp_config_dir: Path) -> None:
+    wizard = SuccessorSetup()
+    wizard.state.name = "turn-limit-test"
+    wizard._enter_step(Step.REVIEW)
+    assert wizard.state.max_agent_turns == 80
+    wizard._handle_review(KeyEvent(char="]"))
+    wizard._handle_review(KeyEvent(char="]"))
+    assert wizard.state.max_agent_turns == 90
+    wizard._handle_review(KeyEvent(key=Key.ENTER))
+
+    payload = json.loads((temp_config_dir / "profiles" / "turn-limit-test.json").read_text())
+    assert payload["max_agent_turns"] == 90
+
+
 def test_esc_cancels_wizard(temp_config_dir: Path) -> None:
     """Esc from any non-saved step sets should_launch_chat=False and stops."""
     wizard = SuccessorSetup()
@@ -464,6 +480,7 @@ def test_snapshot_review_mentions_local_autorecord(temp_config_dir: Path) -> Non
     plain = render_grid_to_plain(g)
     assert "autorecord" in plain
     assert "local-only bundles" in plain
+    assert "max agent turns" in plain
 
 
 def test_snapshot_theme_step_shows_live_preview(temp_config_dir: Path) -> None:

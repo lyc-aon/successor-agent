@@ -16,8 +16,10 @@ from successor.providers.llama import (
     StreamStarted,
 )
 from successor.subagents.cards import SubagentToolCard
-from successor.subagents.manager import SubagentManager
+from successor.subagents.manager import SubagentManager, SubagentNotification
+from successor.subagents.manager import SubagentTaskSnapshot
 from successor.subagents.prompt import build_child_prompt
+from successor.tasks import parse_task_items
 
 
 class _StaticStream:
@@ -90,6 +92,26 @@ class _MockClient:
 
     def detect_runtime_capabilities(self):
         return self.capabilities
+
+
+@dataclass
+class _CapturingClient:
+    streams: list[object]
+    base_url: str = "http://mock"
+    model: str = "mock-model"
+
+    def __post_init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def stream_chat(self, messages, *, max_tokens=None, temperature=None,
+                    timeout=None, extra=None, tools=None):
+        self.calls.append({
+            "messages": list(messages),
+            "tools": tools,
+        })
+        if not self.streams:
+            raise RuntimeError("capturing client exhausted")
+        return self.streams.pop(0)
 
 
 def _wait_until(predicate, *, timeout_s: float = 3.0) -> None:
@@ -224,6 +246,81 @@ def test_tasks_command_surfaces_scheduler_summary(temp_config_dir: Path) -> None
     assert "scheduler: llama slots, 3 background lanes from 4 total slots" in (
         chat.messages[-1].raw_text
     )
+
+
+def test_completed_subagent_can_trigger_bounded_followup_nudge(
+    temp_config_dir: Path,
+) -> None:
+    @dataclass
+    class _NotifyingManager:
+        notes: list[SubagentNotification]
+
+        def drain_notifications(self) -> list[SubagentNotification]:
+            out = list(self.notes)
+            self.notes.clear()
+            return out
+
+        def has_active_tasks(self) -> bool:
+            return False
+
+    client = _CapturingClient([
+        _StaticStream([
+            ContentChunk(text="Used the subagent result."),
+            StreamEnded(
+                finish_reason="stop",
+                usage=None,
+                timings=None,
+                full_reasoning="",
+                full_content="Used the subagent result.",
+                tool_calls=(),
+            ),
+        ]),
+    ])
+    chat = SuccessorChat(
+        profile=Profile(
+            name="chat-subagents",
+            tools=("bash", "subagent"),
+            subagents=SubagentConfig(enabled=True, max_model_tasks=1, timeout_s=30.0),
+        ),
+        client=client,
+    )
+    chat.messages = []
+    chat._agent_turn = 1
+    chat._task_ledger.replace(parse_task_items([{
+        "content": "Audit the current build",
+        "active_form": "auditing the current build",
+        "status": "in_progress",
+    }]))
+    chat._task_continue_nudged_this_turn = True
+    chat._subagent_manager = _NotifyingManager([
+        SubagentNotification(
+            task=SubagentTaskSnapshot(
+            task_id="t001",
+            name="audit",
+            directive="audit",
+            status="completed",
+            created_at=time.monotonic() - 1.0,
+            started_at=time.monotonic() - 0.8,
+            finished_at=time.monotonic() - 0.1,
+            transcript_path=temp_config_dir / "subagents" / "t001.json",
+            result_excerpt="found a stale selector",
+            result_text="found a stale selector",
+            error="",
+            parent_message_count=0,
+            tool_cards=1,
+            assistant_turns=1,
+        )
+        )
+    ])
+
+    chat._pump_subagent_notifications()
+    _drive_chat_until_idle(chat)
+
+    assert len(client.calls) == 1
+    system = client.calls[0]["messages"][0]
+    assert system["role"] == "system"
+    assert "Background Task Reminder" in system["content"]
+    assert "found a stale selector" in system["content"]
 
 
 def test_config_command_refused_while_subagent_running(temp_config_dir: Path) -> None:

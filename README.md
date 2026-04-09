@@ -160,6 +160,18 @@ jobs, playback bundles show each ledger update as a normal tool card,
 and the runtime can use that structured state to continue one more turn
 when the model stops too early.
 
+Profiles now also carry `max_agent_turns`, the hard cap for one user
+submission's model loop. The default is `80`, and both the setup wizard
+review screen and `/config` expose it so long local runs are not stuck
+with the old tiny ceiling.
+
+Browser-heavy QA turns now also have a real runtime controller behind
+them. When the model is in verification mode, repeated failed clicks,
+same-page reopen loops, and stagnant browser state get turned into
+structured continuation reminders instead of more blind retrying. Those
+controller decisions are recorded in the session trace and surfaced in
+the reviewer.
+
 ## Web, Browser, And Vision Tools
 
 Successor now ships three more built-in tool families alongside `bash`
@@ -379,6 +391,8 @@ Normal `successor chat` sessions also leave a bounded local runtime
 trace under `~/.config/successor/logs/`. These JSONL files record user
 submissions, model turn boundaries, tool spawns, runner completion, and
 shutdown cancellation so hangs can be debugged after the chat exits.
+They now also record browser-verification interventions, compact
+progress summaries, and bounded subagent follow-up nudges.
 
 ## Recording Bundles
 
@@ -420,6 +434,11 @@ directly or use `successor playback --open` / `successor review --open`
 and scrub frame-by-frame with trace events, turn summaries, artifact
 links, and event detail alongside it. Keyboard shortcuts are built in:
 Space play/pause, Left/Right step, Home/End jump.
+
+Recorded traces now make the control layer visible too: browser
+verification interventions, progress-summary rows, and subagent
+follow-through events all appear in the same reviewer timeline as the
+rest of the runtime.
 
 If you want the old minimal repro path, pass a `.jsonl` output or use
 `--input-only`:

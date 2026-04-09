@@ -68,6 +68,17 @@ def test_construct_has_no_dirty(temp_config_dir: Path) -> None:
     assert not menu._any_dirty()
 
 
+def test_behavior_section_renders_max_agent_turns(temp_config_dir: Path) -> None:
+    grid = config_demo_snapshot(
+        rows=55,
+        cols=140,
+        settings_cursor=_field_idx("max_agent_turns"),
+    )
+    plain = render_grid_to_plain(grid)
+    assert "max agent turns" in plain
+    assert "80" in plain
+
+
 def test_settings_cursor_starts_on_editable_row(temp_config_dir: Path) -> None:
     PROFILE_REGISTRY.reload()
     THEME_REGISTRY.reload()
@@ -968,6 +979,7 @@ def test_profile_to_json_round_trip(temp_config_dir: Path) -> None:
         tools=("read_file",),
         tool_config={"read_file": {"max_size": 1024}},
         intro_animation="successor",
+        max_agent_turns=96,
     )
     payload = _profile_to_json_dict(original)
     target = temp_config_dir / "profiles" / "roundtrip.json"
@@ -982,6 +994,7 @@ def test_profile_to_json_round_trip(temp_config_dir: Path) -> None:
     assert parsed.density == "compact"
     assert parsed.system_prompt == "test prompt"
     assert parsed.intro_animation == "successor"
+    assert parsed.max_agent_turns == 96
     assert parsed.skills == ("a", "b")
     assert parsed.tools == ("read_file",)
 

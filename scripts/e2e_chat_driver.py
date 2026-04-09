@@ -66,7 +66,9 @@ from successor.snapshot import render_grid_to_ansi, render_grid_to_plain  # noqa
 
 GRID_ROWS = 60
 GRID_COLS = 140
-TURN_TIMEOUT_S = 240.0  # per user prompt, including all continuation turns
+TURN_TIMEOUT_S = float(
+    os.environ.get("SUCCESSOR_E2E_TURN_TIMEOUT_S", "240.0")
+)  # per user prompt, including all continuation turns
 TICK_SLEEP_S = 0.05  # how long to sleep between _pump_stream calls
 DEFAULT_FRAME_INTERVAL_S = 0.25  # capture a frame every N seconds while a stream is open
 DEFAULT_BASE_URL = "http://localhost:8080"

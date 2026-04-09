@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,23 @@ class _MockClient:
         return _StaticStream([])
 
 
+class _CapturingClient:
+    def __init__(self, streams: list[_StaticStream]) -> None:
+        self._streams = list(streams)
+        self.calls: list[dict[str, object]] = []
+        self.base_url = "http://mock"
+        self.model = "mock-model"
+
+    def stream_chat(self, messages, *, max_tokens=None, temperature=None, timeout=None, extra=None, tools=None):  # noqa: ARG002
+        self.calls.append({
+            "messages": list(messages),
+            "tools": tools,
+        })
+        if not self._streams:
+            raise RuntimeError("capturing client exhausted")
+        return self._streams.pop(0)
+
+
 def _pump_until_idle(chat: SuccessorChat, *, timeout_s: float = 2.0) -> None:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -47,6 +65,16 @@ def _pump_until_idle(chat: SuccessorChat, *, timeout_s: float = 2.0) -> None:
             return
         time.sleep(0.02)
     raise AssertionError("chat did not settle")
+
+
+def _trace_events(root: Path) -> list[dict]:
+    trace_files = sorted((root / "logs").glob("*.jsonl"))
+    assert trace_files, "expected trace files"
+    return [
+        json.loads(line)
+        for line in trace_files[-1].read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
 
 
 def test_native_holonet_tool_call_dispatches(monkeypatch, temp_config_dir: Path) -> None:
@@ -86,6 +114,11 @@ def test_native_holonet_tool_call_dispatches(monkeypatch, temp_config_dir: Path)
     assert cards[0].tool_name == "holonet"
     assert cards[0].tool_call_id == "call_holo_1"
     assert "Europe PMC" in cards[0].output
+    assert any(
+        msg.synthetic and msg.raw_text.startswith("progress: ")
+        for msg in chat.messages
+        if msg.role == "successor"
+    )
 
 
 def test_browser_tool_filtered_when_playwright_missing(temp_config_dir: Path) -> None:
@@ -253,6 +286,99 @@ def test_native_browser_tool_call_dispatches(monkeypatch, temp_config_dir: Path)
     assert cards[0].tool_name == "browser"
     assert cards[0].tool_call_id == "call_browser_1"
     assert "Opened page." in cards[0].output
+    assert any(
+        msg.synthetic and "progress: opened file:///tmp/demo.html" in msg.raw_text
+        for msg in chat.messages
+        if msg.role == "successor"
+    )
+
+
+def test_browser_verification_intervention_becomes_continuation_nudge(
+    monkeypatch,
+    temp_config_dir: Path,
+) -> None:
+    monkeypatch.setattr(
+        "successor.chat.browser_runtime_status",
+        lambda *_args, **_kwargs: BrowserRuntimeStatus(
+            package_available=True,
+            python_executable="/usr/bin/python3",
+            using_external_runtime=False,
+            channel="chrome",
+            executable_path="",
+            user_data_dir="/tmp/browser",
+        ),
+    )
+    monkeypatch.setattr(
+        "successor.chat.run_browser_action",
+        lambda arguments, manager, progress: ToolExecutionResult(  # noqa: ARG005
+            output="Clicked target.\n\nProgress note: page state has not meaningfully changed across the last 3 browser actions.",
+            exit_code=0,
+            metadata={
+                "state_hash": "steady",
+                "controls_summary": "Visible controls:\n- button: \"Add Issue\"; selector=#add-issue",
+                "verification_intervention": {
+                    "kind": "stagnant_state",
+                    "recommended_action": "inspect",
+                    "controls_summary": "Visible controls:\n- button: \"Add Issue\"; selector=#add-issue",
+                },
+            },
+        ),
+    )
+    client = _CapturingClient([
+        _StaticStream([
+            StreamEnded(
+                finish_reason="tool_calls",
+                usage=None,
+                timings=None,
+                full_reasoning="",
+                full_content="",
+                tool_calls=({
+                    "id": "call_browser_1",
+                    "name": "browser",
+                    "arguments": {"action": "click", "target": "Open"},
+                    "raw_arguments": '{"action":"click","target":"Open"}',
+                },),
+            ),
+        ]),
+        _StaticStream([
+            StreamEnded(
+                finish_reason="stop",
+                usage=None,
+                timings=None,
+                full_reasoning="",
+                full_content="Done.",
+                tool_calls=(),
+            ),
+        ]),
+    ])
+    chat = SuccessorChat(
+        profile=Profile(
+            name="browser-chat",
+            tools=("browser",),
+            skills=("browser-verifier",),
+        ),
+        client=client,
+    )
+    chat.messages = []
+
+    chat.input_buffer = "inspect it like a human and verify the UI"
+    chat._submit()
+    _pump_until_idle(chat)
+    chat._trace.close()
+
+    assert len(client.calls) == 2
+    second_sys = client.calls[1]["messages"][0]
+    assert second_sys["role"] == "system"
+    assert "Browser Verification Reminder" in second_sys["content"]
+    assert "Visible controls:" in second_sys["content"]
+    assert any(
+        msg.synthetic and "browser actions stalled on the same page state" in msg.raw_text
+        for msg in chat.messages
+        if msg.role == "successor"
+    )
+    events = _trace_events(temp_config_dir)
+    assert any(event["type"] == "browser_verification_intervention" for event in events)
+    assert any(event["type"] == "progress_summary_emitted" for event in events)
 
 
 def test_native_vision_tool_call_dispatches(monkeypatch, temp_config_dir: Path) -> None:

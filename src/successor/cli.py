@@ -140,11 +140,12 @@ def _play_intro_animation(name: str) -> None:
     """Play a registered intro animation, blocking until it finishes.
 
     For v0, only "successor" is supported — it plays the bundled
-    11-frame numbered emergence sequence ending on the title frame,
-    held for a couple of seconds. `hero.txt` is separate empty-state
-    art for the chat and is not part of this animation. Any keypress
-    skips ahead. Unknown intro names are silently ignored so a profile
-    that references a future intro doesn't break the chat.
+    11-frame numbered emergence sequence ending on the held oracle
+    frame, held for a couple of seconds. `hero.txt` is separate
+    empty-state art for the chat and is not part of this animation.
+    `10-title.txt` remains the legacy filename for the final frame.
+    Any keypress skips ahead. Unknown intro names are silently ignored
+    so a profile that references a future intro doesn't break the chat.
     """
     if name != "successor":
         # Future: walk ~/.config/successor/intros/<name>/ for user intros.

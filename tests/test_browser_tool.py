@@ -391,6 +391,9 @@ def test_progress_tracker_warns_after_repeated_unchanged_states() -> None:
 
     assert "Progress note: page state has not meaningfully changed" in warned.output
     assert "Visible controls:" in warned.output
+    assert warned.metadata is not None
+    assert warned.metadata["verification_intervention"]["kind"] == "stagnant_state"
+    assert warned.metadata["browser_progress"]["stagnant_repeats"] >= 2
 
 
 def test_progress_tracker_warns_after_reopening_same_page_state() -> None:
@@ -409,6 +412,9 @@ def test_progress_tracker_warns_after_reopening_same_page_state() -> None:
 
     assert "Progress note: you reopened the same page" in warned.output
     assert "Visible controls:" in warned.output
+    assert warned.metadata is not None
+    assert warned.metadata["verification_intervention"]["kind"] == "repeated_open"
+    assert warned.metadata["browser_progress"]["repeated_open"] is True
 
 
 def test_progress_tracker_warns_after_repeated_failures() -> None:
@@ -426,3 +432,6 @@ def test_progress_tracker_warns_after_repeated_failures() -> None:
 
     assert "Progress note: this browser action has failed repeatedly" in warned.stderr
     assert "Visible controls:" in warned.stderr
+    assert warned.metadata is not None
+    assert warned.metadata["verification_intervention"]["kind"] == "repeat_failure"
+    assert warned.metadata["browser_progress"]["repeat_failures"] >= 2

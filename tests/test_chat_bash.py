@@ -637,7 +637,7 @@ def test_continue_loop_respects_turn_cap(temp_config_dir: Path) -> None:
 
     chat.input_buffer = "keep going"
     chat._submit()
-    _drive_until_idle(chat, max_ticks=200)
+    _drive_until_idle(chat, max_ticks=1000)
 
     # Exactly MAX_AGENT_TURNS streams were consumed (not more)
     assert chat.client.call_count == MAX_AGENT_TURNS, (
@@ -655,6 +655,37 @@ def test_continue_loop_respects_turn_cap(temp_config_dir: Path) -> None:
         if m.synthetic and "halted" in m.raw_text.lower()
     ]
     assert len(halt_msgs) >= 1, "expected an 'agent loop halted' marker"
+
+
+def test_continue_loop_respects_profile_max_agent_turns(temp_config_dir: Path) -> None:
+    from successor.profiles import Profile
+
+    chat = SuccessorChat()
+    chat.profile = Profile(
+        name="short-cap",
+        tools=("bash",),
+        tool_config={"bash": {"allow_dangerous": True, "allow_mutating": True}},
+        max_agent_turns=7,
+    )
+    chat.messages = []
+    chat.client = _MockClient(streams=[
+        _FakeStream([
+            _content(f"```bash\necho turn-{i}\n```\n"),
+            _stream_end(),
+        ])
+        for i in range(20)
+    ])
+
+    chat.input_buffer = "keep going"
+    chat._submit()
+    _drive_until_idle(chat, max_ticks=200)
+
+    assert chat.client.call_count == 7
+    halt_msgs = [
+        m for m in chat.messages
+        if m.synthetic and "halted at 7 turns" in (m.raw_text or "").lower()
+    ]
+    assert halt_msgs, "expected the custom turn cap to appear in the halt marker"
 
 
 def test_continue_loop_skips_when_all_blocks_refused(temp_config_dir: Path) -> None:

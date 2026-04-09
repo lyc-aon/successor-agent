@@ -46,6 +46,7 @@ communicate via a thread-safe queue.
 from __future__ import annotations
 
 import json
+import math
 import os
 import random
 import time
@@ -56,6 +57,12 @@ from . import __version__
 from .config import load_chat_config, save_chat_config
 from .graphemes import delete_prev_grapheme
 from .playback import RecordingBundle, default_recording_bundle_dir
+from .progress import (
+    ProgressUpdate,
+    combine_progress_updates,
+    summarize_subagent_completion,
+    summarize_tool_completion,
+)
 from .input.keys import (
     InputEvent,
     Key,
@@ -68,6 +75,7 @@ from .input.keys import (
     MouseEvent,
 )
 from .profiles import (
+    DEFAULT_MAX_AGENT_TURNS,
     PROFILE_REGISTRY,
     Profile,
     all_profiles,
@@ -184,6 +192,10 @@ from .web import (
     run_vision_analysis,
     vision_preview_card,
     vision_runtime_status,
+)
+from .web.verification import (
+    build_verification_nudge,
+    classify_browser_verification,
 )
 from .session_trace import SessionTrace, clip_text as _trace_clip_text
 from .render.markdown import (
@@ -433,14 +445,9 @@ class _HitBox:
 WHEEL_SCROLL_LINES = 3
 
 
-# Hard cap on agent-loop turns within a single user submission. Each
-# user message kicks off turn 1; if the model emits bash blocks, the
-# harness executes them and calls back into the model for turn 2, then
-# 3, etc. Stops when the model returns no bash blocks (text-only) OR
-# when this cap is hit, whichever comes first. 25 is generous enough
-# for realistic multi-step tasks (scaffold → install → verify ≈ 5-8
-# turns) and low enough to catch pathological loops in seconds.
-MAX_AGENT_TURNS = 25
+# Historical fallback for tests or partially-upgraded profiles that do
+# not yet carry the newer per-profile field.
+MAX_AGENT_TURNS = DEFAULT_MAX_AGENT_TURNS
 
 
 # ─── Input history recall ───
@@ -1893,6 +1900,14 @@ class SuccessorChat(App):
         self._task_ledger = SessionTaskLedger()
         self._task_continue_nudged_this_turn: bool = False
         self._task_continue_nudge: str | None = None
+        self._browser_verification_active: bool = False
+        self._browser_verification_reason: str = ""
+        self._verification_continue_nudged_this_turn: bool = False
+        self._verification_continue_nudge: str | None = None
+        self._subagent_continue_nudged_this_turn: bool = False
+        self._subagent_continue_nudge: str | None = None
+        self._recent_progress_summaries: list[tuple[float, str]] = []
+        self._last_progress_summary: str = ""
         # In-flight BashRunner instances. Each entry is a _Message
         # whose `running_tool` field points at a BashRunner that
         # hasn't completed yet. on_tick polls this list every frame,
@@ -3167,6 +3182,147 @@ class SuccessorChat(App):
                 return True
         return False
 
+    def _latest_real_user_text(self) -> str:
+        for msg in reversed(self.messages):
+            if msg.role != "user":
+                continue
+            if msg.synthetic or _message_has_tool_artifact(msg):
+                continue
+            return str(msg.raw_text or "")
+        return ""
+
+    def _refresh_browser_verification_mode(self) -> None:
+        active_task = self._task_ledger.in_progress_task()
+        active_task_text = active_task.active_form if active_task is not None else ""
+        active, reason = classify_browser_verification(
+            latest_user_text=self._latest_real_user_text(),
+            active_task_text=active_task_text,
+            browser_verifier_loaded=self._skill_already_loaded("browser-verifier"),
+        )
+        changed = (
+            active != self._browser_verification_active
+            or reason != self._browser_verification_reason
+        )
+        self._browser_verification_active = active
+        self._browser_verification_reason = reason
+        if changed:
+            self._trace_event(
+                "browser_verification_mode",
+                turn=self._agent_turn,
+                active=active,
+                reason=reason,
+                active_task=active_task_text,
+                latest_user_excerpt=_trace_clip_text(
+                    self._latest_real_user_text(),
+                    limit=240,
+                ),
+            )
+
+    def _emit_progress_summary(
+        self,
+        text: str,
+        *,
+        source: str,
+        detail: dict[str, Any] | None = None,
+    ) -> bool:
+        cleaned = " ".join(str(text or "").split()).strip()
+        detail = dict(detail or {})
+        if not cleaned:
+            self._trace_event(
+                "progress_summary_skipped",
+                turn=self._agent_turn,
+                source=source,
+                reason="empty",
+                **detail,
+            )
+            return False
+        if cleaned == self._last_progress_summary:
+            self._trace_event(
+                "progress_summary_skipped",
+                turn=self._agent_turn,
+                source=source,
+                reason="duplicate",
+                text=cleaned,
+                **detail,
+            )
+            return False
+        self._last_progress_summary = cleaned
+        now = time.monotonic()
+        self._recent_progress_summaries.append((now, cleaned))
+        self._recent_progress_summaries = [
+            item for item in self._recent_progress_summaries
+            if now - item[0] <= 300.0
+        ][-8:]
+        self.messages.append(_Message("successor", cleaned, synthetic=True))
+        self._trace_event(
+            "progress_summary_emitted",
+            turn=self._agent_turn,
+            source=source,
+            text=cleaned,
+            **detail,
+        )
+        if self._auto_scroll:
+            self._scroll_to_bottom()
+        return True
+
+    def _handle_browser_verification_result(
+        self,
+        card: ToolCard,
+        metadata: dict[str, Any],
+    ) -> None:
+        if not self._browser_verification_active:
+            return
+        intervention = metadata.get("verification_intervention")
+        if not isinstance(intervention, dict):
+            return
+        self._trace_event(
+            "browser_verification_intervention",
+            turn=self._agent_turn,
+            reason=self._browser_verification_reason,
+            kind=str(intervention.get("kind") or ""),
+            action=str(card.tool_arguments.get("action") or ""),
+            target=str(card.tool_arguments.get("target") or card.tool_arguments.get("url") or ""),
+            recommended_action=str(intervention.get("recommended_action") or ""),
+        )
+        if self._verification_continue_nudged_this_turn:
+            return
+        nudge = build_verification_nudge(intervention)
+        if not nudge:
+            return
+        self._verification_continue_nudged_this_turn = True
+        self._verification_continue_nudge = nudge
+
+    def _emit_completed_tool_batch_progress(
+        self,
+        completed: list[tuple[str, ToolCard, dict[str, Any]]],
+    ) -> None:
+        updates: list[ProgressUpdate] = []
+        for tool_name, card, metadata in completed:
+            if tool_name == "browser":
+                self._handle_browser_verification_result(card, metadata)
+            update = summarize_tool_completion(card, metadata=metadata)
+            if update is not None:
+                updates.append(update)
+        summary = combine_progress_updates(updates)
+        if summary is None:
+            self._trace_event(
+                "progress_summary_skipped",
+                turn=self._agent_turn,
+                source="tool_batch",
+                reason="not_meaningful",
+                tool_names=[tool_name for tool_name, _, _ in completed],
+                update_count=len(updates),
+            )
+            return
+        self._emit_progress_summary(
+            summary,
+            source="tool_batch",
+            detail={
+                "tool_names": [tool_name for tool_name, _, _ in completed],
+                "update_count": len(updates),
+            },
+        )
+
     def _browser_manager_for_profile(self) -> PlaywrightBrowserManager:
         if self._browser_manager is not None:
             return self._browser_manager
@@ -3331,6 +3487,7 @@ class SuccessorChat(App):
         notes = self._subagent_manager.drain_notifications()
         if not notes:
             return
+        updates: list[ProgressUpdate] = []
         for note in notes:
             self.messages.append(_Message(
                 "successor",
@@ -3338,6 +3495,56 @@ class SuccessorChat(App):
                 api_role_override="user",
                 display_text=build_notification_display(note.task),
             ))
+            update = summarize_subagent_completion(note.task)
+            if update is not None:
+                updates.append(update)
+        if len(updates) > 1:
+            summary = combine_progress_updates(updates)
+            if summary:
+                self._emit_progress_summary(
+                    summary,
+                    source="subagent",
+                    detail={"notification_count": len(notes)},
+                )
+        else:
+            self._trace_event(
+                "progress_summary_skipped",
+                turn=self._agent_turn,
+                source="subagent",
+                reason="single_notification_already_visible",
+                notification_count=len(notes),
+            )
+        if (
+            notes
+            and self._agent_turn > 0
+            and self._task_ledger.has_in_progress()
+            and not self._subagent_continue_nudged_this_turn
+            and self._stream is None
+            and not self._running_tools
+            and not self._pending_continuation
+        ):
+            note = notes[-1].task
+            active = self._task_ledger.in_progress_task()
+            summary = note.result_excerpt or note.error or note.status
+            self._subagent_continue_nudged_this_turn = True
+            self._subagent_continue_nudge = (
+                "A background subagent just finished while a session task is still "
+                f"`in_progress` ({active.active_form if active else 'active task'}). "
+                f"Use the new subagent result before you decide the next step. Latest "
+                f"subagent result: `{summary}`. If that resolves the active task, "
+                "update the task ledger before you stop."
+            )
+            self._trace_event(
+                "subagent_followup_nudge",
+                turn=self._agent_turn,
+                task_id=note.task_id,
+                task_name=note.name,
+                status=note.status,
+                active_task=active.active_form if active else "",
+                result_excerpt=summary,
+            )
+            self._begin_agent_turn()
+            return
         if self._auto_scroll:
             self._scroll_to_bottom()
 
@@ -3791,6 +3998,12 @@ class SuccessorChat(App):
         self._agent_turn = 0
         self._task_continue_nudged_this_turn = False
         self._task_continue_nudge = None
+        self._browser_verification_active = False
+        self._browser_verification_reason = ""
+        self._verification_continue_nudged_this_turn = False
+        self._verification_continue_nudge = None
+        self._subagent_continue_nudged_this_turn = False
+        self._subagent_continue_nudge = None
         # Reset the per-turn autocompact guard so a new user message
         # gets exactly one autocompact attempt before falling through
         # to the API (which may then trip reactive PTL recovery).
@@ -3827,15 +4040,21 @@ class SuccessorChat(App):
             return
 
         self._agent_turn += 1
-        if self._agent_turn > MAX_AGENT_TURNS:
+        max_agent_turns = max(
+            1,
+            int(getattr(self.profile, "max_agent_turns", MAX_AGENT_TURNS) or MAX_AGENT_TURNS),
+        )
+        if self._agent_turn > max_agent_turns:
             self.messages.append(_Message(
                 "successor",
-                f"[agent loop halted at {MAX_AGENT_TURNS} turns — "
+                f"[agent loop halted at {max_agent_turns} turns — "
                 f"send a new message to continue]",
                 synthetic=True,
             ))
             self._agent_turn = 0
             return
+
+        self._refresh_browser_verification_mode()
 
         # Resolve which tools are enabled for THIS turn from the active
         # profile. filter_known() drops any unrecognized names so a
@@ -3934,6 +4153,20 @@ class SuccessorChat(App):
                 f"{self._task_continue_nudge}"
             )
             self._task_continue_nudge = None
+        if self._verification_continue_nudge:
+            sys_prompt = (
+                f"{sys_prompt}\n\n"
+                f"## Browser Verification Reminder\n\n"
+                f"{self._verification_continue_nudge}"
+            )
+            self._verification_continue_nudge = None
+        if self._subagent_continue_nudge:
+            sys_prompt = (
+                f"{sys_prompt}\n\n"
+                f"## Background Task Reminder\n\n"
+                f"{self._subagent_continue_nudge}"
+            )
+            self._subagent_continue_nudge = None
 
         # Build the conversation history for the model in NATIVE Qwen
         # tool-call shape. Each pass through the message list pairs an
@@ -3962,6 +4195,8 @@ class SuccessorChat(App):
             continuation=(self._agent_turn > 1),
             enabled_tools=enabled_tools,
             enabled_skills=[skill.name for skill in enabled_skills],
+            browser_verification_active=self._browser_verification_active,
+            browser_verification_reason=self._browser_verification_reason,
             api_message_count=len(api_messages),
             last_user_excerpt=_find_last_user_excerpt(api_messages),
         )
@@ -5774,6 +6009,7 @@ class SuccessorChat(App):
             return
 
         completed_msgs: list[_Message] = []
+        completed_tool_batch: list[tuple[str, ToolCard, dict[str, Any]]] = []
         for msg in self._running_tools:
             runner = msg.running_tool
             if runner is None:
@@ -5812,7 +6048,9 @@ class SuccessorChat(App):
             msg._card_rows_cache_key = None
             msg._card_rows_cache = None
             if runner.is_done():
-                self._finalize_runner(msg)
+                finalized = self._finalize_runner(msg)
+                if finalized is not None:
+                    completed_tool_batch.append(finalized)
                 completed_msgs.append(msg)
 
         for msg in completed_msgs:
@@ -5820,6 +6058,9 @@ class SuccessorChat(App):
                 self._running_tools.remove(msg)
             except ValueError:
                 pass
+
+        if completed_tool_batch:
+            self._emit_completed_tool_batch_progress(completed_tool_batch)
 
         # If we just finished the last runner in a continuation batch,
         # fire the next agent-loop turn so the model can react.
@@ -5832,7 +6073,10 @@ class SuccessorChat(App):
             self._pending_continuation = False
             self._begin_agent_turn()
 
-    def _finalize_runner(self, msg: "_Message") -> None:
+    def _finalize_runner(
+        self,
+        msg: "_Message",
+    ) -> tuple[str, ToolCard, dict[str, Any]] | None:
         """Replace the preview tool_card on `msg` with the final
         enriched card built from the runner's accumulated stdout,
         stderr, exit code, and duration. Clears running_tool so the
@@ -5843,7 +6087,7 @@ class SuccessorChat(App):
         runner = msg.running_tool
         preview = msg.tool_card
         if runner is None or preview is None:
-            return
+            return None
         build_final = getattr(runner, "build_final_card", None)
         if callable(build_final):
             final_card = build_final(preview)
@@ -5872,6 +6116,7 @@ class SuccessorChat(App):
             )
             if change_artifact is not None:
                 final_card = _replace(final_card, change_artifact=change_artifact)
+        metadata = dict(getattr(runner, "metadata", None) or {})
         msg.tool_card = final_card
         msg.running_tool = None
         msg._card_rows_cache_key = None
@@ -5889,6 +6134,7 @@ class SuccessorChat(App):
             stderr_excerpt=_trace_clip_text(final_card.stderr, limit=320),
             truncated=final_card.truncated,
         )
+        return tool_name, final_card, metadata
 
     def _cancel_running_tools(self) -> None:
         """Signal every in-flight runner to terminate. Used by Ctrl+G
@@ -6003,12 +6249,6 @@ class SuccessorChat(App):
         # ─── Background ───
         fill_region(grid, 0, 0, cols, rows, style=Style(bg=theme.bg))
 
-        # ─── Title row ───
-        title = " successor · chat "
-        title_style = Style(fg=theme.fg, bg=theme.bg, attrs=ATTR_BOLD)
-        tx = max(0, (cols - len(title)) // 2)
-        paint_text(grid, title, tx, 0, style=title_style)
-
         # ─── Chat scroll area ───
         self._paint_chat_area(grid, chat_top, chat_bottom, cols, theme)
 
@@ -6105,6 +6345,18 @@ class SuccessorChat(App):
             )
         else:
             task_x = profile_x
+
+        # ─── Title row ───
+        # Prefer a centered title when the header has room. As the
+        # window narrows and the right-hand pills advance left, clamp
+        # the title toward the left instead of letting it sit in an
+        # awkward pseudo-center that collides with the controls.
+        title = " successor · chat "
+        title_style = Style(fg=theme.fg, bg=theme.bg, attrs=ATTR_BOLD)
+        desired_tx = max(2, (cols - len(title)) // 2)
+        max_tx = max(2, task_x - len(title) - 3)
+        tx = min(desired_tx, max_tx)
+        paint_text(grid, title, tx, 0, style=title_style)
 
         # ─── Scroll indicator (left of the profile widget when scrolled) ───
         if self.scroll_offset > 0:
@@ -6329,11 +6581,12 @@ class SuccessorChat(App):
         """Hero portrait on the left, info panel on the right.
 
         Layout:
-          - On terminals >= 80 cols, split horizontally: art takes
-            roughly the left half, info panel the right half, with
-            modest padding around both.
+          - When there is enough horizontal room for both, anchor the
+            info panel as a right-hand rail and fit the hero into the
+            remaining left field while preserving aspect ratio.
           - On narrower terminals, hide the art and center the info
-            panel — the art has no value if it'd squish to 30 cols.
+            panel — the art has no value if it'd collapse below a
+            readable fitted size.
           - On very short chat areas (< 12 rows), only paint the
             info panel (the art needs vertical room to read).
 
@@ -6342,8 +6595,8 @@ class SuccessorChat(App):
         theme.fg (primary), the bottom hint in theme.accent_warm so
         the user notices the "type / for commands · ? for help" line.
         """
-        from .render.cells import Cell
-        from .render.paint import fill_region
+        from .render.braille import fit_dimensions
+        from .render.paint import paint_box
 
         chat_h = bottom - top
         if chat_h < 6:
@@ -6355,53 +6608,110 @@ class SuccessorChat(App):
         panel_lines = self._build_intro_panel_lines()
         panel_h = len(panel_lines)
 
+        panel_intrinsic_w = 0
+        for label, value, is_header, is_hint in panel_lines:
+            if is_hint:
+                panel_intrinsic_w = max(panel_intrinsic_w, len(label))
+            elif is_header:
+                panel_intrinsic_w = max(panel_intrinsic_w, len(label))
+            elif value:
+                panel_intrinsic_w = max(panel_intrinsic_w, 2 + len(value))
+        panel_intrinsic_w = max(26, panel_intrinsic_w)
+
         art = self._resolve_intro_art()
-        # Decide whether to show the art at all. Need >= 80 cols for
-        # the split layout, AND >= 12 rows for the art to be readable.
-        show_art = (
-            art is not None
-            and width >= 80
-            and chat_h >= 12
-        )
+        outer_pad = 3 if width < 96 else (5 if width < 120 else 6)
+        inner_gap = 3 if width < 100 else 6
+        panel_w = min(max(panel_intrinsic_w + 2, 28), max(28, width - 2 * outer_pad))
+        panel_x = max(outer_pad, width - outer_pad - panel_w)
 
-        if show_art:
-            # Two-column layout. Reserve ~half for art, half for panel,
-            # with 4-cell gutters on the outside and a 6-cell gap between.
-            outer_pad = 4
-            inner_gap = 6
-            half = (width - 2 * outer_pad - inner_gap) // 2
-            art_cells_w = max(20, half)
-            panel_x = outer_pad + art_cells_w + inner_gap
-            panel_w = max(20, width - panel_x - outer_pad)
-
-            # Art takes most of the chat height; pad top and bottom
-            # so the portrait sits balanced.
-            art_pad_y = max(1, (chat_h - 24) // 4)
-            art_cells_h = max(8, chat_h - 2 * art_pad_y)
-            art_y = top + art_pad_y
-            art_x = outer_pad
-
-            try:
-                lines = art.layout(art_cells_w, art_cells_h)
-            except Exception:  # noqa: BLE001
-                lines = []
-            art_style = Style(
-                fg=theme.accent,
-                bg=theme.bg,
-                attrs=ATTR_BOLD,
+        show_art = False
+        art_lines: list[str] = []
+        art_x = 0
+        art_y = 0
+        if art is not None and chat_h >= 12:
+            art_box_x = outer_pad
+            art_box_w = max(0, panel_x - inner_gap - art_box_x)
+            art_avail_h = max(10, chat_h - (2 if width < 96 else 4))
+            art_fit_w, art_fit_h = fit_dimensions(
+                art.dot_h,
+                art.dot_w,
+                avail_cells_h=art_avail_h,
+                avail_cells_w=art_box_w,
+                pad_cells=0,
             )
-            for i, line in enumerate(lines):
-                ly = art_y + i
-                if ly >= bottom:
-                    break
-                paint_text(grid, line, art_x, ly, style=art_style)
-        else:
+            show_art = art_fit_w >= 14 and art_fit_h >= 10
+            if show_art:
+                try:
+                    art_lines = art.layout(art_fit_w, art_fit_h)
+                except Exception:  # noqa: BLE001
+                    art_lines = []
+                # Bias the hero toward the left edge of its field so
+                # spare width becomes a real middle gutter rather than
+                # collapsing into text sitting right beside the face.
+                art_left_pad = 2 if width < 96 else 5
+                art_x = art_box_x + max(0, min(art_left_pad, art_box_w - art_fit_w))
+                art_y = top + max(0, (chat_h - len(art_lines)) // 2)
+
+        right_anchor_panel = show_art
+
+        if not show_art:
             # Info panel only — center it horizontally with mild padding.
             panel_w = min(60, max(30, width - 8))
             panel_x = max(2, (width - panel_w) // 2)
 
         # Vertically center the info panel within the chat area.
         panel_y_start = top + max(0, (chat_h - panel_h) // 2)
+
+        if show_art and art_lines:
+            shell_left = max(outer_pad - 1, art_x - 3)
+            shell_right = min(width - outer_pad + 1, panel_x + panel_w + 1)
+            shell_top = max(top + 1, min(art_y, panel_y_start) - 1)
+            shell_bottom = min(
+                bottom - 2,
+                max(art_y + len(art_lines) - 1, panel_y_start + panel_h - 1) + 1,
+            )
+            shell_w = shell_right - shell_left + 1
+            shell_h = shell_bottom - shell_top + 1
+            if shell_w >= 12 and shell_h >= 8:
+                shell_border = Style(
+                    fg=lerp_rgb(theme.fg_subtle, theme.accent_warm, 0.20),
+                    bg=theme.bg,
+                    attrs=ATTR_DIM,
+                )
+                shell_fill = Style(
+                    fg=theme.fg,
+                    bg=lerp_rgb(theme.bg, theme.bg_input, 0.72),
+                    attrs=0,
+                )
+                paint_box(
+                    grid,
+                    shell_left,
+                    shell_top,
+                    shell_w,
+                    shell_h,
+                    style=shell_border,
+                    fill_style=shell_fill,
+                    chars=("╭", "╮", "╰", "╯", "┈", "┆"),
+                )
+
+            art_style = Style(
+                fg=theme.accent,
+                bg=lerp_rgb(theme.bg, theme.bg_input, 0.72),
+                attrs=ATTR_BOLD,
+            )
+            for i, line in enumerate(art_lines):
+                ly = art_y + i
+                if ly >= bottom:
+                    break
+                paint_text(grid, line, art_x, ly, style=art_style)
+            self._paint_empty_state_oracle_fx(
+                grid,
+                lines=art_lines,
+                art_x=art_x,
+                art_y=art_y,
+                panel_x=panel_x,
+                theme=theme,
+            )
 
         # Paint the info panel rows. Each row is (label_text, value_text,
         # is_header, is_hint) so we can pick the right style per role.
@@ -6410,35 +6720,136 @@ class SuccessorChat(App):
             if ly >= bottom or ly < top:
                 continue
             if is_hint:
-                # Right-side hint: theme.accent_warm + bold so the user
-                # notices it. Centered in the panel column.
-                hint_x = panel_x + max(0, (panel_w - len(label)) // 2)
+                # In the split hero+rail layout, anchor the hint to the
+                # rail's right edge so the whole panel reads as one
+                # intentional right-hand column. In panel-only mode,
+                # keep the softer centered hint.
+                if right_anchor_panel:
+                    hint_x = panel_x + max(0, panel_w - len(label))
+                else:
+                    hint_x = panel_x + max(0, (panel_w - len(label)) // 2)
                 paint_text(
                     grid,
                     label,
                     hint_x,
                     ly,
-                    style=Style(fg=theme.accent_warm, bg=theme.bg, attrs=ATTR_BOLD),
+                    style=Style(
+                        fg=theme.accent_warm,
+                        bg=lerp_rgb(theme.bg, theme.bg_input, 0.72) if right_anchor_panel else theme.bg,
+                        attrs=ATTR_BOLD,
+                    ),
                 )
                 continue
             if is_header:
-                # Section header: dimmed uppercase label.
+                # Section header: dimmed label. In split layout, right-align
+                # it to the rail edge so the panel really hugs the screen
+                # border instead of reading like a skinny floating column.
+                header_label = label
+                header_x = panel_x
+                if right_anchor_panel:
+                    header_x = panel_x + max(0, panel_w - len(header_label))
                 paint_text(
                     grid,
-                    label,
-                    panel_x,
+                    header_label,
+                    header_x,
                     ly,
-                    style=Style(fg=theme.fg_dim, bg=theme.bg, attrs=ATTR_DIM | ATTR_BOLD),
+                    style=Style(
+                        fg=lerp_rgb(theme.fg_dim, theme.accent_warm, 0.22),
+                        bg=lerp_rgb(theme.bg, theme.bg_input, 0.72) if right_anchor_panel else theme.bg,
+                        attrs=ATTR_DIM | ATTR_BOLD,
+                    ),
                 )
                 continue
-            # Value row: indented two cells under the header.
+            # Value row: right-align in split layout; otherwise keep the
+            # existing indented panel-only presentation.
+            value_text = value if right_anchor_panel else "  " + value
+            value_x = panel_x
+            if right_anchor_panel:
+                value_x = panel_x + max(0, panel_w - len(value_text))
             paint_text(
                 grid,
-                "  " + value,
-                panel_x,
+                value_text,
+                value_x,
                 ly,
-                style=Style(fg=theme.fg, bg=theme.bg),
+                style=Style(
+                    fg=theme.fg,
+                    bg=lerp_rgb(theme.bg, theme.bg_input, 0.72) if right_anchor_panel else theme.bg,
+                ),
             )
+
+    def _paint_empty_state_oracle_fx(
+        self,
+        grid: Grid,
+        *,
+        lines: list[str],
+        art_x: int,
+        art_y: int,
+        panel_x: int,
+        theme: ThemeVariant,
+    ) -> None:
+        """Subtle idle motion for the empty-state oracle.
+
+        The base hero stays fixed. We add three low-noise overlays:
+
+        - a slow scan shimmer across the crown
+        - a soft pulse through the chest / pedestal core
+        This keeps the oracle feeling alive without turning the empty
+        state into a second startup animation.
+        """
+        if not lines:
+            return
+
+        art_h = len(lines)
+        art_w = max((len(line) for line in lines), default=0)
+        if art_w <= 0 or art_h <= 0:
+            return
+
+        now = time.monotonic()
+
+        crown_scan_t = (now / 8.0) % 1.0
+        crown_band_y = 0.04 + 0.26 * crown_scan_t
+        crown_style = Style(
+            fg=lerp_rgb(theme.accent, theme.accent_warm, 0.62),
+            bg=lerp_rgb(theme.bg, theme.bg_input, 0.72),
+            attrs=ATTR_BOLD,
+        )
+
+        pulse = 0.5 + 0.5 * math.sin(now * 1.15)
+        pulse_style = Style(
+            fg=lerp_rgb(theme.accent, theme.fg, 0.18 + 0.28 * pulse),
+            bg=lerp_rgb(theme.bg, theme.bg_input, 0.72),
+            attrs=ATTR_BOLD,
+        )
+
+        for dy, line in enumerate(lines):
+            if not line:
+                continue
+            ny = dy / max(1, art_h - 1)
+            for dx, ch in enumerate(line):
+                if ch in {" ", "⠀"}:
+                    continue
+                nx = dx / max(1, art_w - 1)
+
+                crown_band = crown_band_y + (nx - 0.5) * 0.08
+                if ny <= 0.34 and abs(ny - crown_band) <= 0.035:
+                    paint_text(
+                        grid,
+                        ch,
+                        art_x + dx,
+                        art_y + dy,
+                        style=crown_style,
+                    )
+                    continue
+
+                core_shape = abs(nx - 0.5) * 1.65 + abs(ny - 0.67) * 1.05
+                if pulse > 0.56 and 0.42 <= ny <= 0.92 and core_shape <= 0.27:
+                    paint_text(
+                        grid,
+                        ch,
+                        art_x + dx,
+                        art_y + dy,
+                        style=pulse_style,
+                    )
 
     def _build_intro_panel_lines(self) -> list[tuple[str, str, bool, bool]]:
         """Build the rows for the empty-state info panel.

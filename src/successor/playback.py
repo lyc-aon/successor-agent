@@ -1113,6 +1113,8 @@ def write_playback_html(
       const text = String(name || "").toLowerCase();
       if (text.startsWith("stream") || text.startsWith("continuation")) return "stream";
       if (text.startsWith("tool") || text.startsWith("bash")) return "tool";
+      if (text.startsWith("progress")) return "task";
+      if (text.startsWith("browser_verification")) return "task";
       if (text.startsWith("task") || text.startsWith("subagent")) return "task";
       if (text.startsWith("user")) return "user";
       return "event";

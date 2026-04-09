@@ -11,7 +11,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -19,6 +19,7 @@ from typing import Any
 from ..bash.cards import ToolCard
 from ..tool_runner import ToolExecutionResult, ToolProgress
 from .config import BrowserConfig
+from .verification import BrowserProgressTracker as _BrowserProgressTracker
 
 
 def playwright_available() -> bool:
@@ -50,98 +51,6 @@ class BrowserRequest:
     arguments: dict[str, Any]
     done: threading.Event
     result: list[ToolExecutionResult]
-
-
-@dataclass(slots=True)
-class _BrowserProgressTracker:
-    """Track repeated failures and no-op browser actions within one session."""
-
-    last_action: str = ""
-    last_target: str = ""
-    last_state_hash: str = ""
-    stagnant_repeats: int = 0
-    last_failure_signature: tuple[str, str] | None = None
-    repeat_failures: int = 0
-    last_controls_summary: str = ""
-
-    def annotate(
-        self,
-        arguments: dict[str, Any],
-        result: ToolExecutionResult,
-    ) -> ToolExecutionResult:
-        action = str(arguments.get("action", "") or "").strip().lower()
-        target = str(arguments.get("target", "") or arguments.get("url", "") or "").strip()
-        metadata = result.metadata or {}
-        state_hash = str(metadata.get("state_hash", "") or "")
-        controls_summary = str(metadata.get("controls_summary", "") or "").strip()
-        if controls_summary:
-            self.last_controls_summary = controls_summary
-
-        if result.exit_code != 0:
-            signature = (action, target)
-            if signature == self.last_failure_signature:
-                self.repeat_failures += 1
-            else:
-                self.repeat_failures = 1
-                self.last_failure_signature = signature
-            if self.repeat_failures < 2:
-                return result
-            note = (
-                "\nProgress note: this browser action has failed repeatedly. "
-                "Stop retrying the same step. Call `inspect` to list the "
-                "actual visible controls and selector hints, or switch strategy."
-            )
-            if self.last_controls_summary:
-                note = f"{note}\n\n{self.last_controls_summary}"
-            return replace(result, stderr=(result.stderr or "").rstrip() + note)
-
-        self.repeat_failures = 0
-        self.last_failure_signature = None
-
-        repeated_open = (
-            action == "open"
-            and state_hash
-            and self.last_action == "open"
-            and target == self.last_target
-            and state_hash == self.last_state_hash
-        )
-        self.last_action = action
-        self.last_target = target
-
-        if repeated_open:
-            note = (
-                "\nProgress note: you reopened the same page and got the same "
-                "state back. Reuse the current browser session unless a code "
-                "edit, storage reset, or explicit reload is actually required."
-            )
-            if controls_summary:
-                note = f"{note}\n\n{controls_summary}"
-            return replace(result, output=(result.output or "").rstrip() + note)
-
-        if action not in {"click", "type", "press", "select", "wait_for"} or not state_hash:
-            if state_hash:
-                self.last_state_hash = state_hash
-            self.stagnant_repeats = 0
-            return result
-
-        if state_hash == self.last_state_hash:
-            self.stagnant_repeats += 1
-        else:
-            self.stagnant_repeats = 0
-        self.last_state_hash = state_hash
-
-        if self.stagnant_repeats < 2:
-            return result
-
-        note = (
-            "\nProgress note: page state has not meaningfully changed across "
-            "the last 3 browser actions. Stop exploratory clicking. Use "
-            "`inspect` to see visible controls and stable selectors before "
-            "trying again."
-        )
-        if controls_summary:
-            note = f"{note}\n\n{controls_summary}"
-        return replace(result, output=(result.output or "").rstrip() + note)
 
 
 def browser_preview_card(arguments: dict[str, Any], *, tool_call_id: str) -> ToolCard:

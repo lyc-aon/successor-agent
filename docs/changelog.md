@@ -11,6 +11,135 @@ unit on top of phase 0.
 
 ---
 
+## v0.1.23, control-layer runtime controller + higher turn budgets + supervised studio showcase (2026-04-09)
+
+This pass moves the autonomy work out of "prompt encouragement" territory
+and into the runtime where it belongs.
+
+The two concrete gaps from the local `free-code` references were:
+
+- verification-shaped browser turns still drifted into rabbit holes
+- long multi-tool runs were observable in playback, but not legible live
+
+This release lands the first real runtime implementation of that control layer:
+
+- Phase A: browser verification controller
+- Phase B: deterministic progress summaries
+- Phase C: bounded subagent follow-through
+
+It also fixes a practical local-model bottleneck that the showcase runs
+made obvious: the harness's old `25`-turn default was too low for real
+multi-step work. Profiles now default to `80` turns, and the setup
+wizard / config menu expose that directly.
+
+The renderer-side activity lane and diff-engine efficiency work are still
+separate later phases.
+
+### Deterministic references
+
+Local `free-code` references that directly shaped the implementation:
+
+- `/home/lycaon/dev/archive/free-code-main/src/cli/print.ts`
+  - keep-draining loop structure
+  - autonomy belongs in runtime control, not only prompt text
+- `/home/lycaon/dev/archive/free-code-main/src/tools/AgentTool/built-in/verificationAgent.ts`
+  - verification is a separate control problem
+- `/home/lycaon/dev/archive/free-code-main/src/tools/TodoWriteTool/prompt.ts`
+  - explicit progress/task visibility during long runs
+- `/home/lycaon/dev/archive/free-code-main/src/services/toolUseSummary/toolUseSummaryGenerator.ts`
+  - compact progress surfaces after tool work
+- `/home/lycaon/dev/archive/free-code-main/src/services/tools/toolOrchestration.ts`
+  - orchestration rules should distinguish safe progress from thrash
+
+### What landed
+
+- new `src/successor/web/verification.py`
+  - `classify_browser_verification(...)` for runtime activation
+  - `BrowserProgressTracker` moved out of `browser.py` into a reusable
+    module
+  - structured intervention metadata for:
+    - repeated failures
+    - repeated same-state opens
+    - stagnant multi-action browser loops
+  - `build_verification_nudge(...)` to convert those interventions into
+    next-turn runtime reminders
+- new `src/successor/progress.py`
+  - deterministic summary builders for:
+    - browser
+    - holonet
+    - vision
+    - meaningful bash writes / diffs
+    - subagent completions
+  - batch combiner that suppresses low-signal one-off noise
+- `src/successor/web/browser.py`
+  - now imports the shared browser-progress tracker instead of owning its
+    own private policy logic
+- `src/successor/chat.py`
+  - tracks browser-verification mode per turn using:
+    - latest real user request
+    - active task text
+    - whether `browser-verifier` is already loaded
+  - injects browser-verification reminders into the system prompt only
+    when the runtime actually observed a problem
+  - emits compact synthetic `progress: ...` rows from completed tool
+    batches
+  - emits `progress_summary_emitted` / `progress_summary_skipped`
+    trace events
+  - emits `browser_verification_mode` and
+    `browser_verification_intervention` trace events
+  - completed subagents can now trigger one bounded follow-up nudge
+    while a task is still explicitly `in_progress`
+- `src/successor/playback.py`
+  - reviewer trace tone mapping now treats progress/controller events as
+    task-like events instead of undifferentiated generic events
+- docs
+  - updated `README.md`
+  - updated top-level `CHANGELOG.md`
+  - kept the public docs focused on shipped behavior instead of the
+    internal rollout notes
+- profile/runtime control
+  - added `Profile.max_agent_turns` with a default of `80`
+  - setup review screen now shows `max agent turns`
+  - `/config` can edit `max_agent_turns`
+  - the loop halt message now reflects the active profile's cap
+- E2E harness
+  - `scripts/e2e_chat_driver.py` now accepts
+    `SUCCESSOR_E2E_TURN_TIMEOUT_S` for slower real-model turns
+  - failed bash writes no longer emit misleading success-style progress
+    summaries after a non-zero exit
+- intro / empty-state shell
+  - refreshed bundled `successor` hero / intro assets
+  - smoother boot timing
+  - more generous empty-state layout with a real right rail and shared
+    shell framing
+
+### Verification
+
+- focused regressions:
+  - `PYTHONPATH=src pytest -q tests/test_profiles.py tests/test_config_menu.py tests/test_wizard.py tests/test_chat_bash.py tests/test_progress.py`
+  - `225 passed in 3.90s`
+- broader + live verification:
+  - `PYTHONPATH=src pytest -q`
+  - `1177 passed in 14.41s`
+  - live recorded E2E:
+    - `successor_studio_supervised`
+      - `4` supervised prompts
+      - `31` total agent turns
+      - `27` executed tool cards
+      - `615.3s` wall-clock
+      - built a real local `Successor Studio` app with separate
+        `HTML`, `CSS`, `data.js`, and `app.js`
+      - browser console stayed clean on the final pass
+      - final bundle path:
+        - `/home/lycaon/.local/share/successor/e2e/successor_studio_supervised/20260409-042003`
+    - `browser_local_fixture`
+      - `4/4` assertions passed
+      - `4` agent turns, `3` executed browser cards, `7.7s`
+    - `subagent_summary`
+      - `3/3` assertions passed
+      - settled in `4.6s`
+
+
 ## v0.1.21, local profile secrets + clearer holonet setup guidance (2026-04-08)
 
 The web-tool surface already supported per-profile key files, but the

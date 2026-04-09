@@ -23,6 +23,7 @@ Public surface:
 """
 
 from .profile import (
+    DEFAULT_MAX_AGENT_TURNS,
     PROFILE_REGISTRY,
     CompactionConfig,
     Profile,
@@ -38,6 +39,7 @@ from .profile import (
 __all__ = [
     "PROFILE_REGISTRY",
     "CompactionConfig",
+    "DEFAULT_MAX_AGENT_TURNS",
     "Profile",
     "SubagentConfig",
     "all_profiles",

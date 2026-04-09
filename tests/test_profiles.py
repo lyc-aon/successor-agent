@@ -23,6 +23,7 @@ import pytest
 
 from successor.config import load_chat_config
 from successor.profiles import (
+    DEFAULT_MAX_AGENT_TURNS,
     PROFILE_REGISTRY,
     Profile,
     all_profiles,
@@ -53,6 +54,7 @@ def test_parse_minimal_profile(tmp_path: Path) -> None:
     assert profile.tools == ()
     assert profile.tool_config == {}
     assert profile.intro_animation is None
+    assert profile.max_agent_turns == DEFAULT_MAX_AGENT_TURNS
 
 
 def test_parse_full_profile(tmp_path: Path) -> None:
@@ -74,6 +76,7 @@ def test_parse_full_profile(tmp_path: Path) -> None:
         "tools": ["read_file", "bash"],
         "tool_config": {"bash": {"allowed_dirs": ["/tmp"]}},
         "intro_animation": "successor",
+        "max_agent_turns": 123,
     }
     p = tmp_path / "full.json"
     p.write_text(json.dumps(data))
@@ -91,6 +94,7 @@ def test_parse_full_profile(tmp_path: Path) -> None:
     assert profile.tools == ("read_file", "bash")
     assert profile.tool_config == {"bash": {"allowed_dirs": ["/tmp"]}}
     assert profile.intro_animation == "successor"
+    assert profile.max_agent_turns == 123
 
 
 def test_parse_lowercases_name(tmp_path: Path) -> None:

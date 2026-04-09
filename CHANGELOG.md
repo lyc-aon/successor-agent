@@ -3,6 +3,64 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
+## v0.1.23 — 2026-04-09
+
+Made long autonomous runs materially stronger: the control layer now
+does real runtime browser verification steering, long sessions surface
+deterministic `progress: ...` summaries, the default agent-turn budget
+is high enough for real work, and the bundled intro / empty state got a
+cleaner framed shell.
+
+### What changed
+
+- browser tool sessions now attach structured repeated-failure,
+  repeated-open, and stagnant-state intervention metadata instead of
+  relying only on prompt wording
+- verification-shaped turns can turn those interventions into one
+  runtime continuation reminder, so the next model turn is steered away
+  from rabbit holes instead of blindly retrying
+- completed tool batches now emit compact synthetic `progress: ...`
+  rows when the result is meaningful enough to help the user follow a
+  long run
+- finished subagents can now trigger one bounded follow-up nudge while
+  an explicit session task is still `in_progress`
+- profile `max_agent_turns` now defaults to `80` instead of the old
+  `25`, and both the setup wizard review screen and `/config` can edit
+  it per profile
+- failed bash writes no longer report misleading success-style progress
+  when the command exited non-zero after touching files
+- the E2E harness now lets per-turn timeouts be raised with
+  `SUCCESSOR_E2E_TURN_TIMEOUT_S`, which matters for real local showcase
+  runs
+- refreshed the bundled `successor` intro / empty-state presentation:
+  - new oracle hero art and smoother boot timing
+  - framed empty-state shell with a proper right rail
+  - more graceful behavior on narrower windows
+- playback traces and the browser reviewer now include the new control
+  events:
+  - `browser_verification_mode`
+  - `browser_verification_intervention`
+  - `progress_summary_emitted`
+  - `progress_summary_skipped`
+  - `subagent_followup_nudge`
+
+### Verification
+
+- focused control-layer + profile/wizard/turn-cap slices:
+  `225 passed in 3.90s`
+- full suite:
+  `1177 passed in 14.41s`
+- live recorded E2E:
+  - `successor_studio_supervised`:
+    - `4` supervised prompts
+    - `31` total agent turns
+    - `27` executed tool cards
+    - fully settled, recorded, and visually reviewed
+    - built a real local `Successor Studio` reviewer app with separate
+      `HTML`, `CSS`, and `JS`, plus clean browser console output
+  - `browser_local_fixture`: `4/4` assertions passed
+  - `subagent_summary`: `3/3` assertions passed
+
 ## v0.1.21 — 2026-04-08
 
 Tightened local profile credential handling and made holonet setup

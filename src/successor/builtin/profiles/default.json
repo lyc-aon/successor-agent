@@ -22,6 +22,7 @@
   },
   "intro_animation": "successor",
   "chat_intro_art": "successor",
+  "max_agent_turns": 80,
   "compaction": {
     "warning_pct": 0.125,
     "autocompact_pct": 0.0625,

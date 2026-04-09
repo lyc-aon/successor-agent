@@ -31,8 +31,8 @@ from successor.snapshot import render_grid_to_plain
 
 def test_load_intro_art_resolves_bundled_successor() -> None:
     """The bundled `successor` name resolves via the
-    intros/<name>/hero.txt convention. hero.txt holds the soldier
-    portrait without the SUCCESSOR title text overlaid; legacy
+    intros/<name>/hero.txt convention. hero.txt holds the dedicated
+    oracle portrait used by the chat empty state; legacy
     fallback was 10-title.txt before hero.txt landed."""
     art = load_intro_art("successor")
     assert art is not None
@@ -101,43 +101,39 @@ def test_load_intro_art_falls_back_to_title_when_no_hero(
     assert on_bits > 0
 
 
-def test_bundled_successor_hero_has_no_title_text() -> None:
-    """The bundled successor hero (hero.txt) should NOT contain the
-    SUCCESSOR title text painted across the top. The title text shows
-    up in 10-title.txt only; hero.txt is the soldier-without-text
-    variant.
-
-    We detect 'has title text' by comparing the on-bit density of
-    the top quarter of hero.txt to 10-title.txt directly. The title
-    text adds ~190 dots to the top region (1420 → 1610 measured),
-    so any threshold under 1500 catches the no-title hero and any
-    threshold above 1550 would also catch the with-title legacy.
-    """
+def test_bundled_successor_oracle_assets_are_distinct_and_not_solid() -> None:
+    """The bundled oracle hero and final held intro frame should be
+    distinct assets, and the held frame should not collapse into a
+    solid full-screen block."""
     from pathlib import Path
     from successor.loader import builtin_root
     from successor.render.braille import BrailleArt, load_frame
 
     art = load_intro_art("successor")
     assert art is not None
-    top = art.dots[: len(art.dots) // 4]
-    hero_top_on = sum(1 for row in top for px in row if px)
+    hero_total_on = sum(1 for row in art.dots for px in row if px)
 
-    # Sanity-check against the actual files: hero.txt < 10-title.txt
     base = builtin_root() / "intros" / "successor"
     title_art = BrailleArt(load_frame(base / "10-title.txt"))
-    title_top = title_art.dots[: len(title_art.dots) // 4]
-    title_top_on = sum(1 for row in title_top for px in row if px)
+    title_total_on = sum(1 for row in title_art.dots for px in row if px)
+    title_total_bits = len(title_art.dots) * len(title_art.dots[0])
 
-    assert hero_top_on < title_top_on, (
-        f"hero (no title) should be sparser at top than 10-title: "
-        f"hero={hero_top_on} title={title_top_on}"
+    assert 0 < hero_total_on < title_total_bits, (
+        f"hero should contain a real oracle silhouette, got {hero_total_on} / {title_total_bits}"
     )
-    # And the loader should resolve the SAME file as hero.txt directly
+    assert 0 < title_total_on < (title_total_bits // 2), (
+        f"final intro frame should be a readable oracle hold frame, not a solid block: "
+        f"{title_total_on} / {title_total_bits}"
+    )
+
     direct_hero = BrailleArt(load_frame(base / "hero.txt"))
-    direct_top = direct_hero.dots[: len(direct_hero.dots) // 4]
-    direct_top_on = sum(1 for row in direct_top for px in row if px)
-    assert hero_top_on == direct_top_on, (
-        f"loader should resolve to hero.txt: loader={hero_top_on} direct={direct_top_on}"
+    direct_total_on = sum(1 for row in direct_hero.dots for px in row if px)
+    assert hero_total_on == direct_total_on, (
+        f"loader should resolve to hero.txt: loader={hero_total_on} direct={direct_total_on}"
+    )
+    assert hero_total_on != title_total_on, (
+        f"hero and final intro frame should stay visually distinct: "
+        f"hero={hero_total_on} title={title_total_on}"
     )
 
 
@@ -235,16 +231,17 @@ def test_empty_chat_is_NOT_empty_with_stream_in_flight(temp_config_dir: Path) ->
 
 
 def test_empty_state_renders_info_panel_at_normal_width(temp_config_dir: Path) -> None:
-    """Wide terminal: art on the left + info panel on the right."""
+    """Wide terminal: fitted art on the left + info rail on the right."""
     chat = SuccessorChat()
     grid = Grid(rows=32, cols=130)
     chat.on_tick(grid)
     plain = render_grid_to_plain(grid)
+    plain_fold = plain.casefold()
     # Section headers
-    assert "profile" in plain
-    assert "provider" in plain
-    assert "tools" in plain
-    assert "appearance" in plain
+    assert "profile" in plain_fold
+    assert "provider" in plain_fold
+    assert "tools" in plain_fold
+    assert "appearance" in plain_fold
     # The bundled successor portrait — at least some braille content
     assert "⣿" in plain
     # Bottom hint
@@ -252,10 +249,103 @@ def test_empty_state_renders_info_panel_at_normal_width(temp_config_dir: Path) -
     assert "press ? for help" in plain
 
 
-def test_empty_state_hides_art_on_narrow_terminal(temp_config_dir: Path) -> None:
-    """Narrow terminal (<80 cols): art hidden, info panel only."""
+def test_empty_state_wide_terminal_leaves_middle_gutter(temp_config_dir: Path) -> None:
+    """On a wide terminal the right rail should not sit directly beside the hero."""
     chat = SuccessorChat()
-    grid = Grid(rows=30, cols=72)
+    grid = Grid(rows=32, cols=120)
+    chat.on_tick(grid)
+    lines = render_grid_to_plain(grid).splitlines()
+    profile_x = next(line.casefold().index("profile") for line in lines if "profile" in line.casefold())
+    hero_right = max(
+        i
+        for line in lines
+        for i, ch in enumerate(line)
+        if 0x2800 < ord(ch) < 0x28FF and ch != "⠀"
+    )
+    assert profile_x - hero_right >= 12
+
+
+def test_empty_state_wide_terminal_right_anchors_the_info_rail(
+    temp_config_dir: Path,
+) -> None:
+    """With the hero visible, section text should hug the shell's right side."""
+    chat = SuccessorChat()
+    grid = Grid(rows=32, cols=120)
+    chat.on_tick(grid)
+    lines = render_grid_to_plain(grid).splitlines()
+
+    profile_idx = next(i for i, line in enumerate(lines) if "profile" in line.casefold())
+    profile_line = lines[profile_idx]
+    profile_value_line = lines[profile_idx + 1]
+
+    profile_right_margin = 120 - (profile_line.casefold().index("profile") + len("profile"))
+    value_right_margin = 120 - (
+        profile_value_line.index(chat.profile.name) + len(chat.profile.name)
+    )
+
+    assert profile_right_margin <= 8
+    assert value_right_margin <= 8
+
+
+def test_header_title_clamps_left_when_the_window_gets_tight(
+    temp_config_dir: Path,
+) -> None:
+    """The title should shift left before the right-side pills crowd it."""
+    chat = SuccessorChat()
+    grid = Grid(rows=24, cols=58)
+    chat.on_tick(grid)
+    title_row = render_grid_to_plain(grid).splitlines()[0]
+    title_x = title_row.index("successor · chat")
+    assert title_x <= 6
+
+
+def test_empty_state_wide_terminal_has_live_oracle_motion(
+    temp_config_dir: Path,
+    monkeypatch,
+) -> None:
+    """The empty state should keep the oracle subtly alive over time."""
+    chat = SuccessorChat()
+
+    monkeypatch.setattr("successor.chat.time.monotonic", lambda: 100.0)
+    grid_a = Grid(rows=32, cols=120)
+    chat.on_tick(grid_a)
+
+    monkeypatch.setattr("successor.chat.time.monotonic", lambda: 104.0)
+    grid_b = Grid(rows=32, cols=120)
+    chat.on_tick(grid_b)
+
+    def oracle_signature(grid: Grid) -> list[tuple[str, int | None, int]]:
+        sig: list[tuple[str, int | None, int]] = []
+        for r in range(4, 28):
+            for c in range(2, 44):
+                cell = grid.at(r, c)
+                if 0x2800 < ord(cell.char) < 0x28FF and cell.char != "⠀":
+                    sig.append((cell.char, cell.style.fg, cell.style.attrs))
+        return sig
+
+    oracle_a = oracle_signature(grid_a)
+    oracle_b = oracle_signature(grid_b)
+
+    assert oracle_a
+    assert oracle_b
+    assert oracle_a != oracle_b
+
+
+def test_empty_state_keeps_art_visible_on_mid_width_terminal(temp_config_dir: Path) -> None:
+    """The oracle hero should still render at moderate widths once fitted."""
+    chat = SuccessorChat()
+    grid = Grid(rows=30, cols=76)
+    chat.on_tick(grid)
+    plain = render_grid_to_plain(grid)
+    assert "profile" in plain.casefold()
+    braille_chars = sum(1 for c in plain if 0x2800 < ord(c) < 0x28FF and c != "⠀")
+    assert braille_chars > 60
+
+
+def test_empty_state_hides_art_on_really_narrow_terminal(temp_config_dir: Path) -> None:
+    """Very narrow terminals still fall back to info-panel-only."""
+    chat = SuccessorChat()
+    grid = Grid(rows=30, cols=58)
     chat.on_tick(grid)
     plain = render_grid_to_plain(grid)
     # Info panel still renders

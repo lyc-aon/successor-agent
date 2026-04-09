@@ -267,6 +267,9 @@ _DEFAULT_SYSTEM_PROMPT = (
 )
 
 
+DEFAULT_MAX_AGENT_TURNS = 80
+
+
 @dataclass(frozen=True, slots=True)
 class Profile:
     """One named profile — everything that defines a persona's feel.
@@ -315,6 +318,10 @@ class Profile:
                         tool: enable/disable, scheduling strategy,
                         queue width, completion notifications, and
                         timeout.
+      max_agent_turns   hard cap on model loop turns within a single
+                        user submission. Higher values allow longer
+                        autonomous runs before the harness bails out
+                        as a safety stop.
     """
 
     name: str
@@ -331,6 +338,13 @@ class Profile:
     chat_intro_art: str | None = None
     compaction: CompactionConfig = field(default_factory=CompactionConfig)
     subagents: SubagentConfig = field(default_factory=SubagentConfig)
+    max_agent_turns: int = DEFAULT_MAX_AGENT_TURNS
+
+    def __post_init__(self) -> None:
+        if self.max_agent_turns < 1:
+            raise ValueError(
+                f"max_agent_turns must be >= 1, got {self.max_agent_turns}"
+            )
 
 
 def parse_profile_file(path: Path) -> Profile | None:
@@ -415,6 +429,11 @@ def parse_profile_file(path: Path) -> Profile | None:
     subagents_val = data.get("subagents")
     if isinstance(subagents_val, dict):
         kwargs["subagents"] = SubagentConfig.from_dict(subagents_val)
+
+    max_turns_val = data.get("max_agent_turns")
+    if isinstance(max_turns_val, int) and not isinstance(max_turns_val, bool):
+        if max_turns_val >= 1:
+            kwargs["max_agent_turns"] = max_turns_val
 
     return Profile(**kwargs)
 

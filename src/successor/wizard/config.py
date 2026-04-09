@@ -230,6 +230,10 @@ _SETTINGS_TREE: tuple[_SettingField, ...] = (
         options_getter=lambda: [None, "successor"],
     ),
     _SettingField(
+        name="max_agent_turns", label="max agent turns", section="",
+        kind=FieldKind.NUMBER, number_kind="int",
+    ),
+    _SettingField(
         name="system_prompt", label="prompt", section="",
         kind=FieldKind.MULTILINE,
     ),
@@ -931,7 +935,7 @@ class SuccessorConfig(App):
         """Mutate _working_profiles[profile_idx], updating dirty set + preview.
 
         Handles the simple top-level fields (theme, display_mode,
-        density, intro_animation, system_prompt) AND the provider_*
+        density, intro_animation, max_agent_turns, system_prompt) AND the provider_*
         fields, which mutate the provider dict.
         """
         old_profile = self._working_profiles[profile_idx]
@@ -944,6 +948,15 @@ class SuccessorConfig(App):
             new_profile = replace(old_profile, density=new_value)
         elif field.name == "intro_animation":
             new_profile = replace(old_profile, intro_animation=new_value)
+        elif field.name == "max_agent_turns":
+            if int(new_value) < 1:
+                self._toast = _Toast(
+                    "max agent turns must be >= 1",
+                    self.elapsed,
+                    kind="warn",
+                )
+                return
+            new_profile = replace(old_profile, max_agent_turns=int(new_value))
         elif field.name == "system_prompt":
             new_profile = replace(old_profile, system_prompt=new_value)
         elif field.name == "tools":
@@ -1070,6 +1083,8 @@ class SuccessorConfig(App):
             return profile.density
         if field.name == "intro_animation":
             return profile.intro_animation
+        if field.name == "max_agent_turns":
+            return profile.max_agent_turns
         if field.name == "system_prompt":
             return profile.system_prompt
         if field.name == "skills":
@@ -2849,6 +2864,7 @@ def _profile_to_json_dict(profile: Profile) -> dict:
         "tool_config": dict(profile.tool_config),
         "intro_animation": profile.intro_animation,
         "chat_intro_art": profile.chat_intro_art,
+        "max_agent_turns": profile.max_agent_turns,
         "compaction": profile.compaction.to_dict(),
         "subagents": profile.subagents.to_dict(),
     }

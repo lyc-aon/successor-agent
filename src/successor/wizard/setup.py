@@ -85,6 +85,7 @@ from ..input.keys import (
 )
 from ..loader import config_dir
 from ..profiles import (
+    DEFAULT_MAX_AGENT_TURNS,
     PROFILE_REGISTRY,
     Profile,
     get_active_profile,
@@ -339,6 +340,8 @@ class _WizardState:
     # Local-only runtime preference persisted to chat.json, not profile JSON.
     # When enabled, normal chat sessions auto-write local playback bundles.
     autorecord: bool = True
+    # Hard cap on model turns within a single user submission.
+    max_agent_turns: int = DEFAULT_MAX_AGENT_TURNS
 
     def _build_provider_dict(self) -> dict:
         """Construct the provider config dict from the wizard state.
@@ -395,6 +398,7 @@ class _WizardState:
             intro_animation=self.intro_animation,
             chat_intro_art=self.chat_intro_art,
             compaction=self._resolve_compaction(),
+            max_agent_turns=self.max_agent_turns,
         )
 
     def to_json_dict(self) -> dict:
@@ -413,6 +417,7 @@ class _WizardState:
             "tool_config": {},
             "intro_animation": self.intro_animation,
             "chat_intro_art": self.chat_intro_art,
+            "max_agent_turns": self.max_agent_turns,
             "compaction": self._resolve_compaction().to_dict(),
         }
 
@@ -436,12 +441,13 @@ class _ValidationGlow:
 
 
 def _try_load_welcome_frame() -> BrailleArt | None:
-    """Best-effort load of the successor title frame for the welcome screen.
+    """Best-effort load of the successor final hold frame for the welcome screen.
 
     Returns None if the asset isn't available — the welcome screen
     falls back to text-only in that case. The frame lives at
     `src/successor/builtin/intros/successor/10-title.txt`, the same
-    held title frame the intro animation ends on.
+    held oracle frame the intro animation ends on. `10-title.txt`
+    remains the legacy filename for compatibility.
     """
     from ..loader import builtin_root
     candidate = builtin_root() / "intros" / "successor" / "10-title.txt"
@@ -1066,6 +1072,12 @@ class SuccessorSetup(App):
     def _handle_review(self, event: KeyEvent) -> None:
         if event.is_char and event.char and event.char.lower() == "a":
             self.state.autorecord = not self.state.autorecord
+            return
+        if event.is_char and event.char in ("[", "-"):
+            self.state.max_agent_turns = max(1, self.state.max_agent_turns - 5)
+            return
+        if event.is_char and event.char in ("]", "+", "="):
+            self.state.max_agent_turns = min(400, self.state.max_agent_turns + 5)
             return
         if event.key == Key.ENTER:
             self._save_and_finish()
@@ -2122,6 +2134,7 @@ class SuccessorSetup(App):
             ("density", self.state.density),
             ("intro animation", self.state.intro_animation or "(none)"),
             ("autorecord", "on (local-only bundles)" if self.state.autorecord else "off"),
+            ("max agent turns", str(self.state.max_agent_turns)),
             ("system prompt", "default — edit JSON file to customize"),
             ("provider", provider_summary),
             ("skills", skills_label),
@@ -2148,7 +2161,7 @@ class SuccessorSetup(App):
         # Save hint at the bottom
         hint_y = bottom - 2
         if hint_y > top + len(rows_data) + 2:
-            hint = "A toggles local autorecord · Enter saves · ← backs up · Esc cancels"
+            hint = "A toggles local autorecord · [ ] adjust max turns · Enter saves · ← backs up · Esc cancels"
             paint_text(
                 grid, hint, left, hint_y,
                 style=Style(fg=theme.accent_warm, bg=theme.bg, attrs=ATTR_BOLD),
