@@ -9,8 +9,9 @@ Subcommands:
     successor doctor         — terminal capability check
     successor skills         — list loaded skills
     successor tools          — list registered tools
-    successor record         — record an input session
-    successor replay         — replay a recorded session
+    successor record         — record a session (bundle or raw input JSONL)
+    successor replay         — replay a recorded input stream
+    successor playback       — inspect or open a recording bundle viewer
     successor snapshot       — headless render of a chat scenario
     successor bench          — renderer benchmark
 """
@@ -18,6 +19,7 @@ Subcommands:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -307,6 +309,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     try:
         from .profiles import get_active_profile
         from .providers import make_provider
+        from .config import load_chat_config
+        from .playback import recordings_dir
         from .web import (
             available_provider_status,
             browser_runtime_status,
@@ -437,27 +441,74 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             if vision_status.model:
                 print(f"    vision mod  {vision_status.model}")
             print(f"    vision note {vision_status.reason}")
+        chat_cfg = load_chat_config()
+        autorecord = bool(chat_cfg.get("autorecord", True))
+        print(
+            "    recording   "
+            + ("auto-record on" if autorecord else "auto-record off")
+        )
+        if autorecord:
+            print(f"    record dir  {recordings_dir()}")
     except Exception as exc:  # noqa: BLE001
         print(f"    error: could not load active profile ({exc})")
     return 0
 
 
 def cmd_record(args: argparse.Namespace) -> int:
-    """Run the chat with a recorder attached, saving every input byte.
+    """Run the chat with recording enabled.
 
-    Use `successor replay <file>` afterward to play it back. The recording
-    file is JSONL — one event per line — and can be inspected or
-    hand-edited.
+    Default behavior writes a full bundle directory with raw input,
+    frame timeline, trace events, and a self-contained playback viewer.
+    Passing a `.jsonl` output path or `--input-only` keeps the legacy
+    raw-input-only mode for minimal repro captures.
     """
     from .chat import SuccessorChat
+    from .playback import (
+        RecordingBundle,
+        bundle_path_from_input,
+        is_bundle_path,
+    )
     from .recorder import Recorder
 
-    path = Path(args.output)
-    print(f"recording to {path} (Ctrl+C to stop)")
-    with Recorder(path) as rec:
+    path = bundle_path_from_input(args.output)
+    if args.input_only or not is_bundle_path(path):
+        if path.suffix.lower() != ".jsonl":
+            path = path.with_suffix(".jsonl")
+        print(f"recording input to {path} (Ctrl+C to stop)")
+        with Recorder(path) as rec:
+            chat = SuccessorChat(recorder=rec)
+            chat.run()
+        print(f"\nrecording saved: {path}")
+        print("note: this is input-only. Use a bundle directory for playback.html.")
+        return 0
+
+    bundle = RecordingBundle(
+        path,
+        title="Successor session playback",
+        description="Recorded via `successor record`.",
+        frame_interval_s=args.frame_interval,
+    )
+    print(f"recording local-only bundle to {bundle.root} (Ctrl+C to stop)")
+    with bundle as rec:
         chat = SuccessorChat(recorder=rec)
         chat.run()
-    print(f"\\nrecording saved: {path}")
+    summary = bundle.finalize(trace_path=chat.session_trace_path)
+    print(f"\nrecording saved: {bundle.root}")
+    print(f"  input     {bundle.input_path}")
+    print(f"  viewer    {bundle.viewer_path}")
+    print(f"  trace     {bundle.trace_jsonl_path}")
+    print("  privacy   local-only bundle; if saved inside a git repo it is added to .git/info/exclude")
+    print(
+        "  summary   "
+        f"{summary['frame_count']} frames, {summary['trace_event_count']} trace events, "
+        f"{summary['duration_s']:.1f}s"
+    )
+    print(f"  reopen    successor playback {bundle.root}")
+    if args.open:
+        import webbrowser
+
+        opened = webbrowser.open(bundle.viewer_path.resolve().as_uri())
+        print(f"  browser   {'opened' if opened else 'failed to auto-open'}")
     return 0
 
 
@@ -506,6 +557,91 @@ def cmd_replay(args: argparse.Namespace) -> int:
     feeder_thread = threading.Thread(target=_feeder, daemon=True)
     feeder_thread.start()
     chat.run()
+    return 0
+
+
+def cmd_playback(args: argparse.Namespace) -> int:
+    """Inspect or open a recording bundle viewer."""
+    from .playback import latest_recording_bundle_dir, load_trace_events, write_playback_html
+
+    requested = args.input.strip() if isinstance(args.input, str) else ""
+    path = Path(requested) if requested else latest_recording_bundle_dir()
+    if path is None:
+        print("successor: no recording bundles found", file=sys.stderr)
+        return 1
+    if not path.exists():
+        print(f"successor: no such path: {path}", file=sys.stderr)
+        return 1
+
+    viewer_path: Path
+    bundle_root: Path
+    if path.is_file() and path.suffix.lower() == ".html":
+        bundle_root = path.parent
+        viewer_path = path
+    else:
+        bundle_root = path if path.is_dir() else path.parent
+        viewer_path = bundle_root / "playback.html"
+        timeline_path = bundle_root / "timeline.json"
+        summary_path = bundle_root / "summary.json"
+        trace_json_path = bundle_root / "session_trace.json"
+        trace_jsonl_path = bundle_root / "session_trace.jsonl"
+        if not viewer_path.exists():
+            if not timeline_path.exists():
+                print(
+                    "successor: no playback viewer found and no timeline.json to regenerate from",
+                    file=sys.stderr,
+                )
+                return 1
+            try:
+                frames = json.loads(timeline_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                print(f"successor: could not read {timeline_path}: {exc}", file=sys.stderr)
+                return 1
+            title = "Successor session playback"
+            description = "Recorded via `successor record`."
+            if summary_path.exists():
+                try:
+                    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    summary = {}
+                if isinstance(summary, dict):
+                    title = str(summary.get("title") or title)
+                    description = str(summary.get("description") or description)
+            if trace_json_path.exists():
+                try:
+                    trace_events = json.loads(trace_json_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    trace_events = []
+            else:
+                trace_events = load_trace_events(trace_jsonl_path)
+            write_playback_html(
+                viewer_path,
+                title=title,
+                description=description,
+                frames=frames if isinstance(frames, list) else [],
+                trace_events=trace_events if isinstance(trace_events, list) else [],
+            )
+    print(f"bundle    {bundle_root}")
+    print(f"viewer    {viewer_path}")
+    summary_path = bundle_root / "summary.json"
+    if summary_path.exists():
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            summary = {}
+        if isinstance(summary, dict):
+            frame_count = int(summary.get("frame_count", 0) or 0)
+            trace_count = int(summary.get("trace_event_count", 0) or 0)
+            duration_s = float(summary.get("duration_s", 0.0) or 0.0)
+            print(f"summary   {frame_count} frames, {trace_count} trace events, {duration_s:.1f}s")
+
+    if args.open:
+        import webbrowser
+
+        opened = webbrowser.open(viewer_path.resolve().as_uri())
+        print(f"browser   {'opened' if opened else 'failed to auto-open'}")
+    else:
+        print("tip       pass --open to launch the viewer in your browser")
     return 0
 
 
@@ -708,9 +844,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_record = sub.add_parser(
         "record",
-        help="run the chat with a recorder, saving every input byte",
+        help="record a session to a playback bundle (or raw JSONL with --input-only)",
     )
-    p_record.add_argument("output", help="output recording file (JSONL)")
+    p_record.add_argument(
+        "output",
+        nargs="?",
+        help="bundle directory (default) or raw JSONL file",
+    )
+    p_record.add_argument(
+        "--input-only",
+        action="store_true",
+        help="write only the raw input JSONL instead of a playback bundle",
+    )
+    p_record.add_argument(
+        "--frame-interval",
+        type=float,
+        default=0.15,
+        help="minimum seconds between captured viewer frames in bundle mode",
+    )
+    p_record.add_argument(
+        "--open",
+        action="store_true",
+        help="open playback.html in the default browser after recording ends",
+    )
     p_record.set_defaults(func=cmd_record)
 
     p_replay = sub.add_parser(
@@ -723,6 +879,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="playback speed multiplier (1.0=real time, 2.0=2x, 0=instant)",
     )
     p_replay.set_defaults(func=cmd_replay)
+
+    p_playback = sub.add_parser(
+        "playback",
+        help="inspect or open a recording bundle viewer",
+    )
+    p_playback.add_argument(
+        "input",
+        nargs="?",
+        help="bundle directory or playback.html (defaults to the latest bundle)",
+    )
+    p_playback.add_argument(
+        "--open",
+        action="store_true",
+        help="open the viewer in the default browser",
+    )
+    p_playback.set_defaults(func=cmd_playback)
 
     return p
 

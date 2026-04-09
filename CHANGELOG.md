@@ -3,6 +3,77 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
+## v0.1.18 — 2026-04-08
+
+Made local session auto-recording a default user-facing feature instead of a hidden
+power-user path.
+
+### What changed
+
+- added a local `autorecord` preference to `chat.json`, defaulting to
+  `true` for fresh installs and migrated configs
+- normal `successor chat` sessions now auto-create local playback
+  bundles under `~/.local/share/successor/recordings/` unless the user
+  turns the feature off
+- added `/recording on|off|toggle` so the preference can be changed
+  from inside chat without reopening setup
+- setup-wizard review now surfaces the setting explicitly as a
+  local-only preference before first save
+- setup-wizard review now shows the real resolved recommended skills
+  instead of the old stale "not wired" placeholder text
+- recording bundles now mark themselves local-only in `summary.json`
+  and write an agent-friendly read order into `index.md`
+- if a user intentionally saves a bundle inside a git repo, Successor
+  now adds that bundle path to the repo's local `.git/info/exclude`
+  so the artifact stays uncommitted by default
+- `successor doctor` now reports the auto-record state and bundle root
+  alongside the rest of the local runtime status
+
+### Verification
+
+- focused autorecord/config/wizard/playback/doctor slice:
+  `79 passed`
+- full local suite: `1144 passed`
+- live PTY chat verification with isolated config/recordings:
+  - default auto-recorded session bundle created
+  - `/recording` reported local-only bundle behavior
+  - one real model turn completed
+  - `/recording off` persisted `autorecord: false` to `chat.json`
+- real playback viewer opened in Chromium and visually verified:
+  - scrubber controls responded
+  - turn chip + trace sidebar rendered correctly
+  - final frame matched the captured chat transcript
+- secret scan over the tracked tree before push
+
+## v0.1.17 — 2026-04-08
+
+Turned the hidden E2E playback scrubber into a first-class recording bundle workflow.
+
+### What changed
+
+- added `src/successor/playback.py` as the shared recording-bundle /
+  playback-viewer module used by both normal sessions and the E2E
+  harness
+- `successor record` now defaults to a timestamped bundle directory
+  with `input.jsonl`, `timeline.json`, copied trace events,
+  `summary.json`, `index.md`, and `playback.html`
+- added `successor playback` to reopen the latest bundle, regenerate a
+  missing viewer from `timeline.json`, or launch the viewer in the
+  browser with `--open`
+- upgraded the self-contained viewer with turn chips, clickable trace
+  events, keyboard shortcuts, real-time speed control, and actual
+  elapsed-time playback instead of fixed-step animation
+- wired normal chat `on_tick()` to feed the bundle recorder directly so
+  the viewer captures the real painted frames, not a later approximation
+- updated the README so the recording/debugger flow is obvious instead
+  of buried in the E2E script
+
+### Verification
+
+- `PYTHONPATH=src pytest -q tests/test_playback.py`: `3 passed`
+- `python3 -m py_compile` over the touched runtime modules + E2E driver
+- `PYTHONPATH=src python3 -m successor playback --help`
+
 ## v0.1.16 — 2026-04-08
 
 Fix self-contained playback HTML so the embedded controls work in a real browser.

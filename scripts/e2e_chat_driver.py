@@ -54,6 +54,7 @@ if str(_REPO_SRC) not in sys.path:
 
 from successor.chat import SuccessorChat, _Message  # noqa: E402
 from successor import __version__ as SUCCESSOR_VERSION  # noqa: E402
+from successor.playback import load_trace_events, write_playback_html  # noqa: E402
 from successor.subagents.cards import SubagentToolCard  # noqa: E402
 from successor.profiles import Profile  # noqa: E402
 from successor.providers import make_provider  # noqa: E402
@@ -882,26 +883,7 @@ def write_index(
 
 
 def _load_trace_events(trace_dir: Path) -> list[dict[str, object]]:
-    events: list[dict[str, object]] = []
-    if not trace_dir.exists():
-        return events
-    for path in sorted(trace_dir.glob("*.jsonl")):
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            continue
-        for line_no, line in enumerate(lines, start=1):
-            if not line.strip():
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(obj, dict):
-                obj["_source"] = path.name
-                obj["_line"] = line_no
-                events.append(obj)
-    return events
+    return load_trace_events(trace_dir)
 
 
 def _write_playback_html(
@@ -910,233 +892,13 @@ def _write_playback_html(
     timeline: list[dict[str, object]],
     trace_events: list[dict[str, object]],
 ) -> None:
-    payload = {
-        "scenario": {
-            "name": scenario.name,
-            "description": scenario.description,
-        },
-        "frames": timeline,
-        "trace_events": trace_events,
-    }
-    payload_json = (
-        json.dumps(payload)
-        .replace("&", "\\u0026")
-        .replace("<", "\\u003c")
-        .replace(">", "\\u003e")
+    write_playback_html(
+        out_dir,
+        title=f"Successor E2E Playback - {scenario.name}",
+        description=scenario.description,
+        frames=timeline,
+        trace_events=trace_events,
     )
-    html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Successor E2E Playback - {scenario.name}</title>
-  <style>
-    :root {{
-      color-scheme: dark;
-      --bg: #111318;
-      --panel: #171b22;
-      --text: #e6e9ef;
-      --muted: #9aa4b2;
-      --accent: #59c2ff;
-      --border: #2a3140;
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      margin: 0;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      background: var(--bg);
-      color: var(--text);
-    }}
-    .wrap {{
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) 360px;
-      min-height: 100vh;
-    }}
-    .main, .side {{
-      padding: 16px;
-    }}
-    .side {{
-      border-left: 1px solid var(--border);
-      background: var(--panel);
-    }}
-    pre {{
-      margin: 0;
-      white-space: pre-wrap;
-      word-break: break-word;
-      line-height: 1.15;
-      font-size: 12px;
-      background: #0a0d12;
-      border: 1px solid var(--border);
-      padding: 12px;
-      min-height: calc(100vh - 120px);
-      overflow: auto;
-    }}
-    input[type="range"] {{
-      width: 100%;
-    }}
-    button {{
-      background: #202735;
-      color: var(--text);
-      border: 1px solid var(--border);
-      padding: 6px 10px;
-      cursor: pointer;
-    }}
-    button:hover {{
-      border-color: var(--accent);
-    }}
-    .meta {{
-      color: var(--muted);
-      font-size: 12px;
-      margin: 8px 0 12px;
-    }}
-    .kv {{
-      margin-bottom: 14px;
-      font-size: 12px;
-    }}
-    .kv strong {{
-      color: var(--text);
-    }}
-    .events {{
-      max-height: 40vh;
-      overflow: auto;
-      border: 1px solid var(--border);
-      background: #0a0d12;
-      padding: 8px;
-      font-size: 12px;
-    }}
-    .event {{
-      padding: 4px 0;
-      border-bottom: 1px solid #1a2130;
-    }}
-    .event:last-child {{
-      border-bottom: 0;
-    }}
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="main">
-      <h2>{scenario.name}</h2>
-      <div class="meta">{scenario.description}</div>
-      <div>
-        <button id="prev">Prev</button>
-        <button id="play">Play</button>
-        <button id="next">Next</button>
-      </div>
-      <div style="margin: 10px 0;">
-        <input id="scrub" type="range" min="0" max="0" value="0">
-      </div>
-      <div id="frameMeta" class="meta"></div>
-      <pre id="frameText"></pre>
-    </div>
-    <div class="side">
-      <div class="kv"><strong>Artifacts:</strong><br>Open this file directly later; it embeds the frame timeline and trace events.</div>
-      <div class="kv" id="summary"></div>
-      <div class="kv"><strong>Recent trace events</strong></div>
-      <div id="events" class="events"></div>
-    </div>
-  </div>
-  <script type="application/json" id="payload">{payload_json}</script>
-  <script>
-    const payload = JSON.parse(document.getElementById("payload").textContent);
-    const frames = payload.frames || [];
-    const traceEvents = payload.trace_events || [];
-    const scrub = document.getElementById("scrub");
-    const frameText = document.getElementById("frameText");
-    const frameMeta = document.getElementById("frameMeta");
-    const summary = document.getElementById("summary");
-    const eventsBox = document.getElementById("events");
-    const playBtn = document.getElementById("play");
-    let idx = 0;
-    let timer = null;
-
-    scrub.max = Math.max(0, frames.length - 1);
-    summary.innerHTML =
-      "<strong>Frames:</strong> " + frames.length + "<br>" +
-      "<strong>Trace events:</strong> " + traceEvents.length;
-
-    function renderEvents(frame) {{
-      const windowStart = Math.max(0, frame.scenario_elapsed_s - 3.0);
-      const relevant = traceEvents.filter(ev => {{
-        const t = Number(ev.t || 0);
-        return t >= windowStart && t <= Number(frame.scenario_elapsed_s || 0);
-      }}).slice(-20);
-      eventsBox.innerHTML = relevant.map(ev => {{
-        const copy = Object.assign({{}}, ev);
-        delete copy._source;
-        delete copy._line;
-        return '<div class="event"><strong>' +
-          Number(ev.t || 0).toFixed(3) + 's</strong> ' +
-          (ev.type || 'event') +
-          '<br>' + JSON.stringify(copy) +
-          '</div>';
-      }}).join('') || '<div class="event">No trace events near this frame.</div>';
-    }}
-
-    function renderFrame(nextIdx) {{
-      if (!frames.length) {{
-        frameText.textContent = "No frames captured.";
-        frameMeta.textContent = "";
-        eventsBox.innerHTML = "";
-        return;
-      }}
-      idx = Math.max(0, Math.min(nextIdx, frames.length - 1));
-      scrub.value = idx;
-      const frame = frames[idx];
-      frameText.textContent = frame.plain || "";
-      frameMeta.textContent =
-        "frame " + frame.index + "/" + frames.length +
-        " | turn " + frame.turn_index +
-        " | " + frame.kind +
-        " | scenario " + Number(frame.scenario_elapsed_s || 0).toFixed(3) + "s" +
-        " | turn " + Number(frame.turn_elapsed_s || 0).toFixed(3) + "s" +
-        " | agent_turn=" + frame.agent_turn +
-        " | stream_open=" + frame.stream_open +
-        " | running_tools=" + frame.running_tools +
-        " | messages=" + frame.message_count;
-      renderEvents(frame);
-    }}
-
-    function stopPlayback() {{
-      if (timer !== null) {{
-        clearInterval(timer);
-        timer = null;
-      }}
-      playBtn.textContent = "Play";
-    }}
-
-    document.getElementById("prev").addEventListener("click", () => {{
-      stopPlayback();
-      renderFrame(idx - 1);
-    }});
-    document.getElementById("next").addEventListener("click", () => {{
-      stopPlayback();
-      renderFrame(idx + 1);
-    }});
-    scrub.addEventListener("input", () => {{
-      stopPlayback();
-      renderFrame(Number(scrub.value));
-    }});
-    playBtn.addEventListener("click", () => {{
-      if (timer !== null) {{
-        stopPlayback();
-        return;
-      }}
-      playBtn.textContent = "Pause";
-      timer = setInterval(() => {{
-        if (idx >= frames.length - 1) {{
-          stopPlayback();
-          return;
-        }}
-        renderFrame(idx + 1);
-      }}, 120);
-    }});
-
-    renderFrame(0);
-  </script>
-</body>
-</html>
-"""
-    (out_dir / "playback.html").write_text(html, encoding="utf-8")
 
 
 # ─── Scenario runner ───

@@ -55,6 +55,7 @@ from typing import Any, Callable
 from . import __version__
 from .config import load_chat_config, save_chat_config
 from .graphemes import delete_prev_grapheme
+from .playback import RecordingBundle, default_recording_bundle_dir
 from .input.keys import (
     InputEvent,
     Key,
@@ -768,6 +769,12 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
     SlashCommand(
         name="mouse",
         description="toggle mouse reporting",
+        args_hint="[on|off|toggle]",
+        complete_args=static_args("on", "off", "toggle"),
+    ),
+    SlashCommand(
+        name="recording",
+        description="toggle local auto-record playback bundles",
         args_hint="[on|off|toggle]",
         complete_args=static_args("on", "off", "toggle"),
     ),
@@ -1581,6 +1588,7 @@ class SuccessorChat(App):
         # Optional recorder — captures every input byte to a JSONL file.
         # Set via the `successor record <file>` subcommand. None for normal use.
         self._recorder = recorder
+        self._owns_recorder = False
 
         # ─── Persisted preferences ───
         # Loaded from ~/.config/successor/chat.json on startup. Saved on
@@ -1589,6 +1597,19 @@ class SuccessorChat(App):
         # from the v1 schema (where dark/light/forge were flat themes)
         # happens transparently inside load_chat_config.
         self._config = load_chat_config()
+        if self._recorder is None and bool(self._config.get("autorecord", True)):
+            try:
+                bundle = RecordingBundle(
+                    default_recording_bundle_dir(),
+                    title="Successor session playback",
+                    description="Auto-recorded local session bundle.",
+                )
+                bundle.__enter__()
+                self._recorder = bundle
+                self._owns_recorder = True
+            except Exception:
+                self._recorder = None
+                self._owns_recorder = False
 
         # ─── Active profile ───
         # If the caller didn't pass an explicit profile, resolve the
@@ -1934,6 +1955,13 @@ class SuccessorChat(App):
         try:
             super().run()
         finally:
+            if self._recorder is not None and hasattr(self._recorder, "capture_frame"):
+                front = getattr(self, "_front", None)
+                if front is not None:
+                    try:
+                        self._recorder.capture_frame(front, chat=self, force=True)
+                    except Exception:
+                        pass
             self._shutdown_runtime_for_exit()
             self._trace.close(
                 trace_path=str(self._trace.path),
@@ -1943,9 +1971,22 @@ class SuccessorChat(App):
                 ),
                 active_subagent_count=self._subagent_counts().active,
             )
+            if self._owns_recorder and self._recorder is not None and hasattr(self._recorder, "finalize"):
+                try:
+                    self._recorder.__exit__(None, None, None)
+                except Exception:
+                    pass
+                try:
+                    self._recorder.finalize(trace_path=self.session_trace_path)
+                except Exception:
+                    pass
 
     def _trace_event(self, event_type: str, **payload: Any) -> None:
         self._trace.emit(event_type, **payload)
+
+    @property
+    def session_trace_path(self) -> Path:
+        return self._trace.path
 
     def _shutdown_runtime_for_exit(self) -> None:
         active = [
@@ -2828,6 +2869,14 @@ class SuccessorChat(App):
         self._config["display_mode"] = self.display_mode
         self._config["density"] = self.density.name
         self._config["mouse"] = self._mouse_enabled
+        self._config.setdefault("autorecord", True)
+        save_chat_config(self._config)
+
+    def _set_autorecord(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if bool(self._config.get("autorecord", True)) == enabled:
+            return
+        self._config["autorecord"] = enabled
         save_chat_config(self._config)
 
     # ─── Slash command autocomplete ───
@@ -3559,6 +3608,64 @@ class SuccessorChat(App):
                 _Message(
                     "successor",
                     f"unknown /mouse argument '{arg}'. try on, off, or toggle.",
+                    synthetic=True,
+                )
+            )
+            return
+
+        # /recording         — show current state
+        # /recording on      — enable local auto-record bundles
+        # /recording off     — disable
+        # /recording toggle  — flip
+        if text.startswith("/recording"):
+            parts = text.split(maxsplit=1)
+            if len(parts) == 1:
+                state = "on" if bool(self._config.get("autorecord", True)) else "off"
+                hint = (
+                    f"recording: {state}. Auto-record writes local playback bundles under "
+                    "~/.local/share/successor/recordings/ by default. Bundles stay on "
+                    "local disk and pair playback.html with session_trace.json for debugging."
+                )
+                self.messages.append(_Message("successor", hint, synthetic=True))
+                return
+            arg = parts[1].strip().lower()
+            if arg == "on":
+                self._set_autorecord(True)
+                self.messages.append(
+                    _Message(
+                        "successor",
+                        "auto-record on. Future chat sessions will save local playback bundles "
+                        "for debugging and harness-building.",
+                        synthetic=True,
+                    )
+                )
+                return
+            if arg == "off":
+                self._set_autorecord(False)
+                self.messages.append(
+                    _Message(
+                        "successor",
+                        "auto-record off. Future chat sessions will stop writing playback bundles.",
+                        synthetic=True,
+                    )
+                )
+                return
+            if arg == "toggle":
+                enabled = not bool(self._config.get("autorecord", True))
+                self._set_autorecord(enabled)
+                state = "on" if enabled else "off"
+                self.messages.append(
+                    _Message(
+                        "successor",
+                        f"auto-record {state}.",
+                        synthetic=True,
+                    )
+                )
+                return
+            self.messages.append(
+                _Message(
+                    "successor",
+                    f"unknown /recording argument '{arg}'. try on, off, or toggle.",
                     synthetic=True,
                 )
             )
@@ -5816,6 +5923,12 @@ class SuccessorChat(App):
         # the autocomplete dropdown. Centered modal with a fade-in.
         if self._help_open:
             self._paint_help_overlay(grid, theme)
+
+        if self._recorder is not None and hasattr(self._recorder, "capture_frame"):
+            try:
+                self._recorder.capture_frame(grid, chat=self)
+            except Exception:
+                pass
 
     # ─── Region painters ───
 

@@ -56,6 +56,7 @@ def test_wizard_state_defaults() -> None:
     # field via the wizard's INTRO step or by editing the saved JSON.
     assert state.intro_animation == "successor"
     assert state.chat_intro_art == "successor"
+    assert state.autorecord is True
 
 
 def test_wizard_state_to_profile_uses_name() -> None:
@@ -391,6 +392,7 @@ def test_full_save_flow_writes_json_file(temp_config_dir: Path) -> None:
     # active_profile was persisted to chat.json
     chat_cfg = json.loads((temp_config_dir / "chat.json").read_text())
     assert chat_cfg["active_profile"] == "smoketest"
+    assert chat_cfg["autorecord"] is True
 
     # The registry now has the new profile
     PROFILE_REGISTRY.reload()
@@ -405,6 +407,18 @@ def test_save_with_empty_name_rejects(temp_config_dir: Path) -> None:
     assert wizard.current_step == Step.NAME
     assert wizard._glow is not None
     assert wizard.should_launch_chat is False
+
+
+def test_review_can_toggle_autorecord_before_save(temp_config_dir: Path) -> None:
+    wizard = SuccessorSetup()
+    wizard.state.name = "record-toggle"
+    wizard._enter_step(Step.REVIEW)
+    assert wizard.state.autorecord is True
+    wizard._handle_review(KeyEvent(char="a"))
+    assert wizard.state.autorecord is False
+    wizard._handle_review(KeyEvent(key=Key.ENTER))
+    chat_cfg = json.loads((temp_config_dir / "chat.json").read_text())
+    assert chat_cfg["autorecord"] is False
 
 
 def test_esc_cancels_wizard(temp_config_dir: Path) -> None:
@@ -435,6 +449,18 @@ def test_snapshot_name_step_shows_input_field(temp_config_dir: Path) -> None:
     assert "test-name" in plain
     assert "name for your new profile" in plain
     assert "step 2 of 10" in plain
+
+
+def test_snapshot_review_mentions_local_autorecord(temp_config_dir: Path) -> None:
+    g = wizard_demo_snapshot(
+        rows=30,
+        cols=100,
+        step="review",
+        name="reviewdemo",
+    )
+    plain = render_grid_to_plain(g)
+    assert "autorecord" in plain
+    assert "local-only bundles" in plain
 
 
 def test_snapshot_theme_step_shows_live_preview(temp_config_dir: Path) -> None:

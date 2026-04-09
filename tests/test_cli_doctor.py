@@ -32,6 +32,7 @@ class _FakeClient:
 
 def test_doctor_reports_llama_runtime_capabilities(
     monkeypatch,
+    temp_config_dir,
     capsys,
 ) -> None:
     profile = Profile(
@@ -55,10 +56,12 @@ def test_doctor_reports_llama_runtime_capabilities(
     out = capsys.readouterr().out
     assert "slots       4 total (/slots on)" in out
     assert "tool calls  parallel supported" in out
+    assert "recording   auto-record on" in out
 
 
 def test_doctor_reports_holonet_browser_and_vision_status(
     monkeypatch,
+    temp_config_dir,
     capsys,
 ) -> None:
     profile = Profile(

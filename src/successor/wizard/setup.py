@@ -336,6 +336,9 @@ class _WizardState:
     # The preset is resolved to a real CompactionConfig at to_profile()
     # time via _compaction_presets().
     compaction_preset: str = "default"
+    # Local-only runtime preference persisted to chat.json, not profile JSON.
+    # When enabled, normal chat sessions auto-write local playback bundles.
+    autorecord: bool = True
 
     def _build_provider_dict(self) -> dict:
         """Construct the provider config dict from the wizard state.
@@ -671,6 +674,7 @@ class SuccessorSetup(App):
         # Persist as active profile so the chat opens with it
         cfg = load_chat_config()
         cfg["active_profile"] = name
+        cfg["autorecord"] = self.state.autorecord
         save_chat_config(cfg)
 
         # Tell the registry to pick up the new file so subsequent
@@ -1057,6 +1061,9 @@ class SuccessorSetup(App):
             return
 
     def _handle_review(self, event: KeyEvent) -> None:
+        if event.is_char and event.char and event.char.lower() == "a":
+            self.state.autorecord = not self.state.autorecord
+            return
         if event.key == Key.ENTER:
             self._save_and_finish()
             return
@@ -2094,6 +2101,11 @@ class SuccessorSetup(App):
             tools_label = ", ".join(self.state.enabled_tools)
         else:
             tools_label = "(none — chat-only)"
+        skills = recommended_skills_for_tools(self.state.enabled_tools)
+        if skills:
+            skills_label = ", ".join(skills)
+        else:
+            skills_label = "(none)"
         if self.state.provider_kind == "openrouter":
             provider_summary = f"openrouter · {self.state.provider_model}"
         elif self.state.provider_kind == "openai":
@@ -2106,9 +2118,10 @@ class SuccessorSetup(App):
             ("display mode", self.state.display_mode),
             ("density", self.state.density),
             ("intro animation", self.state.intro_animation or "(none)"),
+            ("autorecord", "on (local-only bundles)" if self.state.autorecord else "off"),
             ("system prompt", "default — edit JSON file to customize"),
             ("provider", provider_summary),
-            ("skills", "(none — phase 5 not yet wired)"),
+            ("skills", skills_label),
             ("tools", tools_label),
         ]
         label_w = max(len(label) for label, _ in rows_data)
@@ -2132,7 +2145,7 @@ class SuccessorSetup(App):
         # Save hint at the bottom
         hint_y = bottom - 2
         if hint_y > top + len(rows_data) + 2:
-            hint = "press Enter to save · ← to back · Esc to cancel"
+            hint = "A toggles local autorecord · Enter saves · ← backs up · Esc cancels"
             paint_text(
                 grid, hint, left, hint_y,
                 style=Style(fg=theme.accent_warm, bg=theme.bg, attrs=ATTR_BOLD),

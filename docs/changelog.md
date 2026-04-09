@@ -11,6 +11,129 @@ unit on top of phase 0.
 
 ---
 
+## v0.1.18, local autorecord default + git-safe session bundles (2026-04-08)
+
+The first-class recording bundle pass made playback genuinely useful,
+but it still required an explicit `successor record` workflow. That was
+backwards. If recording/replay is one of the best debugging features in
+the project, it should be on by default for normal local use and easy to
+discover in setup.
+
+This pass moves recording from "hidden power tool" to "normal local
+session affordance" while keeping the privacy model tight.
+
+### What landed
+
+- `src/successor/config.py`:
+  - schema v4 adds local `autorecord: bool`
+  - migrated configs default missing `autorecord` to `true`
+- `src/successor/chat.py`:
+  - normal chat sessions now auto-open a `RecordingBundle` when no
+    explicit recorder is supplied and `autorecord` is enabled
+  - auto-owned bundles finalize on shutdown with the session trace
+  - new `/recording on|off|toggle` slash command for future sessions
+- `src/successor/wizard/setup.py`:
+  - review screen now shows `autorecord`
+  - `A` toggles it before first save
+  - setting is written to local `chat.json`, not to profile JSON
+  - review now shows the real recommended skills implied by the chosen
+    tool set instead of a stale "phase 5 not yet wired" placeholder
+- `src/successor/playback.py`:
+  - bundle summaries now declare `local_only: true`
+  - `index.md` now includes a machine/human read order
+  - bundles created inside a git worktree append their local path to
+    `.git/info/exclude`
+- `src/successor/cli.py`:
+  - `successor doctor` reports auto-record state and record root
+  - `successor record` now prints the local-only / git-exclude privacy
+    note on completion
+- `README.md`:
+  - recording docs now explain the setup-wizard toggle, the in-chat
+    `/recording` control, local-only persistence, and the agent-facing
+    artifact layout
+
+### Verification
+
+- `tests/test_config.py`
+  - config migration/save now preserves `autorecord`
+- `tests/test_wizard.py`
+  - review-step toggle and saved `chat.json` both verified
+- `tests/test_playback.py`
+  - bundle local git exclusion and chat auto-record behavior covered
+- `tests/test_cli_doctor.py`
+  - doctor output now asserts the recording status line
+- focused slice:
+  - `PYTHONPATH=src pytest -q tests/test_config.py tests/test_wizard.py tests/test_playback.py tests/test_cli_doctor.py`
+  - `79 passed`
+- full suite:
+  - `PYTHONPATH=src pytest -q`
+  - `1144 passed`
+- live PTY verification:
+  - isolated `SUCCESSOR_CONFIG_DIR` + `SUCCESSOR_RECORDINGS_DIR`
+  - normal `successor chat` auto-created a bundle on first launch
+  - `/recording` reported the local-only bundle path/behavior
+  - a real model turn completed
+  - `/recording off` persisted into `chat.json`
+  - bundle contained `summary.json`, `session_trace.json`,
+    `timeline.json`, `index.md`, and `playback.html`
+- live visual verification:
+  - opened the generated `playback.html` in headless Chromium
+  - exercised `Next` and `Play/Pause`
+  - captured and reviewed a screenshot of the real viewer with the
+    trace sidebar, summary cards, turn chip, and final frame
+- secrets check:
+  - scanned the tracked tree for Firecrawl/OpenAI/OpenRouter key
+    patterns before push
+
+## v0.1.17, first-class recording bundles + shared playback viewer (2026-04-08)
+
+The playback scrubber had already proven itself during supervised E2E
+work, but it was still trapped inside `scripts/e2e_chat_driver.py`.
+Normal `successor record` sessions only wrote raw input JSONL, which
+meant the coolest debugging tool in the project was still effectively a
+hidden internal feature.
+
+This pass promotes it into the product.
+
+### What landed
+
+- new `src/successor/playback.py`:
+  - shared HTML viewer writer used by both the E2E harness and normal
+    session recording
+  - `RecordingBundle` capture path for `input.jsonl`, frame timeline,
+    copied trace logs, parsed trace JSON, summary, index, and viewer
+  - default recordings root under
+    `~/.local/share/successor/recordings/`
+  - latest-bundle resolution for reopening recent captures quickly
+- `src/successor/chat.py`:
+  - live `on_tick()` now feeds recording bundles directly, so frame
+    capture is tied to the real painted output path
+- `src/successor/cli.py`:
+  - `successor record` now defaults to bundle mode
+  - `.jsonl` output or `--input-only` keeps the old minimal path
+  - new `successor playback [bundle] [--open]`
+  - bundle-mode record now prints the viewer path and a reopen hint
+- `scripts/e2e_chat_driver.py`:
+  - now calls into the shared playback module instead of carrying a
+    private HTML scrubber implementation
+- `README.md`:
+  - added a real Recording Bundles section with commands and paths
+
+### Verification
+
+- `tests/test_playback.py`
+  - HTML payload escaping still handles literal `</script>`
+  - recording bundles write viewer/timeline/trace artifacts correctly
+  - `cmd_record` bundle mode and `cmd_playback` regeneration path both
+    work end-to-end under test
+- `PYTHONPATH=src pytest -q tests/test_playback.py`: `3 passed`
+- `python3 -m py_compile` over:
+  - `src/successor/playback.py`
+  - `src/successor/cli.py`
+  - `src/successor/chat.py`
+  - `scripts/e2e_chat_driver.py`
+- `PYTHONPATH=src python3 -m successor playback --help`
+
 ## v0.1.16, playback HTML escaping fix (2026-04-08)
 
 The new playback scrubber was conceptually right but had a concrete

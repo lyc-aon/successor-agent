@@ -99,7 +99,8 @@ def test_migrate_v1_dark() -> None:
     result = migrate_config({"theme": "dark"})
     assert result["theme"] == "steel"
     assert result["display_mode"] == "dark"
-    assert result["version"] == 3
+    assert result["version"] == CURRENT_SCHEMA_VERSION
+    assert result["autorecord"] is True
 
 
 def test_migrate_v1_light() -> None:
@@ -107,7 +108,7 @@ def test_migrate_v1_light() -> None:
     result = migrate_config({"theme": "light"})
     assert result["theme"] == "steel"
     assert result["display_mode"] == "light"
-    assert result["version"] == 3
+    assert result["version"] == CURRENT_SCHEMA_VERSION
 
 
 def test_migrate_v1_forge() -> None:
@@ -115,7 +116,7 @@ def test_migrate_v1_forge() -> None:
     result = migrate_config({"theme": "forge"})
     assert result["theme"] == "forge"
     assert result["display_mode"] == "dark"
-    assert result["version"] == 3
+    assert result["version"] == CURRENT_SCHEMA_VERSION
 
 
 def test_migrate_v1_unknown_theme_passes_through() -> None:
@@ -124,7 +125,7 @@ def test_migrate_v1_unknown_theme_passes_through() -> None:
     result = migrate_config({"theme": "my_custom_theme"})
     assert result["theme"] == "my_custom_theme"
     assert result["display_mode"] == "dark"
-    assert result["version"] == 3
+    assert result["version"] == CURRENT_SCHEMA_VERSION
 
 
 def test_migrate_preserves_other_keys() -> None:
@@ -138,8 +139,8 @@ def test_migrate_preserves_other_keys() -> None:
     assert result["mouse"] is True
 
 
-def test_migrate_v2_is_noop() -> None:
-    """A v3 config is returned unchanged."""
+def test_migrate_v3_autorecord_default_is_added() -> None:
+    """Older configs pick up the local autorecord default on migrate."""
     v3 = {
         "version": 3,
         "theme": "steel",
@@ -151,7 +152,8 @@ def test_migrate_v2_is_noop() -> None:
     assert result["theme"] == "steel"
     assert result["display_mode"] == "light"
     assert result["mouse"] is False
-    assert result["version"] == 3
+    assert result["autorecord"] is True
+    assert result["version"] == CURRENT_SCHEMA_VERSION
 
 
 def test_migrate_is_idempotent() -> None:
@@ -178,7 +180,8 @@ def test_migrate_doesnt_clobber_explicit_display_mode() -> None:
 def test_migrate_empty_dict() -> None:
     """An empty dict gets the version stamp but no theme fixup."""
     result = migrate_config({})
-    assert result["version"] == 3
+    assert result["version"] == CURRENT_SCHEMA_VERSION
+    assert result["autorecord"] is True
     assert "theme" not in result
     assert "display_mode" not in result
 
@@ -204,7 +207,8 @@ def test_load_migrates_v1_file_on_disk(temp_config_dir: Path) -> None:
     assert cfg["display_mode"] == "dark"
     assert cfg["density"] == "compact"
     assert cfg["mouse"] is False
-    assert cfg["version"] == 3
+    assert cfg["version"] == CURRENT_SCHEMA_VERSION
+    assert cfg["autorecord"] is True
 
 
 def test_migrate_v2_mouse_false_preserved() -> None:
@@ -216,7 +220,8 @@ def test_migrate_v2_mouse_false_preserved() -> None:
         "mouse": False,
     })
     assert result["mouse"] is False
-    assert result["version"] == 3
+    assert result["autorecord"] is True
+    assert result["version"] == CURRENT_SCHEMA_VERSION
 
 
 def test_migrate_v2_mouse_true_preserved() -> None:
@@ -227,7 +232,8 @@ def test_migrate_v2_mouse_true_preserved() -> None:
         "mouse": True,
     })
     assert result["mouse"] is True
-    assert result["version"] == 3
+    assert result["autorecord"] is True
+    assert result["version"] == CURRENT_SCHEMA_VERSION
 
 
 def test_save_stamps_current_version(temp_config_dir: Path) -> None:
@@ -251,3 +257,13 @@ def test_save_then_load_does_not_re_migrate(temp_config_dir: Path) -> None:
     # The saved values are preserved exactly — no v1 fixup ran.
     assert cfg["theme"] == "forge"
     assert cfg["display_mode"] == "light"
+    assert cfg["autorecord"] is True
+
+
+def test_save_then_load_preserves_autorecord(temp_config_dir: Path) -> None:
+    save_chat_config({
+        "theme": "steel",
+        "autorecord": False,
+    })
+    cfg = load_chat_config()
+    assert cfg["autorecord"] is False

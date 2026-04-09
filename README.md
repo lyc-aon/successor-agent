@@ -321,8 +321,9 @@ successor doctor          terminal + active profile health check
 successor skills          list loaded skills
 successor tools           list import-registered Python tools
 successor snapshot        headless render of a chat scenario
-successor record          record an input session to JSONL
-successor replay          replay a recorded session
+successor record          record a session to a playback bundle
+successor replay          replay a recorded input session
+successor playback        reopen or open a playback bundle viewer
 successor bench           renderer benchmark, no TTY required
 ```
 
@@ -335,7 +336,9 @@ support. When `holonet`, `browser`, or `vision` are enabled on the
 active profile, doctor also reports the enabled provider set,
 Playwright package readiness, the browser channel/executable path, the
 persistent user-data directory, and the configured vision runtime
-status. Run it first when something is not working.
+status. It now also reports whether local session auto-recording is on
+and, when enabled, which directory receives the bundles. Run it first
+when something is not working.
 
 `successor tools` is a different registry: it lists Python
 import-registered tools from `src/successor/tools/`, not the native
@@ -346,6 +349,59 @@ Normal `successor chat` sessions also leave a bounded local runtime
 trace under `~/.config/successor/logs/`. These JSONL files record user
 submissions, model turn boundaries, tool spawns, runner completion, and
 shutdown cancellation so hangs can be debugged after the chat exits.
+
+## Recording Bundles
+
+`successor record` is now the obvious debugger path, not just an
+input-byte dump. With no arguments it writes a timestamped bundle under
+`~/.local/share/successor/recordings/` containing:
+
+- `input.jsonl` with the raw input stream
+- `timeline.json` with captured rendered frames
+- `session_trace.jsonl` and `session_trace.json` with runtime events
+- `playback.html`, a self-contained browser scrubber
+
+Use it like this:
+
+```bash
+successor record
+successor record ~/incoming/hang-debug
+successor playback
+successor playback ~/incoming/hang-debug --open
+```
+
+Normal `successor chat` sessions also auto-record to that same local
+bundle format by default. This is a user preference, not a profile
+trait:
+
+- fresh installs default to `autorecord = true`
+- the setup wizard review screen shows the toggle before first save
+- `/recording on|off|toggle` controls it later from the chat
+- bundles stay on local disk only
+- if you intentionally point a bundle inside a git repo, Successor adds
+  that bundle path to the repo's local `.git/info/exclude` so it stays
+  uncommitted by default
+
+The viewer is interactive, not a video. Open `playback.html` directly
+or use `successor playback --open` and scrub frame-by-frame with trace
+events alongside it. Keyboard shortcuts are built in: Space
+play/pause, Left/Right step, Home/End jump.
+
+If you want the old minimal repro path, pass a `.jsonl` output or use
+`--input-only`:
+
+```bash
+successor record repro.jsonl --input-only
+successor replay repro.jsonl --speed 2
+```
+
+For agent handoff or postmortems, the bundle already packages the
+machine-friendly pieces too:
+
+- `summary.json` gives the top-level artifact map
+- `session_trace.json` is the parsed runtime log
+- `timeline.json` is the full rendered-frame sequence
+- `index.md` explains the recommended read order
 
 ## The architectural premise
 

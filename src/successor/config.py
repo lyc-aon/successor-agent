@@ -1,7 +1,7 @@
 """User preferences persistence — `~/.config/successor/chat.json`.
 
 Tiny stdlib JSON read/write for the chat's user-toggleable settings:
-theme, display_mode, density, mouse, active_profile. Survives `successor chat`
+theme, display_mode, density, mouse, autorecord, active_profile. Survives `successor chat`
 restarts so the user doesn't have to re-pick their preferences every
 session.
 
@@ -49,6 +49,16 @@ V2 → V3 fixup (one-shot, idempotent, runs on every load):
   intended split remains:
     - mouse off  → terminal owns wheel/selection
     - mouse on   → Successor owns wheel/clicks
+
+V4 fields (added 2026-04-08 for local recording bundles):
+
+  autorecord        bool — record normal chat sessions to a local
+                     playback bundle by default
+
+V3 → V4 fixup (one-shot, idempotent, runs on every load):
+
+  Missing `autorecord` defaults to True. Recording bundles are local-only
+  debugging artifacts, stored outside the repo by default.
 """
 
 from __future__ import annotations
@@ -63,7 +73,7 @@ CONFIG_DIR_ENV = "SUCCESSOR_CONFIG_DIR"
 DEFAULT_CONFIG_DIR = Path.home() / ".config" / "successor"
 CHAT_CONFIG_FILE = "chat.json"
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 # Legacy v1 theme names → (v2 theme name, v2 display_mode). Anything not
 # in this map is passed through unchanged with display_mode defaulting
@@ -128,7 +138,9 @@ def migrate_config(data: dict[str, Any]) -> dict[str, Any]:
         data["version"] = 3
 
     # Future migrations would chain here:
-    # if version < 4: data = _migrate_v3_to_v4(data); data["version"] = 4
+    if version < 4:
+        data = _migrate_v3_to_v4(data)
+        data["version"] = 4
 
     return data
 
@@ -180,6 +192,13 @@ def _migrate_v2_to_v3(data: dict[str, Any]) -> dict[str, Any]:
     return dict(data)
 
 
+def _migrate_v3_to_v4(data: dict[str, Any]) -> dict[str, Any]:
+    """Add the local autorecord preference with a safe default."""
+    out = dict(data)
+    out.setdefault("autorecord", True)
+    return out
+
+
 def save_chat_config(data: dict[str, Any]) -> bool:
     """Write the chat config file. Returns True on success.
 
@@ -190,6 +209,7 @@ def save_chat_config(data: dict[str, Any]) -> bool:
     """
     path = _chat_config_path()
     payload = dict(data)
+    payload.setdefault("autorecord", True)
     payload["version"] = CURRENT_SCHEMA_VERSION
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
