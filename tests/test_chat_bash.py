@@ -527,15 +527,21 @@ class _MockClient:
         return self._streams.pop(0)
 
 
-def _drive_until_idle(chat: SuccessorChat, max_ticks: int = 1000) -> int:
+def _drive_until_idle(
+    chat: SuccessorChat,
+    max_ticks: int = 1000,
+    *,
+    tick_sleep_s: float = 0.005,
+) -> int:
     """Drive chat._pump_stream + chat._pump_running_tools until the
     chat is fully idle: no stream in flight, no pending agent turn,
     AND no in-flight bash runners. Returns the number of ticks
     consumed.
 
-    Hard-capped at `max_ticks` (with 5ms sleep between ticks, that's
-    a 5-second wall-clock budget — generous enough for real runners
-    against real subprocess but tight enough to catch hangs).
+    Hard-capped at `max_ticks`. By default the helper sleeps 5ms
+    between ticks to give real subprocess-backed runners time to make
+    progress, but fully mocked tests can set `tick_sleep_s=0` to drive
+    the loop without wall-clock delay.
     """
     import time as _time
     for tick in range(max_ticks):
@@ -547,7 +553,8 @@ def _drive_until_idle(chat: SuccessorChat, max_ticks: int = 1000) -> int:
             return tick
         chat._pump_stream()
         chat._pump_running_tools()
-        _time.sleep(0.005)
+        if tick_sleep_s > 0:
+            _time.sleep(tick_sleep_s)
     raise AssertionError(
         f"_drive_until_idle exceeded {max_ticks} ticks — loop did not settle"
     )
@@ -615,14 +622,17 @@ def test_continue_loop_respects_turn_cap(temp_config_dir: Path) -> None:
     from successor.chat import MAX_AGENT_TURNS
     from successor.profiles import Profile
 
+    loop_cap = min(MAX_AGENT_TURNS, 12)
+
     chat = SuccessorChat()
     chat.profile = Profile(
         name="yolo",
         tools=("bash",),
         tool_config={"bash": {"allow_dangerous": True, "allow_mutating": True}},
+        max_agent_turns=loop_cap,
     )
     chat.messages = []
-    # Queue MANY more streams than MAX_AGENT_TURNS would consume. Each
+    # Queue MANY more streams than the enforced cap would consume. Each
     # one contains a simple echo so the dispatch succeeds and the loop
     # wants to keep going.
     chat.client = _MockClient(streams=[
@@ -630,29 +640,29 @@ def test_continue_loop_respects_turn_cap(temp_config_dir: Path) -> None:
             _content(f"```bash\necho turn-{i}\n```\n"),
             _stream_end(),
         ])
-        for i in range(MAX_AGENT_TURNS + 10)
+        for i in range(loop_cap + 10)
     ])
 
     chat.input_buffer = "keep going"
     chat._submit()
-    _drive_until_idle(chat, max_ticks=1000)
+    _drive_until_idle(chat, max_ticks=max(1000, loop_cap * 8))
 
-    # Exactly MAX_AGENT_TURNS streams were consumed (not more)
-    assert chat.client.call_count == MAX_AGENT_TURNS, (
-        f"expected {MAX_AGENT_TURNS} stream_chat calls, "
+    # Exactly the enforced cap was consumed (not more).
+    assert chat.client.call_count == loop_cap, (
+        f"expected {loop_cap} stream_chat calls, "
         f"got {chat.client.call_count}"
     )
 
-    # MAX_AGENT_TURNS tool cards were created
+    # One tool card per turn.
     tool_msgs = [m for m in chat.messages if m.tool_card is not None]
-    assert len(tool_msgs) == MAX_AGENT_TURNS
+    assert len(tool_msgs) == loop_cap
 
-    # The halt marker is present
+    # The halt marker is present and names the enforced cap.
     halt_msgs = [
         m for m in chat.messages
-        if m.synthetic and "halted" in m.raw_text.lower()
+        if m.synthetic and f"halted at {loop_cap} turns" in (m.raw_text or "").lower()
     ]
-    assert len(halt_msgs) >= 1, "expected an 'agent loop halted' marker"
+    assert halt_msgs, "expected an 'agent loop halted' marker"
 
 
 def test_continue_loop_respects_profile_max_agent_turns(temp_config_dir: Path) -> None:
@@ -859,6 +869,17 @@ def test_execution_discipline_injected_when_tools_enabled(
     assert "Execution discipline" in sys_msg["content"]
     assert "Do not stop early when another tool call would materially improve the result." in sys_msg["content"]
     assert "make the corresponding tool call in the SAME response" in sys_msg["content"]
+    assert "Task-ledger discipline" in sys_msg["content"]
+    assert "Evidence-bearing verification" in sys_msg["content"]
+    assert "Experimental run discipline" in sys_msg["content"]
+    assert "No current task ledger." in sys_msg["content"]
+    assert "No current verification contract." in sys_msg["content"]
+    assert "No current runbook." in sys_msg["content"]
+    assert "Working with local files" in sys_msg["content"]
+    assert sys_msg["content"].index("Task-ledger discipline") < sys_msg["content"].index("Working with local files")
+    assert sys_msg["content"].index("## Current Session Tasks") < sys_msg["content"].index("Working with local files")
+    assert sys_msg["content"].index("## Current Verification Contract") < sys_msg["content"].index("Working with local files")
+    assert sys_msg["content"].index("## Current Runbook") < sys_msg["content"].index("Working with local files")
 
 
 def test_live_stream_never_exposes_bash_block_mid_stream(

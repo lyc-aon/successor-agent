@@ -482,32 +482,288 @@ Example — start a multi-step implementation:
 TASK_MODEL_GUIDANCE = """\
 ## Using the task ledger
 
-Some turns expose an internal `task` tool for structured session-local
-task tracking.
+Use `task` to keep a compact session-local ledger authoritative.
 
-### Task-ledger rules
-
-- For multi-step work, create or update the task ledger early.
-- If the work clearly requires 3 or more distinct actions, or includes
-  build + verify + fix phases, calling `task` is usually the first
-  real step after you understand the request.
 - Prefer coarse tasks that match meaningful phases of work, not
   bookkeeping for every individual file or click.
 - Keep the list short and concrete; do not dump a full essay into it.
-- Mark one task `in_progress` BEFORE you begin substantive work, and
-  keep exactly one task `in_progress` while you are actively working.
-- Mark tasks completed immediately after finishing them; do not batch
-  several completions together later.
-- If you already know the next substantive tool action, update the
-  ledger and make that tool call in the same response instead of
-  spending a whole turn on task bookkeeping alone.
-- If you are done or waiting on the user, do not leave a task
-  `in_progress`.
+- Keep exactly one task `in_progress` while you are actively working.
 - Update the ledger when you switch focus, complete work, or hand
   control back.
-- Skip the task ledger only for single trivial tasks or purely
-  conversational replies. When in doubt, use it.
+- Do not leave a task `in_progress` when you are done or waiting on
+  the user.
 """
+
+VERIFY_DOC = """\
+### verify — update the session verification contract
+
+Use `verify` to keep a compact session-local contract for what must be
+proven before the work is really done.
+
+### How to invoke
+
+Call `verify` with the full current list of verification items. The
+tool replaces the previous contract; it is not a patch operation.
+
+Each verification item contains:
+
+- `claim` — what should be true
+- `evidence` — what concrete runtime evidence will prove it
+- `status` — `pending`, `in_progress`, `passed`, or `failed`
+- `observed` — optional concise outcome once evidence exists
+
+Example — verifying a local interactive app:
+
+    {"items": [
+      {"claim": "Typing a valid command increments score", "evidence": "player script + score HUD", "status": "in_progress"},
+      {"claim": "Mistyped commands reduce lives", "evidence": "scripted bad input + runtime log", "status": "pending"}
+    ]}
+
+### Critical rules
+
+- Use `verify` for non-trivial runtime, browser, visual, or stateful work.
+- Keep the list compact and concrete.
+- Keep at most one item `in_progress`.
+- Update items as evidence arrives; do not leave stale claims in the contract.
+"""
+
+VERIFY_MODEL_GUIDANCE = """\
+## Using the verification contract
+
+Use `verify` to keep a compact list of claims plus evidence.
+
+- Keep claims concrete and evidence specific.
+- Prefer runtime evidence over source inspection.
+- Use `observed` for concise outcomes, especially on failures.
+- Do not leave an item `in_progress` once the evidence is in.
+"""
+
+RUNBOOK_DOC = """\
+### runbook — update the session experiment runbook
+
+Use `runbook` to keep a compact session-local experiment contract for
+long iterative work.
+
+### How to invoke
+
+Call `runbook` with the current run-level objective, success
+definition, baseline status, active hypothesis, and evaluator steps.
+The tool replaces the previous runbook state. You may also include an
+optional `attempt` object to record the result of one bounded
+experiment.
+
+Core fields:
+
+- `objective` — what the run is trying to achieve
+- `success_definition` — what counts as success
+- `scope` — optional in-scope files or surfaces
+- `protected_surfaces` — optional out-of-scope or fragile areas
+- `baseline_status` — `missing`, `captured`, or `stale`
+- `baseline_summary` — optional concise summary of current baseline
+- `active_hypothesis` — one concrete idea currently being tested
+- `evaluator` — stable list of checks to rerun after attempts
+- `status` — `planning`, `running`, `blocked`, or `complete`
+
+Example — long local app iteration:
+
+    {
+      "objective": "Ship a stable typing game loop with correct scoring and lives",
+      "success_definition": "The game plays end to end, scoring is correct, lives decrement on mistakes, and no console errors occur during the scripted playthrough",
+      "scope": ["src/game", "src/ui"],
+      "baseline_status": "captured",
+      "baseline_summary": "Current build opens and renders, but the scripted player stalls after the first wave",
+      "active_hypothesis": "Input focus is being lost after wave transitions",
+      "evaluator": [
+        {"id": "build", "kind": "command", "spec": "npm run build", "pass_condition": "exit 0"},
+        {"id": "player", "kind": "script", "spec": "node scripts/play-game.mjs", "pass_condition": "playthrough reaches game over with expected score log"},
+        {"id": "browser", "kind": "browser_flow", "spec": "open app, run player, inspect console", "pass_condition": "no console errors and HUD updates correctly"}
+      ],
+      "status": "running"
+    }
+
+Optional `attempt` object:
+
+- `hypothesis`
+- `summary`
+- `decision` — `kept`, `discarded`, `inconclusive`, or `failed_env`
+- `files_touched`
+- `evaluator_summary`
+- `verification_summary`
+- `artifact_refs`
+
+### Critical rules
+
+- Use `runbook` for long iterative work with multiple edit -> evaluate loops.
+- Keep one active hypothesis at a time.
+- Capture baseline before major edits when it is missing.
+- Keep evaluator steps stable unless the task genuinely changes.
+- Record concise attempt results instead of retrying failed ideas blindly.
+"""
+
+RUNBOOK_MODEL_GUIDANCE = """\
+## Using the experiment runbook
+
+Use `runbook` to make long iterative runs explicit.
+
+- Create it early for work that will involve multiple edit -> run -> verify loops.
+- Capture or refresh the baseline before making major comparisons.
+- Keep one active hypothesis at a time.
+- Reuse the evaluator bundle instead of inventing a new verification plan every turn.
+- After a bounded attempt, record a keep/discard decision with a concise attempt summary.
+"""
+
+_VERIFY_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "verify",
+        "description": (
+            "Replace the current session verification contract with a "
+            "compact list of claims, evidence plans, and statuses."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "description": (
+                        "Full replacement list for the session verification "
+                        "contract."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "claim": {
+                                "type": "string",
+                                "description": "The behavior or outcome to prove.",
+                            },
+                            "evidence": {
+                                "type": "string",
+                                "description": (
+                                    "The concrete evidence that will prove the claim."
+                                ),
+                            },
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "in_progress", "passed", "failed"],
+                                "description": "Current verification status.",
+                            },
+                            "observed": {
+                                "type": "string",
+                                "description": (
+                                    "Optional concise observed outcome once evidence exists."
+                                ),
+                            },
+                        },
+                        "required": ["claim", "evidence", "status"],
+                    },
+                },
+            },
+            "required": ["items"],
+        },
+    },
+}
+
+_RUNBOOK_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "runbook",
+        "description": (
+            "Replace the current session experiment runbook for long "
+            "iterative work and optionally record the latest bounded "
+            "attempt result."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "clear": {
+                    "type": "boolean",
+                    "description": "Clear the current runbook instead of updating it.",
+                },
+                "objective": {
+                    "type": "string",
+                    "description": "Run-level objective for the current autonomous effort.",
+                },
+                "success_definition": {
+                    "type": "string",
+                    "description": "What counts as success for this run.",
+                },
+                "scope": {
+                    "type": "array",
+                    "description": "Optional in-scope files, modules, or product surfaces.",
+                    "items": {"type": "string"},
+                },
+                "protected_surfaces": {
+                    "type": "array",
+                    "description": "Optional surfaces to avoid or treat carefully.",
+                    "items": {"type": "string"},
+                },
+                "baseline_status": {
+                    "type": "string",
+                    "enum": ["missing", "captured", "stale"],
+                    "description": "Whether a trustworthy baseline has been captured.",
+                },
+                "baseline_summary": {
+                    "type": "string",
+                    "description": "Optional concise summary of the current baseline.",
+                },
+                "active_hypothesis": {
+                    "type": "string",
+                    "description": "The single concrete idea currently being tested.",
+                },
+                "evaluator": {
+                    "type": "array",
+                    "description": "Stable evaluator bundle to rerun after bounded attempts.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "kind": {
+                                "type": "string",
+                                "enum": ["command", "browser_flow", "vision_check", "script", "manual_probe"],
+                            },
+                            "spec": {"type": "string"},
+                            "pass_condition": {"type": "string"},
+                        },
+                        "required": ["id", "kind", "spec", "pass_condition"],
+                    },
+                },
+                "decision_policy": {
+                    "type": "string",
+                    "description": "Optional concise rule for when an attempt should be kept.",
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["planning", "running", "blocked", "complete"],
+                    "description": "Current run-level status.",
+                },
+                "attempt": {
+                    "type": "object",
+                    "description": "Optional record of the latest bounded attempt and its outcome.",
+                    "properties": {
+                        "hypothesis": {"type": "string"},
+                        "summary": {"type": "string"},
+                        "decision": {
+                            "type": "string",
+                            "enum": ["kept", "discarded", "inconclusive", "failed_env"],
+                        },
+                        "files_touched": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "evaluator_summary": {"type": "string"},
+                        "verification_summary": {"type": "string"},
+                        "artifact_refs": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                    },
+                    "required": ["hypothesis", "summary", "decision"],
+                },
+            },
+            "required": [],
+        },
+    },
+}
 
 _TASK_TOOL_SCHEMA: dict[str, Any] = {
     "type": "function",
@@ -1068,6 +1324,26 @@ AVAILABLE_TOOLS: Mapping[str, ToolDescriptor] = {
         schema=_TASK_TOOL_SCHEMA,
         system_prompt_doc=TASK_DOC,
         model_guidance=TASK_MODEL_GUIDANCE,
+        user_visible=False,
+    ),
+    "verify": ToolDescriptor(
+        name="verify",
+        label="verify",
+        description="Internal session verification contract for evidence-bearing completion.",
+        default_enabled=False,
+        schema=_VERIFY_TOOL_SCHEMA,
+        system_prompt_doc=VERIFY_DOC,
+        model_guidance=VERIFY_MODEL_GUIDANCE,
+        user_visible=False,
+    ),
+    "runbook": ToolDescriptor(
+        name="runbook",
+        label="runbook",
+        description="Internal experiment runbook for long iterative work.",
+        default_enabled=False,
+        schema=_RUNBOOK_TOOL_SCHEMA,
+        system_prompt_doc=RUNBOOK_DOC,
+        model_guidance=RUNBOOK_MODEL_GUIDANCE,
         user_visible=False,
     ),
     "skill": ToolDescriptor(

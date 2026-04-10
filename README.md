@@ -79,7 +79,12 @@ The tools step auto-discovers the built-in native tool registry.
 `holonet`, `browser`, and `vision` are opt-in. If you want bare chat,
 uncheck everything. If you want API-backed web research, a live
 browser session, or screenshot-based visual
-inspection, enable them there or later in `/config`.
+inspection, enable them there or later in `/config`. Runtime also
+auto-exposes two internal control tools when tools are enabled:
+`task` for the session task ledger and `verify` for a compact
+evidence-bearing verification contract. Long iterative runs now also
+get `runbook`, an internal experiment contract for objective,
+baseline, evaluator, and attempt decisions.
 
 If you skip the wizard and run `successor chat` directly on a fresh install, you get the
 bundled default profile pointed at `http://localhost:8080`. The default
@@ -202,7 +207,7 @@ and the runtime can use that structured state to continue one more turn
 when the model stops too early.
 
 Profiles now also carry `max_agent_turns`, the hard cap for one user
-submission's model loop. The default is `80`, and both the setup wizard
+submission's model loop. The default is `999`, and both the setup wizard
 review screen and `/config` expose it so long local runs are not stuck
 with the old tiny ceiling.
 
@@ -471,6 +476,18 @@ verify something, it should make the tool call in the same response,
 keep going while tool work would materially improve the result, and only
 finish after verification.
 
+For longer or stateful runs, Successor also keeps a session-local
+verification contract alongside the task ledger. The model can update
+explicit claims, the concrete evidence that should prove them, and the
+observed outcome once the evidence exists. That keeps "looks done" and
+"is actually verified" separate.
+
+For genuinely iterative runs, Successor can also keep a runbook: a
+small session-local contract for the objective, success definition,
+baseline status, active hypothesis, and stable evaluator steps. This is
+paired with an append-only attempt ledger so the model can stop
+retrying failed ideas blindly.
+
 For the full contract, see [docs/file-tools.md](docs/file-tools.md).
 
 Normal `successor chat` sessions also leave a bounded local runtime
@@ -488,7 +505,10 @@ input-byte dump. With no arguments it writes a timestamped bundle under
 
 - `input.jsonl` with the raw input stream
 - `timeline.json` with captured rendered frames
+- `runbook.json` when the run used a structured experiment runbook
+- `experiments.jsonl` with attempt-ledger rows reconstructed from trace
 - `session_trace.jsonl` and `session_trace.json` with runtime events
+- `assertions.json` when the run recorded an explicit verification contract
 - `playback.html`, a self-contained browser session reviewer with
   playback controls, turn cards, trace explorer, artifact links, and
   screenshot galleries when a bundle contains still images
@@ -535,7 +555,11 @@ Space play/pause, Left/Right step, Home/End jump.
 The current browser reviewer is shaped like a real workbench rather
 than a screenshot gallery: recorded terminal frames are centered on a
 bounded artboard, the event browser lives in a dedicated dock, and the
-right rail keeps evidence and payload detail out of the viewport.
+right rail keeps evidence and payload detail out of the viewport. When
+a run used the verification contract, that same rail also shows the
+latest proof state and links it to the recorded trace. When a run used
+the experiment runbook, the same rail also shows the objective,
+baseline, active hypothesis, and recent keep/discard attempt history.
 
 There is also a recordings manager on top of the per-bundle reviewer:
 
@@ -666,7 +690,7 @@ pytest
 
 The suite is hermetic. Each test gets its own
 `SUCCESSOR_CONFIG_DIR`, and bash dispatch tests use real shell
-builtins (no mocks). 1027 tests at the time of writing. Run them
+builtins (no mocks). 1218 tests at the time of writing. Run them
 with `pytest -q` for a clean dot view, or `pytest -xvs` to follow
 individual tests.
 
@@ -682,7 +706,11 @@ individual tests.
   send to and receive from llama.cpp's HTTP server
 - [`docs/compaction.md`](docs/compaction.md): autocompactor reference,
   threshold configuration, and the post-compact assertion
+- [`docs/file-tools.md`](docs/file-tools.md): native file-tool contract,
+  guarded write flow, and how verification pairs with authoring
 - [`docs/changelog.md`](docs/changelog.md): running development history
+- [`reviewer-app/README.md`](reviewer-app/README.md): how the recordings
+  manager and session reviewer frontend is built and packaged
 - [`CLAUDE.md`](CLAUDE.md): repo orientation auto-loaded by Claude
   Code sessions working in this directory
 

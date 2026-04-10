@@ -35,6 +35,10 @@ def summarize_tool_completion(
         return _summarize_vision(card)
     if tool_name in {"read_file", "write_file", "edit_file"}:
         return _summarize_file_tool(card)
+    if tool_name == "verify":
+        return _summarize_verify(card)
+    if tool_name == "runbook":
+        return _summarize_runbook(card)
     if tool_name == "bash":
         return _summarize_bash(card)
     return None
@@ -201,6 +205,82 @@ def _summarize_vision(card: ToolCard) -> ProgressUpdate | None:
     return ProgressUpdate(
         text=f"reviewed {name} with vision",
         source="vision",
+        important=True,
+    )
+
+
+def _summarize_verify(card: ToolCard) -> ProgressUpdate | None:
+    items = card.tool_arguments.get("items")
+    if not isinstance(items, list):
+        return ProgressUpdate(
+            text="updated verification contract",
+            source="verify",
+            important=True,
+        )
+    passed = sum(
+        1
+        for item in items
+        if isinstance(item, dict) and str(item.get("status") or "").strip().lower() == "passed"
+    )
+    failed = sum(
+        1
+        for item in items
+        if isinstance(item, dict) and str(item.get("status") or "").strip().lower() == "failed"
+    )
+    in_progress = sum(
+        1
+        for item in items
+        if isinstance(item, dict) and str(item.get("status") or "").strip().lower() == "in_progress"
+    )
+    total = len(items)
+    if failed:
+        return ProgressUpdate(
+            text=f"verification contract updated ({passed}/{total} passed, {failed} failed)",
+            source="verify",
+            important=True,
+        )
+    if in_progress:
+        return ProgressUpdate(
+            text=f"verification contract updated ({passed}/{total} passed, {in_progress} running)",
+            source="verify",
+            important=True,
+        )
+    return ProgressUpdate(
+        text=f"verification contract updated ({passed}/{total} passed)",
+        source="verify",
+        important=True,
+    )
+
+
+def _summarize_runbook(card: ToolCard) -> ProgressUpdate | None:
+    args = card.tool_arguments
+    if bool(args.get("clear")):
+        return ProgressUpdate(
+            text="cleared experiment runbook",
+            source="runbook",
+            important=True,
+        )
+    objective = str(args.get("objective") or "").strip()
+    baseline_status = str(args.get("baseline_status") or "").strip().lower()
+    attempt = args.get("attempt")
+    label = _clip_target(objective or "current objective", limit=56)
+    if isinstance(attempt, dict):
+        decision = str(attempt.get("decision") or "").strip().lower() or "recorded"
+        hypothesis = _clip_target(str(attempt.get("hypothesis") or ""), limit=44)
+        return ProgressUpdate(
+            text=f"runbook recorded {decision} attempt for {hypothesis or label}",
+            source="runbook",
+            important=True,
+        )
+    if baseline_status == "missing":
+        return ProgressUpdate(
+            text=f"runbook updated ({label}; baseline missing)",
+            source="runbook",
+            important=True,
+        )
+    return ProgressUpdate(
+        text=f"runbook updated for {label}",
+        source="runbook",
         important=True,
     )
 

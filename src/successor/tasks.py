@@ -167,18 +167,38 @@ def build_task_tool_result(ledger: SessionTaskLedger) -> str:
 def build_task_prompt_section(ledger: SessionTaskLedger) -> str:
     lines = ["## Current Session Tasks", ""]
     if not ledger.items:
-        lines.append(
-            "No current task ledger. If this request will take 3 or more "
-            "distinct actions, or includes build/verify/fix phases, your "
-            "next action should usually be a `task` call before more tools. "
-            "You can combine that `task` update with the first real tool call "
-            "in the same response."
-        )
+        lines.append("No current task ledger.")
         return "\n".join(lines)
     for item in ledger.items:
         lines.append(f"- [{item.status}] {item.content}")
         if item.in_progress and item.active_form != item.content:
             lines.append(f"  active: {item.active_form}")
+    return "\n".join(lines)
+
+
+def build_task_execution_guidance(ledger: SessionTaskLedger) -> str:
+    lines = ["### Task-ledger discipline", ""]
+    if not ledger.items:
+        lines.extend([
+            "- For multi-step work, create or update the session task ledger early.",
+            "- If the request clearly requires 3 or more distinct actions, or includes build + verify + fix phases, a `task` call is usually the first substantive step after you understand the request.",
+        ])
+    else:
+        active = ledger.in_progress_task()
+        if active is not None:
+            lines.append(
+                f"- A session task is already `in_progress`: `{active.active_form}`. Keep the ledger authoritative as you continue from the current state."
+            )
+        else:
+            lines.append(
+                "- A session task ledger already exists. Update it before you resume substantive work so it reflects the current plan."
+            )
+    lines.extend([
+        "- Mark one task `in_progress` BEFORE you begin substantive work, and keep at most one task `in_progress` while actively working.",
+        "- If you already know the next substantive tool action, update the ledger and make that tool call in the SAME response.",
+        "- Mark tasks completed immediately after finishing them; do not batch completions later.",
+        "- Skip the task ledger only for single trivial tasks or purely conversational replies.",
+    ])
     return "\n".join(lines)
 
 

@@ -156,10 +156,35 @@ from .tasks import (
     TaskLedgerError,
     build_task_card_output,
     build_task_continue_nudge,
+    build_task_execution_guidance,
     build_task_prompt_section,
     build_task_tool_result,
     parse_task_items,
     task_items_to_payload,
+)
+from .verification_contract import (
+    VerificationContractError,
+    VerificationLedger,
+    build_assertions_artifact,
+    build_verification_card_output,
+    build_verification_execution_guidance,
+    build_verification_prompt_section,
+    build_verification_tool_result,
+    parse_verification_items,
+    verification_items_to_payload,
+)
+from .runbook import (
+    RunbookError,
+    SessionRunbook,
+    build_runbook_artifact,
+    build_runbook_card_output,
+    build_runbook_execution_guidance,
+    build_runbook_prompt_section,
+    build_runbook_tool_result,
+    experiment_attempt_to_payload,
+    parse_experiment_attempt,
+    parse_runbook_state,
+    runbook_state_to_payload,
 )
 from .subagents.cards import SubagentToolCard
 from .subagents.manager import (
@@ -997,6 +1022,51 @@ def _trace_tool_call_summary(tc: dict[str, Any]) -> dict[str, object]:
                     limit=320,
                 )
                 break
+    elif name == "verify" and isinstance(args, dict):
+        items = args.get("items")
+        if isinstance(items, list):
+            entry["assertion_count"] = len(items)
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("status") or "").strip().lower() != "in_progress":
+                    continue
+                entry["active_claim"] = _trace_clip_text(
+                    str(item.get("claim") or ""),
+                    limit=320,
+                )
+                entry["active_evidence"] = _trace_clip_text(
+                    str(item.get("evidence") or ""),
+                    limit=320,
+                )
+                break
+    elif name == "runbook" and isinstance(args, dict):
+        if bool(args.get("clear")):
+            entry["cleared"] = True
+        objective = str(args.get("objective") or "").strip()
+        if objective:
+            entry["objective_excerpt"] = _trace_clip_text(objective, limit=320)
+        hypothesis = str(args.get("active_hypothesis") or "").strip()
+        if hypothesis:
+            entry["active_hypothesis"] = _trace_clip_text(hypothesis, limit=320)
+        status = str(args.get("status") or "").strip()
+        if status:
+            entry["status"] = status
+        baseline_status = str(args.get("baseline_status") or "").strip()
+        if baseline_status:
+            entry["baseline_status"] = baseline_status
+        evaluator = args.get("evaluator")
+        if isinstance(evaluator, list):
+            entry["evaluator_count"] = len(evaluator)
+        attempt = args.get("attempt")
+        if isinstance(attempt, dict):
+            entry["attempt_decision"] = str(attempt.get("decision") or "")
+            attempt_hypothesis = str(attempt.get("hypothesis") or "").strip()
+            if attempt_hypothesis:
+                entry["attempt_hypothesis"] = _trace_clip_text(
+                    attempt_hypothesis,
+                    limit=320,
+                )
     elif name == "skill" and isinstance(args, dict):
         entry["skill_name"] = str(args.get("skill") or "")
         task = str(args.get("task") or "")
@@ -1928,6 +1998,9 @@ class SuccessorChat(App):
         # at MAX_AGENT_TURNS to bound runaway loops.
         self._agent_turn: int = 0
         self._task_ledger = SessionTaskLedger()
+        self._verification_ledger = VerificationLedger()
+        self._runbook = SessionRunbook()
+        self._runbook_attempt_count: int = 0
         self._task_continue_nudged_this_turn: bool = False
         self._task_continue_nudge: str | None = None
         self._browser_verification_active: bool = False
@@ -3246,6 +3319,10 @@ class SuccessorChat(App):
                 enabled_tools = [name for name in enabled_tools if name != "vision"]
         if (enabled_tools or self._task_ledger.has_items()) and "task" not in enabled_tools:
             enabled_tools.append("task")
+        if (enabled_tools or self._verification_ledger.has_items()) and "verify" not in enabled_tools:
+            enabled_tools.append("verify")
+        if (enabled_tools or self._runbook.has_state()) and "runbook" not in enabled_tools:
+            enabled_tools.append("runbook")
         if self._enabled_skills_for_turn(enabled_tools) and "skill" not in enabled_tools:
             enabled_tools.append("skill")
         return enabled_tools
@@ -3311,6 +3388,27 @@ class SuccessorChat(App):
     def _refresh_browser_verification_mode(self) -> None:
         active_task = self._task_ledger.in_progress_task()
         active_task_text = active_task.active_form if active_task is not None else ""
+        active_verification = self._verification_ledger.in_progress_item()
+        if active_verification is not None:
+            active_task_text = " ".join(
+                part
+                for part in (
+                    active_task_text,
+                    active_verification.claim,
+                    active_verification.evidence,
+                )
+                if part
+            )
+        if self._runbook.state is not None:
+            active_task_text = " ".join(
+                part
+                for part in (
+                    active_task_text,
+                    self._runbook.state.objective,
+                    self._runbook.state.active_hypothesis,
+                )
+                if part
+            )
         active, reason = classify_browser_verification(
             latest_user_text=self._latest_real_user_text(),
             active_task_text=active_task_text,
@@ -4211,6 +4309,27 @@ class SuccessorChat(App):
         #      call, do not re-attempt the exact same tool call"
         #      guidance — same shape, different trigger.
         sys_prompt = self.system_prompt
+        task_execution_guidance = ""
+        task_section = ""
+        verification_execution_guidance = ""
+        verification_section = ""
+        runbook_execution_guidance = ""
+        runbook_section = ""
+        if "task" in enabled_tools:
+            task_execution_guidance = build_task_execution_guidance(self._task_ledger)
+            task_section = build_task_prompt_section(self._task_ledger)
+        if "verify" in enabled_tools:
+            verification_execution_guidance = build_verification_execution_guidance(
+                self._verification_ledger
+            )
+            verification_section = build_verification_prompt_section(
+                self._verification_ledger
+            )
+        if "runbook" in enabled_tools:
+            runbook_execution_guidance = build_runbook_execution_guidance(
+                self._runbook
+            )
+            runbook_section = build_runbook_prompt_section(self._runbook)
         if enabled_tools and (
             "bash" in enabled_tools
             or any(name in {"read_file", "write_file", "edit_file"} for name in enabled_tools)
@@ -4238,20 +4357,37 @@ class SuccessorChat(App):
                 f"return control to the user."
             )
         if enabled_tools:
+            execution_parts = [
+                "Use tools whenever they materially improve correctness, "
+                "completeness, grounding, or verification. Do not stop "
+                "early when another tool call would materially improve the "
+                "result. If you say you will inspect, edit, run, verify, or "
+                "check something, make the corresponding tool call in the "
+                "SAME response instead of promising future action. If a tool "
+                "returns partial, empty, or unhelpful results, change "
+                "strategy instead of blindly repeating the same call. Keep "
+                "working until the task is complete AND verified, then end "
+                "with plain text.",
+            ]
+            if task_execution_guidance:
+                execution_parts.append(task_execution_guidance)
+            if verification_execution_guidance:
+                execution_parts.append(verification_execution_guidance)
+            if runbook_execution_guidance:
+                execution_parts.append(runbook_execution_guidance)
             sys_prompt = (
                 f"{sys_prompt}\n\n"
                 f"## Execution discipline\n\n"
-                f"Use tools whenever they materially improve correctness, "
-                f"completeness, grounding, or verification. Do not stop "
-                f"early when another tool call would materially improve the "
-                f"result. If you say you will inspect, edit, run, verify, or "
-                f"check something, make the corresponding tool call in the "
-                f"SAME response instead of promising future action. If a tool "
-                f"returns partial, empty, or unhelpful results, change "
-                f"strategy instead of blindly repeating the same call. Keep "
-                f"working until the task is complete AND verified, then end "
-                f"with plain text."
+                f"{execution_parts[0]}"
             )
+            if len(execution_parts) > 1:
+                sys_prompt = f"{sys_prompt}\n\n" + "\n\n".join(execution_parts[1:])
+            if task_section:
+                sys_prompt = f"{sys_prompt}\n\n{task_section}"
+            if verification_section:
+                sys_prompt = f"{sys_prompt}\n\n{verification_section}"
+            if runbook_section:
+                sys_prompt = f"{sys_prompt}\n\n{runbook_section}"
             capabilities = self._detect_client_runtime_capabilities()
             if bool(getattr(capabilities, "supports_parallel_tool_calls", False)):
                 sys_prompt = (
@@ -4267,14 +4403,9 @@ class SuccessorChat(App):
                     f"writes, browser interaction sequences, and any "
                     f"read-after-write verification serialized."
                 )
-
         tool_guidance = build_model_tool_guidance(enabled_tools)
         if tool_guidance:
             sys_prompt = f"{sys_prompt}\n\n{tool_guidance}"
-        if "task" in enabled_tools:
-            task_section = build_task_prompt_section(self._task_ledger)
-            if task_section:
-                sys_prompt = f"{sys_prompt}\n\n{task_section}"
         skill_hints = build_skill_hint_section(enabled_skills)
         if skill_hints:
             sys_prompt = f"{sys_prompt}\n\n{skill_hints}"
@@ -5888,6 +6019,229 @@ class SuccessorChat(App):
         self._scroll_to_bottom()
         return True
 
+    def _spawn_verify_runner(
+        self,
+        arguments: dict[str, Any],
+        *,
+        tool_call_id: str | None = None,
+    ) -> bool:
+        from .bash.exec import _new_tool_call_id  # noqa: PLC0415
+
+        resolved_call_id = tool_call_id or _new_tool_call_id()
+        try:
+            items = parse_verification_items(arguments.get("items"))
+        except VerificationContractError as exc:
+            card = self._tool_error_card(
+                tool_name="verify",
+                verb="verification",
+                raw_command="update verification contract",
+                tool_call_id=resolved_call_id,
+                params=(),
+                tool_arguments={"items": arguments.get("items")},
+                raw_label_prefix="✓",
+                message=str(exc),
+            )
+            self.messages.append(_Message("tool", "", tool_card=card))
+            return False
+
+        self._verification_ledger.replace(items)
+        active = self._verification_ledger.in_progress_item()
+        params: list[tuple[str, str]] = [("assertions", str(len(items)))]
+        if active is not None:
+            active_value = active.claim
+            if len(active_value) > 64:
+                active_value = active_value[:63].rstrip() + "…"
+            params.append(("active", active_value))
+        raw_command = (
+            "clear"
+            if not items
+            else f"update {len(items)} assertions"
+        )
+        payload = {"items": verification_items_to_payload(items)}
+        preview = ToolCard(
+            verb="verification",
+            params=tuple(params),
+            risk="safe",
+            raw_command=raw_command,
+            confidence=1.0,
+            parser_name="native-verify",
+            tool_name="verify",
+            tool_arguments=payload,
+            raw_label_prefix="✓",
+            tool_call_id=resolved_call_id,
+        )
+        final_card = replace(
+            preview,
+            output=build_verification_card_output(self._verification_ledger),
+            exit_code=0,
+            duration_ms=0.0,
+            api_content_override=build_verification_tool_result(self._verification_ledger),
+        )
+        assertions_artifact = build_assertions_artifact(self._verification_ledger)
+        self._trace_event(
+            "tool_spawn",
+            tool_name="verify",
+            tool_call_id=resolved_call_id,
+            assertion_count=len(items),
+            active_claim=active.claim if active else "",
+            active_evidence=active.evidence if active else "",
+        )
+        self._trace_event(
+            "verification_contract_updated",
+            tool_call_id=resolved_call_id,
+            assertion_count=len(items),
+            pending_count=self._verification_ledger.pending_count(),
+            open_count=self._verification_ledger.open_count(),
+            passed_count=self._verification_ledger.passed_count(),
+            failed_count=self._verification_ledger.failed_count(),
+            active_claim=active.claim if active else "",
+            active_evidence=active.evidence if active else "",
+            items=payload["items"],
+            artifact=assertions_artifact,
+        )
+        self._trace_event(
+            "tool_runner_finished",
+            tool_name="verify",
+            tool_call_id=resolved_call_id,
+            exit_code=0,
+            error="",
+            duration_ms=0.0,
+            stdout_excerpt=_trace_clip_text(final_card.output, limit=320),
+            stderr_excerpt="",
+            truncated=False,
+        )
+        self.messages.append(_Message("tool", "", tool_card=final_card))
+        self._scroll_to_bottom()
+        return True
+
+    def _spawn_runbook_runner(
+        self,
+        arguments: dict[str, Any],
+        *,
+        tool_call_id: str | None = None,
+    ) -> bool:
+        from .bash.exec import _new_tool_call_id  # noqa: PLC0415
+
+        resolved_call_id = tool_call_id or _new_tool_call_id()
+        try:
+            state = parse_runbook_state(arguments)
+            if state is None and arguments.get("attempt") not in (None, ""):
+                raise RunbookError(
+                    "runbook.attempt cannot be recorded in the same call that clears the runbook"
+                )
+            attempt = parse_experiment_attempt(
+                arguments.get("attempt"),
+                next_attempt_id=self._runbook_attempt_count + 1,
+            )
+        except RunbookError as exc:
+            card = self._tool_error_card(
+                tool_name="runbook",
+                verb="runbook",
+                raw_command="update runbook",
+                tool_call_id=resolved_call_id,
+                params=(),
+                tool_arguments=dict(arguments),
+                raw_label_prefix="◇",
+                message=str(exc),
+            )
+            self.messages.append(_Message("tool", "", tool_card=card))
+            return False
+
+        if state is None:
+            self._runbook.clear()
+            self._runbook_attempt_count = 0
+        else:
+            self._runbook.replace(state)
+        if attempt is not None:
+            self._runbook_attempt_count = attempt.attempt_id
+
+        state_payload = runbook_state_to_payload(self._runbook.state)
+        payload: dict[str, Any] = dict(state_payload)
+        if attempt is not None:
+            payload["attempt"] = experiment_attempt_to_payload(attempt)
+        params: list[tuple[str, str]] = []
+        if self._runbook.state is not None:
+            params.append(("status", self._runbook.state.status))
+            params.append(("baseline", self._runbook.state.baseline_status))
+            if self._runbook.state.evaluator:
+                params.append(("eval", str(len(self._runbook.state.evaluator))))
+        else:
+            params.append(("state", "cleared"))
+        if attempt is not None:
+            params.append(("attempt", str(attempt.attempt_id)))
+            params.append(("decision", attempt.decision))
+        raw_command = "clear" if self._runbook.state is None else "update runbook"
+        preview = ToolCard(
+            verb="runbook",
+            params=tuple(params),
+            risk="safe",
+            raw_command=raw_command,
+            confidence=1.0,
+            parser_name="native-runbook",
+            tool_name="runbook",
+            tool_arguments=payload,
+            raw_label_prefix="◇",
+            tool_call_id=resolved_call_id,
+        )
+        runbook_artifact = build_runbook_artifact(
+            self._runbook.state,
+            attempt_count=self._runbook_attempt_count,
+            last_attempt=attempt,
+        )
+        final_card = replace(
+            preview,
+            output=build_runbook_card_output(self._runbook.state, attempt=attempt),
+            exit_code=0,
+            duration_ms=0.0,
+            api_content_override=build_runbook_tool_result(
+                self._runbook.state,
+                attempt=attempt,
+            ),
+        )
+        objective = self._runbook.state.objective if self._runbook.state is not None else ""
+        self._trace_event(
+            "tool_spawn",
+            tool_name="runbook",
+            tool_call_id=resolved_call_id,
+            objective=objective,
+            baseline_status=self._runbook.state.baseline_status if self._runbook.state is not None else "",
+            attempt_id=attempt.attempt_id if attempt is not None else 0,
+        )
+        self._trace_event(
+            "runbook_updated",
+            tool_call_id=resolved_call_id,
+            objective=objective,
+            status=self._runbook.state.status if self._runbook.state is not None else "cleared",
+            baseline_status=self._runbook.state.baseline_status if self._runbook.state is not None else "missing",
+            active_hypothesis=self._runbook.state.active_hypothesis if self._runbook.state is not None else "",
+            evaluator_count=len(self._runbook.state.evaluator) if self._runbook.state is not None else 0,
+            attempt_count=self._runbook_attempt_count,
+            runbook=state_payload,
+            artifact=runbook_artifact,
+        )
+        if attempt is not None:
+            self._trace_event(
+                "experiment_attempt_recorded",
+                tool_call_id=resolved_call_id,
+                objective=objective,
+                attempt=experiment_attempt_to_payload(attempt),
+                baseline_status=self._runbook.state.baseline_status if self._runbook.state is not None else "missing",
+            )
+        self._trace_event(
+            "tool_runner_finished",
+            tool_name="runbook",
+            tool_call_id=resolved_call_id,
+            exit_code=0,
+            error="",
+            duration_ms=0.0,
+            stdout_excerpt=_trace_clip_text(final_card.output, limit=320),
+            stderr_excerpt="",
+            truncated=False,
+        )
+        self.messages.append(_Message("tool", "", tool_card=final_card))
+        self._scroll_to_bottom()
+        return True
+
     def _spawn_read_file_runner(
         self,
         arguments: dict[str, Any],
@@ -6267,6 +6621,20 @@ class SuccessorChat(App):
                     ):
                         any_ran = True
                     continue
+                if name == "verify":
+                    if isinstance(args, dict) and self._spawn_verify_runner(
+                        dict(args),
+                        tool_call_id=call_id,
+                    ):
+                        any_ran = True
+                    continue
+                if name == "runbook":
+                    if isinstance(args, dict) and self._spawn_runbook_runner(
+                        dict(args),
+                        tool_call_id=call_id,
+                    ):
+                        any_ran = True
+                    continue
                 if name == "skill":
                     if isinstance(args, dict) and self._spawn_skill_runner(
                         dict(args),
@@ -6307,7 +6675,7 @@ class SuccessorChat(App):
                     continue
                 self.messages.append(_Message(
                     "successor",
-                    f"unknown tool {name!r} — supported tools are read_file, write_file, edit_file, bash, task, skill, subagent, holonet, browser, and vision",
+                    f"unknown tool {name!r} — supported tools are read_file, write_file, edit_file, bash, task, verify, runbook, skill, subagent, holonet, browser, and vision",
                     synthetic=True,
                 ))
                 continue

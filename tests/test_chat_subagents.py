@@ -527,7 +527,7 @@ def test_model_visible_subagent_requires_notifications(temp_config_dir: Path) ->
     schemas = captured_tools[0]
     assert schemas is not None
     names = [entry["function"]["name"] for entry in schemas]
-    assert names == ["bash", "task"]
+    assert names == ["bash", "task", "verify", "runbook"]
 
 
 def test_child_prompt_explicitly_overrides_inherited_redelegation() -> None:

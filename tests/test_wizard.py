@@ -28,7 +28,7 @@ from pathlib import Path
 
 
 from successor.input.keys import Key, KeyEvent
-from successor.profiles import PROFILE_REGISTRY, get_profile
+from successor.profiles import DEFAULT_MAX_AGENT_TURNS, PROFILE_REGISTRY, get_profile
 from successor.render.theme import THEME_REGISTRY
 from successor.snapshot import render_grid_to_plain, wizard_demo_snapshot
 from successor.wizard.setup import (
@@ -55,7 +55,7 @@ def test_wizard_state_defaults() -> None:
     assert state.intro_animation == "successor"
     assert state.chat_intro_art == "successor"
     assert state.autorecord is True
-    assert state.max_agent_turns == 80
+    assert state.max_agent_turns == DEFAULT_MAX_AGENT_TURNS
 
 
 def test_wizard_state_to_profile_uses_name() -> None:
@@ -86,7 +86,7 @@ def test_wizard_state_to_json_dict_round_trips() -> None:
     assert parsed["theme"] == "steel"
     assert parsed["display_mode"] == "light"
     assert parsed["density"] == "compact"
-    assert parsed["max_agent_turns"] == 80
+    assert parsed["max_agent_turns"] == DEFAULT_MAX_AGENT_TURNS
     assert parsed["intro_animation"] == "successor"
     assert parsed["provider"]["type"] == "llamacpp"
 
@@ -426,14 +426,14 @@ def test_review_can_adjust_max_agent_turns_before_save(temp_config_dir: Path) ->
     wizard = SuccessorSetup()
     wizard.state.name = "turn-limit-test"
     wizard._enter_step(Step.REVIEW)
-    assert wizard.state.max_agent_turns == 80
+    assert wizard.state.max_agent_turns == DEFAULT_MAX_AGENT_TURNS
     wizard._handle_review(KeyEvent(char="]"))
     wizard._handle_review(KeyEvent(char="]"))
-    assert wizard.state.max_agent_turns == 90
+    assert wizard.state.max_agent_turns == DEFAULT_MAX_AGENT_TURNS + 10
     wizard._handle_review(KeyEvent(key=Key.ENTER))
 
     payload = json.loads((temp_config_dir / "profiles" / "turn-limit-test.json").read_text())
-    assert payload["max_agent_turns"] == 90
+    assert payload["max_agent_turns"] == DEFAULT_MAX_AGENT_TURNS + 10
 
 
 def test_esc_cancels_wizard(temp_config_dir: Path) -> None:

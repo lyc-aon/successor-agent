@@ -135,6 +135,24 @@ function collectArtifacts(artifacts: SessionPayload['artifacts']): ArtifactEntry
   return [...artifacts.primary, ...artifacts.turn_files, ...artifacts.images]
 }
 
+function verificationTone(status: string): string {
+  if (status === 'failed') return 'danger'
+  if (status === 'passed') return 'accent'
+  if (status === 'running' || status === 'in_progress') return 'warm'
+  return 'neutral'
+}
+
+function formatVerificationStatus(status: string): string {
+  return status.replaceAll('_', ' ')
+}
+
+function experimentTone(kind: string, decision: string): string {
+  if (kind === 'completion' || decision === 'kept') return 'accent'
+  if (decision === 'discarded') return 'danger'
+  if (kind === 'baseline' || decision === 'inconclusive') return 'warm'
+  return 'neutral'
+}
+
 function clamp(input: string, limit: number): string {
   if (input.length <= limit) return input
   return `${input.slice(0, Math.max(0, limit - 1))}…`
@@ -673,6 +691,10 @@ function SessionWorkbench({
     payload.turn_summaries.find((turn) => turn.turn_index === selectedTurn) ?? payload.turn_summaries[0] ?? null
   const imageArtifact = firstImage(payload.artifacts)
   const allArtifacts = collectArtifacts(payload.artifacts)
+  const runbook = payload.runbook ?? null
+  const experiments = (payload.experiments ?? []).slice(-4).reverse()
+  const verification = payload.verification ?? null
+  const visibleVerificationItems = verification?.items.slice(0, 4) ?? []
   const selectedEventJson = selectedEvent ? JSON.stringify(selectedEvent, null, 2) : ''
   const eventSelectionMeta =
     typeof selectedEvent?.t === 'number' ? `${formatDuration(selectedEvent.t)} · ${String(selectedEvent.type ?? 'event')}` : 'No trace time'
@@ -847,6 +869,100 @@ function SessionWorkbench({
               lineHeight={19}
               maxLines={4}
             />
+            {runbook?.configured ? (
+              <div className="runbook-summary">
+                <div className="runbook-head">
+                  <span className={`verification-pill tone-${experimentTone('baseline', runbook.last_attempt?.decision ?? '')}`}>
+                    {runbook.status ?? 'running'}
+                  </span>
+                  <span className="verification-meta">
+                    {runbook.attempt_count} attempts
+                  </span>
+                </div>
+                <div className="runbook-copy">
+                  <div className="mono-kicker">Objective</div>
+                  <strong>{runbook.objective}</strong>
+                  <span>{runbook.success_definition}</span>
+                </div>
+                <dl className="inspector-stats inspector-stats-compact verification-stats">
+                  <div><dt>Baseline</dt><dd>{runbook.baseline_status ?? 'missing'}</dd></div>
+                  <div><dt>Eval</dt><dd>{runbook.evaluator?.length ?? 0}</dd></div>
+                  <div><dt>Scope</dt><dd>{runbook.scope?.length ?? 0}</dd></div>
+                  <div><dt>Status</dt><dd>{runbook.status ?? '—'}</dd></div>
+                </dl>
+                {runbook.baseline_summary ? (
+                  <div className="runbook-copy">
+                    <div className="mono-kicker">Baseline</div>
+                    <span>{runbook.baseline_summary}</span>
+                  </div>
+                ) : null}
+                {runbook.active_hypothesis ? (
+                  <div className="runbook-copy">
+                    <div className="mono-kicker">Active hypothesis</div>
+                    <strong>{runbook.active_hypothesis}</strong>
+                  </div>
+                ) : null}
+                {experiments.length ? (
+                  <div className="experiment-list">
+                    {experiments.map((row, index) => (
+                      <div key={`${row.kind}-${row.attempt_id ?? index}-${row.t}`} className="experiment-row">
+                        <div className="verification-row-head">
+                          <span className={`verification-dot tone-${experimentTone(row.kind, row.decision ?? '')}`} />
+                          <strong>
+                            {row.kind === 'attempt'
+                              ? `attempt ${row.attempt_id ?? '—'} · ${row.decision ?? 'recorded'}`
+                              : row.kind}
+                          </strong>
+                        </div>
+                        <span>{row.hypothesis || row.summary}</span>
+                        {row.kind === 'attempt' ? <em>{row.summary}</em> : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            {verification ? (
+              <div className="verification-summary">
+                <div className="verification-head">
+                  <span className={`verification-pill tone-${verificationTone(verification.status)}`}>
+                    {formatVerificationStatus(verification.status)}
+                  </span>
+                  <span className="verification-meta">
+                    {verification.passed}/{verification.total} passed
+                  </span>
+                </div>
+                <dl className="inspector-stats inspector-stats-compact verification-stats">
+                  <div><dt>Pending</dt><dd>{verification.pending}</dd></div>
+                  <div><dt>Running</dt><dd>{verification.in_progress}</dd></div>
+                  <div><dt>Passed</dt><dd>{verification.passed}</dd></div>
+                  <div><dt>Failed</dt><dd>{verification.failed}</dd></div>
+                </dl>
+                {verification.active_claim ? (
+                  <div className="verification-active">
+                    <div className="mono-kicker">Active proof</div>
+                    <strong>{verification.active_claim}</strong>
+                  </div>
+                ) : null}
+                <div className="verification-list">
+                  {visibleVerificationItems.map((item, index) => (
+                    <div key={`${item.claim}-${index}`} className="verification-row">
+                      <div className="verification-row-head">
+                        <span className={`verification-dot tone-${verificationTone(item.status)}`} />
+                        <strong>{item.claim}</strong>
+                      </div>
+                      <span>{item.evidence}</span>
+                      {item.observed ? <em>{item.observed}</em> : null}
+                    </div>
+                  ))}
+                  {verification.items.length > visibleVerificationItems.length ? (
+                    <div className="verification-more">
+                      +{verification.items.length - visibleVerificationItems.length} more proof items
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
           </div>
 
           <div className="inspect-tabs">

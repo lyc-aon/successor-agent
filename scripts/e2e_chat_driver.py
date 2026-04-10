@@ -107,8 +107,10 @@ class Scenario:
       - assert_max_total_cards: ceiling on total tool cards across the
         whole scenario (catches loops).
       - assert_min_total_cards: floor (catches "model didn't run anything").
-      - assert_max_agent_turns_per_prompt: ceiling on agent loop depth
-        per individual user prompt (catches single-prompt runaway).
+      - assert_max_agent_turns_per_prompt: advisory ceiling on agent
+        loop depth per individual user prompt. This is reported as a
+        warning signal for efficiency / stall diagnosis, not an
+        automatic scenario failure by itself.
       - assert_no_refused_cards: every card must have executed=True.
       - assert_each_settles: every prompt must reach a clean idle state.
     """
@@ -152,6 +154,11 @@ class AssertionResult:
     name: str
     passed: bool
     detail: str = ""
+    severity: str = "error"
+
+    @property
+    def gating(self) -> bool:
+        return self.severity != "warning"
 
 
 # ─── Core driver ───
@@ -604,7 +611,7 @@ def evaluate_assertions(
             results.append(AssertionResult(
                 name=f"file:{rel}",
                 passed=True,
-                detail=f"contains required substring",
+                detail="contains required substring",
             ))
         else:
             results.append(AssertionResult(
@@ -779,15 +786,17 @@ def evaluate_assertions(
                 name="max_agent_turns_per_prompt",
                 passed=False,
                 detail=(
-                    f"prompts that exceeded {scenario.assert_max_agent_turns_per_prompt} "
-                    f"agent turns: {offenders}"
+                    f"advisory: prompts that exceeded the recommended "
+                    f"{scenario.assert_max_agent_turns_per_prompt} agent turns: {offenders}"
                 ),
+                severity="warning",
             ))
         else:
             results.append(AssertionResult(
                 name="max_agent_turns_per_prompt",
                 passed=True,
                 detail=f"max observed: {max(s.agent_turns_consumed for s in all_stats)}",
+                severity="warning",
             ))
 
     # No refused cards (turned off for refusal scenarios)
@@ -860,12 +869,24 @@ def write_index(
     if not assertions:
         lines.append("_(no assertions declared)_")
     else:
-        passed = sum(1 for a in assertions if a.passed)
-        lines.append(f"**{passed}/{len(assertions)} passed**")
+        required = [a for a in assertions if a.gating]
+        advisory = [a for a in assertions if not a.gating]
+        required_passed = sum(1 for a in required if a.passed)
+        lines.append(
+            f"**{required_passed}/{len(required)} required assertions passed**"
+        )
+        if advisory:
+            advisory_passed = sum(1 for a in advisory if a.passed)
+            warnings_tripped = len(advisory) - advisory_passed
+            lines.append(
+                f"**{advisory_passed}/{len(advisory)} advisory checks passed "
+                f"({warnings_tripped} warnings tripped)**"
+            )
         lines.append("")
         for a in assertions:
-            mark = "✓" if a.passed else "✗"
-            lines.append(f"- {mark} `{a.name}` — {a.detail}")
+            mark = "✓" if a.passed else ("!" if a.severity == "warning" else "✗")
+            suffix = " [warning]" if a.severity == "warning" else ""
+            lines.append(f"- {mark} `{a.name}`{suffix} — {a.detail}")
     lines.append("")
     lines.append("## Artifacts")
     lines.append("")
@@ -1044,14 +1065,24 @@ def run_scenario(
 
         log("")
         log("=== Assertions ===")
-        passed = sum(1 for a in assertions if a.passed)
-        log(f"  {passed}/{len(assertions)} passed")
+        required = [a for a in assertions if a.gating]
+        advisory = [a for a in assertions if not a.gating]
+        required_passed = sum(1 for a in required if a.passed)
+        log(f"  {required_passed}/{len(required)} required passed")
+        if advisory:
+            advisory_passed = sum(1 for a in advisory if a.passed)
+            warnings_tripped = len(advisory) - advisory_passed
+            log(
+                f"  {advisory_passed}/{len(advisory)} advisory passed "
+                f"({warnings_tripped} warnings tripped)"
+            )
         for a in assertions:
-            mark = "✓" if a.passed else "✗"
-            log(f"  {mark} {a.name}: {a.detail}")
+            mark = "✓" if a.passed else ("!" if a.severity == "warning" else "✗")
+            suffix = " [warning]" if a.severity == "warning" else ""
+            log(f"  {mark} {a.name}{suffix}: {a.detail}")
         log("")
 
-        all_passed = all(a.passed for a in assertions)
+        all_passed = all(a.passed for a in assertions if a.gating)
         log(f"=== scenario complete: {'PASS' if all_passed else 'FAIL'} ===")
         return all_passed, assertions
     finally:
@@ -1791,7 +1822,7 @@ def main() -> int:
     parser.add_argument(
         "--scenario",
         default="write_html",
-        help=f"scenario name or 'all'. Use --list to see all scenarios.",
+        help="scenario name or 'all'. Use --list to see all scenarios.",
     )
     parser.add_argument(
         "--list",

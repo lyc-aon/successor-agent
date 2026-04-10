@@ -139,7 +139,7 @@ def test_browser_tool_filtered_when_playwright_missing(temp_config_dir: Path) ->
             user_data_dir="/tmp/browser",
         ),
     ):
-        assert chat._enabled_tools_for_turn() == ["bash", "task"]
+        assert chat._enabled_tools_for_turn() == ["bash", "task", "verify", "runbook"]
 
 
 def test_vision_tool_filtered_when_runtime_missing(temp_config_dir: Path) -> None:
@@ -160,7 +160,7 @@ def test_vision_tool_filtered_when_runtime_missing(temp_config_dir: Path) -> Non
             reason="llama.cpp endpoint reports vision=false",
         ),
     ):
-        assert chat._enabled_tools_for_turn() == ["bash", "task"]
+        assert chat._enabled_tools_for_turn() == ["bash", "task", "verify", "runbook"]
 
 
 def test_skill_tool_enabled_when_profile_has_usable_skills(temp_config_dir: Path) -> None:
@@ -185,7 +185,7 @@ def test_skill_tool_enabled_when_profile_has_usable_skills(temp_config_dir: Path
             user_data_dir="/tmp/browser",
         ),
     ):
-        assert chat._enabled_tools_for_turn() == ["browser", "task", "skill"]
+        assert chat._enabled_tools_for_turn() == ["browser", "task", "verify", "runbook", "skill"]
 
 
 def test_skill_tool_enabled_when_profile_has_vision_skill(temp_config_dir: Path) -> None:
@@ -210,7 +210,7 @@ def test_skill_tool_enabled_when_profile_has_vision_skill(temp_config_dir: Path)
             reason="ready",
         ),
     ):
-        assert chat._enabled_tools_for_turn() == ["vision", "task", "skill"]
+        assert chat._enabled_tools_for_turn() == ["vision", "task", "verify", "runbook", "skill"]
 
 
 def test_skill_tool_filtered_when_required_tool_missing(temp_config_dir: Path) -> None:
@@ -235,7 +235,7 @@ def test_skill_tool_filtered_when_required_tool_missing(temp_config_dir: Path) -
             user_data_dir="/tmp/browser",
         ),
     ):
-        assert chat._enabled_tools_for_turn() == ["bash", "task"]
+        assert chat._enabled_tools_for_turn() == ["bash", "task", "verify", "runbook"]
 
 
 def test_native_browser_tool_call_dispatches(monkeypatch, temp_config_dir: Path) -> None:

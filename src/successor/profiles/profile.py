@@ -267,7 +267,11 @@ _DEFAULT_SYSTEM_PROMPT = (
 )
 
 
-DEFAULT_MAX_AGENT_TURNS = 80
+# Keep the built-in loop cap high enough that productive long-form runs
+# do not trip a safety stop just because they crossed an arbitrary small
+# ceiling. Real loop diagnosis should key off stalled progress, not raw
+# internal turn count.
+DEFAULT_MAX_AGENT_TURNS = 999
 
 
 @dataclass(frozen=True, slots=True)

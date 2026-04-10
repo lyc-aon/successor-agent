@@ -3,6 +3,53 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
+## v0.1.27 — 2026-04-09
+
+This release turns Successor's long-run control plane into something
+materially stronger: evidence-bearing verification, a session-local
+experiment runbook with an attempt ledger, reviewer surfaces that show
+that proof state back to the user, and a much higher default turn
+budget for real local-model work.
+
+### What changed
+
+- added an internal `verify` contract so the model can track explicit
+  claims, the evidence that should prove them, and the observed outcome
+  once the proof exists
+- added an internal `runbook` contract so long runs can keep one
+  objective, one baseline posture, one stable evaluator bundle, one
+  active hypothesis, and append-only keep/discard attempt history
+- recording bundles now reconstruct and persist that control state as:
+  - `assertions.json`
+  - `runbook.json`
+  - `experiments.jsonl`
+- the frontend recordings manager / reviewer inspector now surfaces
+  verification status, active proof items, runbook summaries, and
+  recent experiment decisions instead of burying them in raw trace JSON
+- raised the default `max_agent_turns` ceiling from `80` to `999` so
+  real long-form local runs are not forced into premature failure
+- changed the E2E harness so per-prompt turn ceilings are advisory
+  warnings rather than automatic failures; raw turn count is now an
+  efficiency signal, not a proxy for correctness by itself
+- refreshed README and tool docs so the native file tools, verification
+  contract, runbook, recordings manager, and playback artifacts all
+  describe the same runtime story
+
+### Verification
+
+- `npm --prefix reviewer-app run build`
+- `ruff check src tests scripts`
+- focused regression slice covering verification, runbook, playback,
+  browser-control, task-ledger, wizard, and config paths:
+  `247 passed in 2.41s`
+- full `pytest` suite:
+  `1218 passed in 12.39s`
+- live browser verification against a real supervised local-model app
+  build to confirm:
+  - native file tools repaired the app correctly
+  - runtime browser checks stayed honest
+  - the resulting app rendered cleanly with no JS errors
+
 ## v0.1.24 — 2026-04-09
 
 This release combines the new frontend-backed recordings manager and

@@ -22,6 +22,13 @@ from .recorder import Recorder
 from .reviewer import theme_catalog_payload, viewer_defaults, write_reviewer_html
 from .render.cells import Grid
 from .snapshot import render_grid_to_plain
+from .runbook import build_runbook_artifact, parse_runbook_state
+from .verification_contract import (
+    VerificationContractError,
+    VerificationLedger,
+    build_assertions_artifact,
+    parse_verification_items,
+)
 
 
 RECORDINGS_DIR_ENV = "SUCCESSOR_RECORDINGS_DIR"
@@ -86,6 +93,11 @@ def load_trace_events(source: str | Path) -> list[dict[str, object]]:
 
 def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _write_jsonl_rows(path: Path, rows: list[dict[str, object]]) -> None:
+    text = "".join(json.dumps(row) + "\n" for row in rows)
+    path.write_text(text, encoding="utf-8")
 
 
 def _git_toplevel_for(path: Path) -> Path | None:
@@ -227,6 +239,8 @@ def _discover_bundle_artifacts(bundle_root: str | Path | None) -> dict[str, obje
     primary_names = [
         "index.md",
         "summary.json",
+        "runbook.json",
+        "experiments.jsonl",
         "session_trace.json",
         "session_trace.jsonl",
         "timeline.json",
@@ -323,9 +337,188 @@ def _bundle_tools(trace_events: list[dict[str, object]]) -> list[str]:
             tools.add("subagent")
         if "task" in event_type or tool_name == "task":
             tools.add("task")
+        if "verification" in event_type or tool_name == "verify":
+            tools.add("verify")
+        if "runbook" in event_type or tool_name == "runbook":
+            tools.add("runbook")
         if "bash" in event_type or tool_name == "bash" or verb.startswith("bash"):
             tools.add("bash")
     return sorted(tools)
+
+
+def _latest_runbook_summary(
+    trace_events: list[dict[str, object]],
+) -> dict[str, object] | None:
+    for event in reversed(trace_events):
+        if str(event.get("type") or "") != "runbook_updated":
+            continue
+        artifact = event.get("artifact")
+        if isinstance(artifact, dict):
+            summary = dict(artifact)
+        else:
+            runbook_payload = event.get("runbook")
+            if not isinstance(runbook_payload, dict):
+                continue
+            try:
+                state = parse_runbook_state(runbook_payload)
+            except Exception:
+                continue
+            summary = build_runbook_artifact(
+                state,
+                attempt_count=_as_int(event.get("attempt_count")),
+            )
+        summary["updated_at_s"] = round(_as_float(event.get("t")), 4)
+        tool_call_id = str(event.get("tool_call_id") or "").strip()
+        if tool_call_id:
+            summary["tool_call_id"] = tool_call_id
+        return summary
+    return None
+
+
+def _experiment_rows(
+    trace_events: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    previous_baseline_status = ""
+    previous_status = ""
+    previous_objective = ""
+    for event in trace_events:
+        event_type = str(event.get("type") or "")
+        if event_type == "runbook_updated":
+            runbook_payload = event.get("runbook")
+            if not isinstance(runbook_payload, dict):
+                continue
+            objective = str(event.get("objective") or runbook_payload.get("objective") or "").strip()
+            baseline_status = str(event.get("baseline_status") or runbook_payload.get("baseline_status") or "").strip().lower()
+            baseline_summary = str(runbook_payload.get("baseline_summary") or "").strip()
+            status = str(event.get("status") or runbook_payload.get("status") or "").strip().lower()
+            if status == "cleared":
+                previous_baseline_status = ""
+                previous_status = ""
+                previous_objective = ""
+                continue
+            if objective and previous_objective and objective != previous_objective:
+                previous_baseline_status = ""
+                previous_status = ""
+            if baseline_status in {"captured", "stale"} and baseline_status != previous_baseline_status:
+                rows.append({
+                    "kind": "baseline",
+                    "t": round(_as_float(event.get("t")), 4),
+                    "objective": objective,
+                    "baseline_status": baseline_status,
+                    "summary": baseline_summary,
+                    "tool_call_id": str(event.get("tool_call_id") or ""),
+                })
+            if status == "complete" and status != previous_status:
+                rows.append({
+                    "kind": "completion",
+                    "t": round(_as_float(event.get("t")), 4),
+                    "objective": objective,
+                    "status": status,
+                    "summary": str(runbook_payload.get("success_definition") or "").strip(),
+                    "tool_call_id": str(event.get("tool_call_id") or ""),
+                })
+            previous_baseline_status = baseline_status or previous_baseline_status
+            previous_status = status or previous_status
+            previous_objective = objective or previous_objective
+            continue
+        if event_type != "experiment_attempt_recorded":
+            continue
+        attempt = event.get("attempt")
+        if not isinstance(attempt, dict):
+            continue
+        rows.append({
+            "kind": "attempt",
+            "t": round(_as_float(event.get("t")), 4),
+            "objective": str(event.get("objective") or "").strip(),
+            "baseline_status": str(event.get("baseline_status") or "").strip(),
+            "attempt_id": _as_int(attempt.get("attempt_id")),
+            "hypothesis": str(attempt.get("hypothesis") or "").strip(),
+            "summary": str(attempt.get("summary") or "").strip(),
+            "decision": str(attempt.get("decision") or "").strip(),
+            "files_touched": attempt.get("files_touched") if isinstance(attempt.get("files_touched"), list) else [],
+            "evaluator_summary": str(attempt.get("evaluator_summary") or "").strip(),
+            "verification_summary": str(attempt.get("verification_summary") or "").strip(),
+            "artifact_refs": attempt.get("artifact_refs") if isinstance(attempt.get("artifact_refs"), list) else [],
+            "tool_call_id": str(event.get("tool_call_id") or ""),
+        })
+    return rows
+
+
+def _sync_runbook_artifact(
+    bundle_root: str | Path | None,
+    trace_events: list[dict[str, object]],
+) -> dict[str, object] | None:
+    summary = _latest_runbook_summary(trace_events)
+    if bundle_root is None:
+        return summary
+    path = Path(bundle_root) / "runbook.json"
+    if summary is None or not bool(summary.get("configured")):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return summary
+    _write_json(path, summary)
+    return summary
+
+
+def _sync_experiments_artifact(
+    bundle_root: str | Path | None,
+    trace_events: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    rows = _experiment_rows(trace_events)
+    if bundle_root is None:
+        return rows
+    path = Path(bundle_root) / "experiments.jsonl"
+    if not rows:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return rows
+    _write_jsonl_rows(path, rows)
+    return rows
+
+
+def _latest_verification_summary(
+    trace_events: list[dict[str, object]],
+) -> dict[str, object] | None:
+    for event in reversed(trace_events):
+        if str(event.get("type") or "") != "verification_contract_updated":
+            continue
+        try:
+            items = parse_verification_items(event.get("items"))
+        except VerificationContractError:
+            continue
+        if not items:
+            return None
+        ledger = VerificationLedger(items=items)
+        summary = build_assertions_artifact(ledger)
+        summary["updated_at_s"] = round(_as_float(event.get("t")), 4)
+        tool_call_id = str(event.get("tool_call_id") or "").strip()
+        if tool_call_id:
+            summary["tool_call_id"] = tool_call_id
+        return summary
+    return None
+
+
+def _sync_assertions_artifact(
+    bundle_root: str | Path | None,
+    trace_events: list[dict[str, object]],
+) -> dict[str, object] | None:
+    summary = _latest_verification_summary(trace_events)
+    if bundle_root is None:
+        return summary
+    path = Path(bundle_root) / "assertions.json"
+    if summary is None:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return None
+    _write_json(path, summary)
+    return summary
 
 
 def _bundle_status(
@@ -334,7 +527,13 @@ def _bundle_status(
     images_count: int,
     frame_count: int,
     turn_count: int,
+    verification_summary: dict[str, object] | None = None,
 ) -> tuple[str, str]:
+    verification_status = str((verification_summary or {}).get("status") or "")
+    if verification_status == "failed":
+        return "Needs Review", "Verification contract recorded a failed assertion."
+    if verification_status == "passed":
+        return "Verified", "Verification contract passed with explicit evidence."
     event_types = _bundle_event_types(trace_events)
     if any("error" in event or "cancel" in event or "fail" in event for event in event_types):
         return "Needs Review", "Run emitted failure or cancellation signals."
@@ -482,6 +681,9 @@ def _build_playback_payload(
     for event in trace_events:
         name = str(event.get("type") or "event")
         event_type_counts[name] = event_type_counts.get(name, 0) + 1
+    verification_summary = _latest_verification_summary(trace_events)
+    runbook_summary = _latest_runbook_summary(trace_events)
+    experiments = _experiment_rows(trace_events)
 
     duration_s = _as_float(frames[-1].get("scenario_elapsed_s", 0.0)) if frames else 0.0
     stats = {
@@ -505,6 +707,9 @@ def _build_playback_payload(
         "event_type_counts": event_type_counts,
         "stats": stats,
         "artifacts": _discover_bundle_artifacts(bundle_root),
+        "runbook": runbook_summary,
+        "experiments": experiments,
+        "verification": verification_summary,
         "theme_catalog": theme_catalog_payload(),
         "default_theme": default_theme,
         "default_mode": default_mode,
@@ -571,6 +776,8 @@ def _bundle_summary_for_library(bundle_root: Path) -> dict[str, object] | None:
 
     turn_summaries = _build_turn_summaries(frames)
     images = _discover_bundle_artifacts(bundle_root).get("images", [])
+    verification_summary = _latest_verification_summary(trace_events)
+    runbook_summary = _latest_runbook_summary(trace_events)
     title = str(summary.get("title") or bundle_root.name)
     if title.strip().lower() == "successor session playback":
         title = _bundle_identity(frames, bundle_root)
@@ -582,6 +789,7 @@ def _bundle_summary_for_library(bundle_root: Path) -> dict[str, object] | None:
         images_count=len(images) if isinstance(images, list) else 0,
         frame_count=len(frames),
         turn_count=len(turn_summaries),
+        verification_summary=verification_summary,
     )
     viewer_path = bundle_root / "playback.html"
     index_path = bundle_root / "index.md"
@@ -610,6 +818,7 @@ def _bundle_summary_for_library(bundle_root: Path) -> dict[str, object] | None:
         "preview_excerpt": _bundle_preview_excerpt(frames),
         "tools": _bundle_tools(trace_events),
         "event_types": _bundle_event_types(trace_events),
+        "runbook": runbook_summary,
     }
 
 
@@ -645,6 +854,9 @@ def _refresh_bundle_viewer(bundle_root: Path) -> None:
         trace_events = load_trace_events(trace_jsonl_path)
     if not isinstance(trace_events, list):
         trace_events = []
+    _sync_runbook_artifact(bundle_root, trace_events)
+    _sync_experiments_artifact(bundle_root, trace_events)
+    _sync_assertions_artifact(bundle_root, trace_events)
     write_playback_html(
         bundle_root / "playback.html",
         title=title,
@@ -770,14 +982,17 @@ def write_recording_index(
         "",
         "- `input.jsonl` — raw input bytes with original timing",
         "- `timeline.json` — rendered frame timeline",
+        "- `runbook.json` — latest autonomous runbook snapshot when the run used one",
+        "- `experiments.jsonl` — attempt ledger rows reconstructed from the trace",
         "- `session_trace.jsonl` — raw runtime trace copied from the session log",
         "- `session_trace.json` — parsed trace events",
         "- `summary.json` — machine-readable bundle summary for agents/tools",
+        "- `assertions.json` — latest verification contract snapshot when the run recorded explicit proof items",
         "- `playback.html` — self-contained browser session reviewer",
         "",
         "## Read Order",
         "",
-        "- agents: `summary.json` → `session_trace.json` → `timeline.json`",
+        "- agents: `summary.json` → `runbook.json` → `assertions.json` → `experiments.jsonl` → `session_trace.json` → `timeline.json`",
         "- humans: `playback.html` first, then `index.md` / `session_trace.json`",
         "",
         "## Open It",
@@ -811,6 +1026,9 @@ class RecordingBundle:
         self.trace_jsonl_path = self.root / "session_trace.jsonl"
         self.trace_json_path = self.root / "session_trace.json"
         self.summary_path = self.root / "summary.json"
+        self.runbook_path = self.root / "runbook.json"
+        self.experiments_path = self.root / "experiments.jsonl"
+        self.assertions_path = self.root / "assertions.json"
         self.viewer_path = self.root / "playback.html"
         self.index_path = self.root / "index.md"
         self._recorder = Recorder(self.input_path)
@@ -921,6 +1139,9 @@ class RecordingBundle:
                 trace_events = load_trace_events(trace_file)
         _write_json(self.timeline_path, self._frames)
         _write_json(self.trace_json_path, trace_events)
+        runbook_summary = _sync_runbook_artifact(self.root, trace_events)
+        experiment_rows = _sync_experiments_artifact(self.root, trace_events)
+        verification_summary = _sync_assertions_artifact(self.root, trace_events)
         write_playback_html(
             self.viewer_path,
             title=self.title,
@@ -943,14 +1164,28 @@ class RecordingBundle:
             "timeline_path": str(self.timeline_path),
             "trace_jsonl_path": str(self.trace_jsonl_path),
             "trace_json_path": str(self.trace_json_path),
+            "runbook_path": str(self.runbook_path),
+            "experiments_path": str(self.experiments_path),
+            "assertions_path": str(self.assertions_path),
             "viewer_path": str(self.viewer_path),
             "index_path": str(self.index_path),
             "recommended_read_order": [
                 str(self.summary_path),
-                str(self.trace_json_path),
-                str(self.timeline_path),
             ],
         }
+        if runbook_summary is not None and bool(runbook_summary.get("configured")):
+            summary["runbook"] = runbook_summary
+            summary["recommended_read_order"].append(str(self.runbook_path))
+        if verification_summary is not None:
+            summary["verification"] = verification_summary
+            summary["recommended_read_order"].append(str(self.assertions_path))
+        if experiment_rows:
+            summary["experiments"] = experiment_rows
+            summary["recommended_read_order"].append(str(self.experiments_path))
+        summary["recommended_read_order"].extend([
+            str(self.trace_json_path),
+            str(self.timeline_path),
+        ])
         _write_json(self.summary_path, summary)
         write_recording_index(
             self.root,

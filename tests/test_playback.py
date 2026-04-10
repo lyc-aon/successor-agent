@@ -155,6 +155,149 @@ def test_recording_bundle_writes_artifacts_and_dedupes_identical_frames(tmp_path
     assert trace_events[0]["type"] == "session_start"
 
 
+def test_recording_bundle_writes_assertions_artifact_from_verification_trace(tmp_path: Path) -> None:
+    trace_path = tmp_path / "trace.jsonl"
+    trace_path.write_text(
+        "\n".join([
+            json.dumps({"t": 0.0, "type": "session_start"}),
+            json.dumps({
+                "t": 0.5,
+                "type": "verification_contract_updated",
+                "tool_call_id": "call_verify_1",
+                "items": [
+                    {
+                        "claim": "Game responds to typed command input",
+                        "evidence": "player script issues a valid command and score increments",
+                        "status": "passed",
+                        "observed": "score increased after typed command",
+                    }
+                ],
+            }),
+        ])
+        + "\n",
+        encoding="utf-8",
+    )
+    chat = _DummyChat()
+    bundle_root = tmp_path / "bundle-proof"
+
+    with RecordingBundle(
+        bundle_root,
+        title="Verified Playback",
+        description="bundle regression with proof state",
+        frame_interval_s=0.01,
+    ) as bundle:
+        bundle.capture_frame(_grid_with_text("verified"), chat=chat, force=True)
+    summary = bundle.finalize(trace_path=trace_path)
+
+    assert bundle.assertions_path.exists()
+    assertions = json.loads(bundle.assertions_path.read_text(encoding="utf-8"))
+    assert assertions["status"] == "passed"
+    assert assertions["passed"] == 1
+    assert summary["verification"]["status"] == "passed"
+    assert summary["assertions_path"] == str(bundle.assertions_path)
+
+
+def test_recording_bundle_writes_runbook_and_experiment_artifacts_from_trace(
+    tmp_path: Path,
+) -> None:
+    trace_path = tmp_path / "trace.jsonl"
+    trace_path.write_text(
+        "\n".join([
+            json.dumps({"t": 0.0, "type": "session_start"}),
+            json.dumps({
+                "t": 0.4,
+                "type": "runbook_updated",
+                "tool_call_id": "call_runbook_1",
+                "objective": "Ship a stable typing game loop",
+                "status": "running",
+                "baseline_status": "captured",
+                "attempt_count": 1,
+                "runbook": {
+                    "objective": "Ship a stable typing game loop",
+                    "success_definition": "Scripted player and browser verification both pass",
+                    "scope": ["src/game", "src/ui"],
+                    "protected_surfaces": [],
+                    "baseline_status": "captured",
+                    "baseline_summary": "Build opens but the player stalls after wave one",
+                    "active_hypothesis": "Input focus is being lost after transitions",
+                    "evaluator": [
+                        {
+                            "id": "build",
+                            "kind": "command",
+                            "spec": "npm run build",
+                            "pass_condition": "exit 0",
+                        }
+                    ],
+                    "decision_policy": "Keep only attempts that pass evaluator and verification",
+                    "status": "running",
+                },
+                "artifact": {
+                    "configured": True,
+                    "objective": "Ship a stable typing game loop",
+                    "success_definition": "Scripted player and browser verification both pass",
+                    "scope": ["src/game", "src/ui"],
+                    "protected_surfaces": [],
+                    "baseline_status": "captured",
+                    "baseline_summary": "Build opens but the player stalls after wave one",
+                    "active_hypothesis": "Input focus is being lost after transitions",
+                    "status": "running",
+                    "decision_policy": "Keep only attempts that pass evaluator and verification",
+                    "evaluator": [
+                        {
+                            "id": "build",
+                            "kind": "command",
+                            "spec": "npm run build",
+                            "pass_condition": "exit 0",
+                        }
+                    ],
+                    "attempt_count": 1,
+                    "last_attempt": None,
+                },
+            }),
+            json.dumps({
+                "t": 0.8,
+                "type": "experiment_attempt_recorded",
+                "tool_call_id": "call_runbook_1",
+                "objective": "Ship a stable typing game loop",
+                "baseline_status": "captured",
+                "attempt": {
+                    "attempt_id": 1,
+                    "hypothesis": "Locking focus after transitions fixes the stall",
+                    "summary": "Build passed and scripted player reached wave three",
+                    "decision": "kept",
+                    "files_touched": ["src/game/input.ts"],
+                    "evaluator_summary": "build and player script passed",
+                    "verification_summary": "browser HUD updated correctly",
+                    "artifact_refs": ["logs/player.log"],
+                },
+            }),
+        ])
+        + "\n",
+        encoding="utf-8",
+    )
+    chat = _DummyChat()
+    bundle_root = tmp_path / "bundle-runbook"
+
+    with RecordingBundle(
+        bundle_root,
+        title="Runbook Playback",
+        description="bundle regression with runbook state",
+        frame_interval_s=0.01,
+    ) as bundle:
+        bundle.capture_frame(_grid_with_text("runbook"), chat=chat, force=True)
+    summary = bundle.finalize(trace_path=trace_path)
+
+    assert bundle.runbook_path.exists()
+    assert bundle.experiments_path.exists()
+    runbook = json.loads(bundle.runbook_path.read_text(encoding="utf-8"))
+    assert runbook["configured"] is True
+    assert runbook["objective"] == "Ship a stable typing game loop"
+    experiment_lines = bundle.experiments_path.read_text(encoding="utf-8").splitlines()
+    assert any(json.loads(line)["kind"] == "attempt" for line in experiment_lines if line.strip())
+    assert summary["runbook"]["configured"] is True
+    assert summary["experiments"][0]["kind"] in {"baseline", "attempt"}
+
+
 class _FakeRecordedChat:
     TRACE_PATH = Path("/tmp/successor-fake-trace.jsonl")
 

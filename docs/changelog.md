@@ -11,6 +11,123 @@ unit on top of phase 0.
 
 ---
 
+## v0.1.27, higher loop ceiling + advisory turn-budget diagnostics (2026-04-09)
+
+This pass raises the default autonomous loop ceiling for real long-form
+local runs and stops treating per-prompt turn count as an automatic
+failure signal inside the E2E harness.
+
+### What landed
+
+- `src/successor/profiles/profile.py`
+  - raised `DEFAULT_MAX_AGENT_TURNS` from `80` to `999`
+- `src/successor/wizard/setup.py`
+  - raised the review-step max-turn editor ceiling so the wizard no
+    longer tops out at `400`
+- `scripts/e2e_chat_driver.py`
+  - per-prompt agent-turn ceilings are now advisory warnings instead of
+    automatic hard failures
+  - scenario summaries now separate required assertions from advisory
+    efficiency signals
+- docs
+  - updated `README.md`
+  - updated `CHANGELOG.md`
+
+## v0.1.26, autonomous experiment runbook + attempt ledger (2026-04-09)
+
+This pass adds the missing control plane above the task ledger and
+verification contract: a session-local runbook for long iterative work,
+plus an append-only attempt ledger reconstructed into recording
+bundles.
+
+### Deterministic references
+
+- `https://github.com/karpathy/autoresearch/blob/master/README.md`
+  - stable evaluator, baseline-first posture, keep/discard attempts
+- `https://raw.githubusercontent.com/karpathy/autoresearch/master/program.md`
+  - explicit run-level control artifact instead of loose prompt text
+- `/home/lycaon/dev/archive/free-code-main/src/tools/TodoWriteTool/prompt.ts`
+  - session-local control state with one active item
+- `/home/lycaon/dev/archive/free-code-main/src/tools/AgentTool/built-in/verificationAgent.ts`
+  - verification as a separate control problem with explicit evidence
+- `/home/lycaon/dev/ai/hermes-reference/tools/todo_tool.py`
+  - durable session state reinjected across long runs
+
+### What landed
+
+- `src/successor/runbook.py`
+  - new session-local runbook state
+  - normalized evaluator-step parsing
+  - bounded attempt parsing and payload helpers
+  - prompt, card, and artifact builders
+- `src/successor/tools_registry.py`
+  - new hidden internal `runbook` tool
+  - model guidance for experimental run discipline
+- `src/successor/chat.py`
+  - auto-exposes `runbook` alongside `task` and `verify` during
+    tool-enabled runs
+  - injects runbook guidance + prompt section into the active system prompt
+  - records `runbook_updated` and `experiment_attempt_recorded` trace events
+- `src/successor/playback.py`
+  - reconstructs `runbook.json` and `experiments.jsonl` from trace
+  - passes runbook + attempt rows through to the reviewer payload
+- `reviewer-app/`
+  - inspector rail now shows objective, baseline, active hypothesis,
+    and recent attempt decisions when a runbook exists
+
+### Verification
+
+- frontend build:
+  - `npm --prefix reviewer-app run build`
+- focused regression slice:
+  - `PYTHONPATH=src python3 -m pytest tests/test_runbook.py tests/test_chat_runbook.py tests/test_verification_contract.py tests/test_chat_verification.py tests/test_chat_tasks.py tests/test_chat_web_tools.py tests/test_chat_subagents.py tests/test_chat_bash.py tests/test_playback.py`
+  - `92 passed in 4.06s`
+- lint:
+  - `ruff check src/successor/chat.py src/successor/playback.py src/successor/progress.py src/successor/tools_registry.py src/successor/runbook.py tests/test_runbook.py tests/test_chat_runbook.py tests/test_verification_contract.py tests/test_chat_verification.py tests/test_chat_tasks.py tests/test_chat_web_tools.py tests/test_chat_subagents.py tests/test_chat_bash.py tests/test_playback.py`
+
+## v0.1.25, verification contract + proof artifacts (2026-04-09)
+
+This pass adds a compact verification contract to the native chat loop
+so "done" can be separated from "proven."
+
+### Deterministic references
+
+- `/home/lycaon/dev/archive/free-code-main/src/tools/AgentTool/built-in/verificationAgent.ts`
+  - verification is a separate control problem with its own evidence loop
+- `/home/lycaon/dev/archive/free-code-main/src/tools/TodoWriteTool/prompt.ts`
+  - compact session-local control state the model can keep live while it works
+
+### What landed
+
+- `src/successor/verification_contract.py`
+  - new session-local verification ledger with compact claim/evidence/status items
+  - prompt, card, tool-result, and artifact helpers for the contract
+- `src/successor/chat.py`
+  - auto-exposes internal `verify` during tool-enabled runs
+  - injects evidence-bearing verification guidance into the active system prompt
+  - records `verification_contract_updated` events into the session trace
+- `src/successor/playback.py`
+  - reconstructs the latest verification contract from trace events
+  - writes `assertions.json` into recording bundles when proof state exists
+  - passes verification summaries through to the reviewer payload
+  - upgrades library status to `Verified` when the contract fully passed
+- `reviewer-app/`
+  - inspector rail now surfaces proof-state summaries instead of forcing users
+    to dig through raw trace JSON
+- docs
+  - updated `README.md`
+  - updated `docs/file-tools.md`
+
+### Verification
+
+- frontend build:
+  - `npm --prefix reviewer-app run build`
+- focused regression slice:
+  - `PYTHONPATH=src python3 -m pytest tests/test_verification_contract.py tests/test_chat_verification.py tests/test_chat_tasks.py tests/test_chat_web_tools.py tests/test_chat_subagents.py tests/test_chat_bash.py tests/test_playback.py`
+  - `86 passed in 4.01s`
+- lint:
+  - `ruff check src/successor/chat.py src/successor/playback.py src/successor/progress.py src/successor/tools_registry.py src/successor/verification_contract.py tests/test_chat_bash.py tests/test_chat_tasks.py tests/test_chat_verification.py tests/test_chat_web_tools.py tests/test_chat_subagents.py tests/test_playback.py tests/test_verification_contract.py`
+
 ## v0.1.24, frontend-backed recordings manager + loop hardening (2026-04-09)
 
 This release pairs a new frontend-backed recordings manager and session

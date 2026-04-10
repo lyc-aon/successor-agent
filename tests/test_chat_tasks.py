@@ -108,7 +108,7 @@ def test_task_tool_is_enabled_for_agentic_turns(temp_config_dir: Path) -> None:
     tools = client.calls[0]["tools"]
     assert isinstance(tools, list)
     names = [entry["function"]["name"] for entry in tools]
-    assert names == ["bash", "task"]
+    assert names == ["bash", "task", "verify", "runbook"]
 
 
 def test_in_progress_task_triggers_single_continuation_nudge(

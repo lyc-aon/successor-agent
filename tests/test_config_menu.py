@@ -75,7 +75,6 @@ def test_behavior_section_renders_max_agent_turns(temp_config_dir: Path) -> None
     )
     plain = render_grid_to_plain(grid)
     assert "max agent turns" in plain
-    assert "80" in plain
 
 
 def test_settings_cursor_starts_on_editable_row(temp_config_dir: Path) -> None:

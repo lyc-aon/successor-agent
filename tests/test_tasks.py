@@ -9,6 +9,7 @@ from successor.tasks import (
     TaskLedgerError,
     build_task_card_output,
     build_task_continue_nudge,
+    build_task_execution_guidance,
     build_task_prompt_section,
     build_task_tool_result,
     parse_task_items,
@@ -72,12 +73,15 @@ def test_task_ledger_helpers_and_rendering() -> None:
 
     card = build_task_card_output(ledger)
     prompt = build_task_prompt_section(ledger)
+    execution = build_task_execution_guidance(ledger)
     result = build_task_tool_result(ledger)
     payload = task_items_to_payload(ledger.items)
     nudge = build_task_continue_nudge(ledger)
 
     assert "[in progress] Implement task ledger" in card
     assert "[in_progress] Implement task ledger" in prompt
+    assert "A session task is already `in_progress`" in execution
+    assert "`in_progress`: `implementing task ledger`" in execution
     assert "<active-task>implementing task ledger</active-task>" in result
     assert payload[1]["status"] == "in_progress"
     assert "implementing task ledger" in nudge
@@ -86,13 +90,17 @@ def test_task_ledger_helpers_and_rendering() -> None:
 def test_task_prompt_and_nudge_handle_empty_or_inactive_ledgers() -> None:
     empty = SessionTaskLedger()
     empty_prompt = build_task_prompt_section(empty)
-    assert "No current task ledger." in empty_prompt
-    assert "next action should usually be a `task` call" in empty_prompt
-    assert "same response" in empty_prompt
+    empty_execution = build_task_execution_guidance(empty)
+    assert empty_prompt.strip().endswith("No current task ledger.")
+    assert "For multi-step work, create or update the session task ledger early." in empty_execution
+    assert "first substantive step" in empty_execution
+    assert "SAME response" in empty_execution
     assert build_task_continue_nudge(empty) == ""
 
     pending_only = SessionTaskLedger()
     pending_only.replace(parse_task_items([
         {"content": "Wait for user answer", "status": "pending"},
     ]))
+    pending_execution = build_task_execution_guidance(pending_only)
+    assert "A session task ledger already exists." in pending_execution
     assert build_task_continue_nudge(pending_only) == ""

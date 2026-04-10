@@ -78,6 +78,79 @@ export interface PlaybackStats {
   max_agent_turn: number
 }
 
+export interface VerificationItem {
+  claim: string
+  evidence: string
+  status: 'pending' | 'in_progress' | 'passed' | 'failed'
+  observed: string
+}
+
+export interface VerificationSummary {
+  status: string
+  total: number
+  pending: number
+  in_progress: number
+  passed: number
+  failed: number
+  active_claim: string
+  items: VerificationItem[]
+  updated_at_s?: number
+  tool_call_id?: string
+}
+
+export interface EvaluatorStep {
+  id: string
+  kind: string
+  spec: string
+  pass_condition: string
+}
+
+export interface ExperimentAttemptSummary {
+  attempt_id: number
+  hypothesis: string
+  summary: string
+  decision: string
+  files_touched: string[]
+  evaluator_summary: string
+  verification_summary: string
+  artifact_refs: string[]
+}
+
+export interface RunbookSummary {
+  configured: boolean
+  objective?: string
+  success_definition?: string
+  scope?: string[]
+  protected_surfaces?: string[]
+  baseline_status?: string
+  baseline_summary?: string
+  active_hypothesis?: string
+  status?: string
+  decision_policy?: string
+  evaluator?: EvaluatorStep[]
+  attempt_count: number
+  last_attempt?: ExperimentAttemptSummary | null
+  updated_at_s?: number
+  tool_call_id?: string
+}
+
+export interface ExperimentRow {
+  kind: 'baseline' | 'attempt' | 'completion'
+  t: number
+  objective: string
+  summary: string
+  baseline_status?: string
+  status?: string
+  attempt_id?: number
+  hypothesis?: string
+  decision?: string
+  files_touched?: string[]
+  evaluator_summary?: string
+  verification_summary?: string
+  artifact_refs?: string[]
+  tool_call_id?: string
+}
+
 export interface SessionPayload {
   kind: 'session'
   title: string
@@ -89,6 +162,9 @@ export interface SessionPayload {
   event_type_counts: Record<string, number>
   stats: PlaybackStats
   artifacts: ArtifactGroups
+  runbook?: RunbookSummary | null
+  experiments?: ExperimentRow[]
+  verification?: VerificationSummary | null
   theme_catalog: ThemeSpec[]
   default_theme: string
   default_mode: ThemeMode

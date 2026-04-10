@@ -1070,7 +1070,7 @@ class SuccessorSetup(App):
             self.state.max_agent_turns = max(1, self.state.max_agent_turns - 5)
             return
         if event.is_char and event.char in ("]", "+", "="):
-            self.state.max_agent_turns = min(400, self.state.max_agent_turns + 5)
+            self.state.max_agent_turns = min(9_999, self.state.max_agent_turns + 5)
             return
         if event.key == Key.ENTER:
             self._save_and_finish()

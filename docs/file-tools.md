@@ -43,6 +43,18 @@ The same native file-tool surface now appears in:
 - `successor tools` native-tools section
 - tool cards, progress summaries, traces, and playback
 
+## Verification Pairing
+
+File tools solve authoring. Verification is a separate control problem.
+
+- Successor now keeps a compact internal verification contract (`verify`)
+  alongside the task ledger during tool-enabled runs.
+- Use it to track concrete claims plus the exact evidence that should
+  prove them: browser interaction, screenshots plus vision, console
+  output, runtime logs, or a small verifier/player script.
+- Recording bundles persist the latest contract as `assertions.json`
+  when the run produced explicit proof state.
+
 ## Notes
 
 - Paths are normalized to absolute paths at execution time.

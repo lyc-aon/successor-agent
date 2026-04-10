@@ -22,6 +22,7 @@ The frontend side owns:
 - interaction patterns
 - paper/steel theme switching with light/dark modes
 - bundle and library presentation
+- proof-state presentation for verification and runbook artifacts
 
 ## Build
 
@@ -51,6 +52,8 @@ and instead make them feel like:
 
 - a dense run inventory when browsing many sessions
 - a purpose-built workbench when reviewing one session in depth
+- an evidence surface where verification state and experiment history
+  are legible without digging through raw trace JSON
 
 ## Fidelity checklist
 
