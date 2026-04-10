@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .bash.cards import ToolCard
+from .subagents.prompt import subagent_kind_label
 
 if TYPE_CHECKING:
     from .subagents.manager import SubagentTaskSnapshot
@@ -34,7 +35,7 @@ def summarize_tool_completion(
     if tool_name == "vision":
         return _summarize_vision(card)
     if tool_name in {"read_file", "write_file", "edit_file"}:
-        return _summarize_file_tool(card)
+        return _summarize_file_tool(card, metadata or {})
     if tool_name == "verify":
         return _summarize_verify(card)
     if tool_name == "runbook":
@@ -46,21 +47,22 @@ def summarize_tool_completion(
 
 def summarize_subagent_completion(task: "SubagentTaskSnapshot") -> ProgressUpdate | None:
     label = task.name or task.task_id
+    kind = subagent_kind_label(getattr(task, "role", "worker"))
     if task.status == "completed":
         summary = task.result_excerpt or "completed"
         return ProgressUpdate(
-            text=f"subagent {label} finished: {summary}",
+            text=f"{kind} {label} finished: {summary}",
             source="subagent",
             important=True,
         )
     if task.status == "cancelled":
         return ProgressUpdate(
-            text=f"subagent {label} cancelled",
+            text=f"{kind} {label} cancelled",
             source="subagent",
             important=True,
         )
     return ProgressUpdate(
-        text=f"subagent {label} failed: {task.error or 'unknown error'}",
+        text=f"{kind} {label} failed: {task.error or 'unknown error'}",
         source="subagent",
         important=True,
     )
@@ -342,7 +344,7 @@ def _summarize_bash(card: ToolCard) -> ProgressUpdate | None:
     return None
 
 
-def _summarize_file_tool(card: ToolCard) -> ProgressUpdate | None:
+def _summarize_file_tool(card: ToolCard, metadata: dict[str, Any]) -> ProgressUpdate | None:
     path = str(card.tool_arguments.get("file_path") or _first_param(card, "path")).strip()
     label = _clip_target(path) or card.verb
     failed = card.exit_code not in (None, 0)
@@ -353,6 +355,11 @@ def _summarize_file_tool(card: ToolCard) -> ProgressUpdate | None:
             source="file",
             important=False,
         )
+
+    validation = None
+    raw_validation = metadata.get("validation")
+    if isinstance(raw_validation, dict):
+        validation = raw_validation
 
     if card.change_artifact is not None and card.change_artifact.files:
         files = [
@@ -374,6 +381,13 @@ def _summarize_file_tool(card: ToolCard) -> ProgressUpdate | None:
                     important=True,
                 )
         if len(files) == 1:
+            if isinstance(validation, dict) and not bool(validation.get("ok", False)):
+                summary = str(validation.get("summary") or "fast check").strip() or "fast check"
+                return ProgressUpdate(
+                    text=f"updated {_clip_target(files[0])} ({summary} failed)",
+                    source="file",
+                    important=True,
+                )
             return ProgressUpdate(
                 text=f"updated {_clip_target(files[0])}",
                 source="file",

@@ -246,6 +246,30 @@ def test_write_file_creates_new_file_without_prior_read(tmp_path: Path) -> None:
     assert state[str(target)].partial is False
 
 
+def test_write_file_python_runs_fast_validation(tmp_path: Path) -> None:
+    target = tmp_path / "module.py"
+    preview = write_file_preview_card(
+        {"file_path": str(target), "content": "def ok():\n    return 1\n"},
+        tool_call_id="call_write_py",
+    )
+    state: dict[str, FileReadStateEntry] = {}
+
+    result = run_write_file(
+        {"file_path": str(target), "content": "def ok():\n    return 1\n"},
+        preview=preview,
+        read_state=state,
+        working_directory=str(tmp_path),
+    )
+
+    assert target.read_text(encoding="utf-8") == "def ok():\n    return 1\n"
+    assert "fast check:" in result.output
+    assert "py_compile" in result.output
+    assert "(ok)" in result.output
+    assert result.metadata is not None
+    assert result.metadata["validation"]["ok"] is True
+    assert result.metadata["validation"]["summary"] == "py_compile"
+
+
 def test_write_file_requires_prior_full_read_for_existing_files(tmp_path: Path) -> None:
     target = tmp_path / "existing.txt"
     target.write_text("before", encoding="utf-8")
@@ -361,6 +385,45 @@ def test_edit_file_preserves_crlf_line_endings(tmp_path: Path) -> None:
     assert target.read_bytes() == b"HELLO\r\nWORLD\r\n"
     assert result.final_card is not None
     assert result.final_card.change_artifact is not None
+
+
+def test_edit_file_python_surfaces_failed_fast_validation(tmp_path: Path) -> None:
+    target = tmp_path / "broken.py"
+    target.write_text("def ok():\n    return 1\n", encoding="utf-8")
+    preview = read_file_preview_card({"file_path": str(target)}, tool_call_id="call_seed_py")
+    state: dict[str, FileReadStateEntry] = {}
+    run_read_file(
+        {"file_path": str(target)},
+        preview=preview,
+        read_state=state,
+        working_directory=str(tmp_path),
+    )
+
+    result = run_edit_file(
+        {
+            "file_path": str(target),
+            "old_string": "return 1",
+            "new_string": "return )",
+        },
+        preview=edit_file_preview_card(
+            {
+                "file_path": str(target),
+                "old_string": "return 1",
+                "new_string": "return )",
+            },
+            tool_call_id="call_edit_bad_py",
+        ),
+        read_state=state,
+        working_directory=str(tmp_path),
+    )
+
+    assert "fast check:" in result.output
+    assert "py_compile" in result.output
+    assert "(failed)" in result.output
+    assert "SyntaxError" in result.output
+    assert result.metadata is not None
+    assert result.metadata["validation"]["ok"] is False
+    assert result.metadata["validation"]["summary"] == "py_compile"
 
 
 def test_native_write_file_dispatch_roundtrips_into_api_history(

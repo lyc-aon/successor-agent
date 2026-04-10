@@ -104,6 +104,32 @@ def test_native_write_file_summary_is_high_signal() -> None:
     assert "updated /tmp/demo.txt" == update.text
 
 
+def test_native_write_file_summary_mentions_failed_fast_check() -> None:
+    card = ToolCard(
+        verb="write-file",
+        tool_name="write_file",
+        exit_code=0,
+        tool_arguments={"file_path": "/tmp/demo.py"},
+        change_artifact=ChangeArtifact(
+            files=(ChangedFile(path="/tmp/demo.py", status="modified"),),
+        ),
+    )
+
+    update = summarize_tool_completion(
+        card,
+        metadata={
+            "validation": {
+                "ok": False,
+                "summary": "py_compile",
+            },
+        },
+    )
+
+    assert update is not None
+    assert update.important is True
+    assert update.text == "updated /tmp/demo.py (py_compile failed)"
+
+
 def test_native_read_file_summary_is_low_signal() -> None:
     card = ToolCard(
         verb="read-file",
@@ -139,6 +165,7 @@ def test_subagent_completion_summary_uses_excerpt() -> None:
         task_id="t001",
         name="version audit",
         directive="check version",
+        role="worker",
         status="completed",
         created_at=0.0,
         started_at=0.1,
@@ -152,3 +179,24 @@ def test_subagent_completion_summary_uses_excerpt() -> None:
     assert update is not None
     assert update.important is True
     assert "subagent version audit finished: found version 0.1.21" == update.text
+
+
+def test_verifier_completion_summary_uses_verifier_label() -> None:
+    snapshot = SubagentTaskSnapshot(
+        task_id="t002",
+        name="ui check",
+        directive="verify the ui",
+        role="verification",
+        status="completed",
+        created_at=0.0,
+        started_at=0.1,
+        finished_at=0.2,
+        transcript_path=Path("/tmp/t002.json"),
+        result_excerpt="PASS after browser checks",
+        result_text="PASS after browser checks",
+    )
+
+    update = summarize_subagent_completion(snapshot)
+    assert update is not None
+    assert update.important is True
+    assert update.text == "verifier ui check finished: PASS after browser checks"

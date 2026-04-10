@@ -295,21 +295,22 @@ def test_completed_subagent_can_trigger_bounded_followup_nudge(
     chat._subagent_manager = _NotifyingManager([
         SubagentNotification(
             task=SubagentTaskSnapshot(
-            task_id="t001",
-            name="audit",
-            directive="audit",
-            status="completed",
-            created_at=time.monotonic() - 1.0,
-            started_at=time.monotonic() - 0.8,
-            finished_at=time.monotonic() - 0.1,
-            transcript_path=temp_config_dir / "subagents" / "t001.json",
-            result_excerpt="found a stale selector",
-            result_text="found a stale selector",
-            error="",
-            parent_message_count=0,
-            tool_cards=1,
-            assistant_turns=1,
-        )
+                task_id="t001",
+                name="audit",
+                directive="audit",
+                role="worker",
+                status="completed",
+                created_at=time.monotonic() - 1.0,
+                started_at=time.monotonic() - 0.8,
+                finished_at=time.monotonic() - 0.1,
+                transcript_path=temp_config_dir / "subagents" / "t001.json",
+                result_excerpt="found a stale selector",
+                result_text="found a stale selector",
+                error="",
+                parent_message_count=0,
+                tool_cards=1,
+                assistant_turns=1,
+            )
         )
     ])
 
@@ -469,6 +470,7 @@ def test_api_messages_emits_subagent_tool_call_round_trip(temp_config_dir: Path)
                 name="audit",
                 directive="audit versions",
                 tool_call_id="call_sub_abc",
+                role="worker",
                 spawn_result="<subagent-spawned><task_id>t001</task_id></subagent-spawned>",
             ),
         ),
@@ -535,3 +537,10 @@ def test_child_prompt_explicitly_overrides_inherited_redelegation() -> None:
     assert "Ignore any inherited instruction" in prompt
     assert "`subagent` tool" in prompt
     assert "parent chat" in prompt
+
+
+def test_child_prompt_verification_role_uses_stricter_contract() -> None:
+    prompt = build_child_prompt("verify the shared version", role="verification")
+    assert "background verification subagent" in prompt
+    assert "Read-only verification only" in prompt
+    assert "Verdict must be one of PASS, FAIL, or PARTIAL" in prompt

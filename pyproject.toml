@@ -35,7 +35,7 @@ Author = "https://twitter.com/lyc_aon"
 
 [project.optional-dependencies]
 browser = ["playwright>=1.58"]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.15"]
 
 [project.scripts]
 # `successor` is the canonical command — typing the brand reinforces it
@@ -56,3 +56,11 @@ where = ["src"]
   "intros/*/*.txt",
   "reviewer_app/*",
 ]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

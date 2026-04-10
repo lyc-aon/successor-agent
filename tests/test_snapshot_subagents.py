@@ -48,10 +48,12 @@ def test_subagent_card_renders_in_chat_body(temp_config_dir: Path) -> None:
                 name="version-audit",
                 directive="audit the version files and report what is true",
                 tool_call_id="call_sub_1",
+                role="worker",
                 spawn_result=(
                     "<subagent-spawned>\n"
                     "<task_id>t001</task_id>\n"
                     "<name>version-audit</name>\n"
+                    "<role>worker</role>\n"
                     "<status>queued</status>\n"
                     "</subagent-spawned>"
                 ),

@@ -480,6 +480,15 @@ Existing-file writes and edits require a prior full read and fail
 cleanly if the file changed in the meantime. That keeps stale writes
 from silently clobbering user edits or linter rewrites.
 
+After each native `write_file` or `edit_file`, Successor also runs one
+fast syntax/lint sanity check when it can do so deterministically in the
+current workspace. Python files prefer `ruff check` when the repo
+advertises Ruff and fall back to `py_compile`; JSON files use
+`python -m json.tool`; JS files use `node --check` when Node is
+available. These checks do not silently roll back the edit, but their
+status is surfaced in the tool output, progress summaries, traces, and
+playback so the model sees the failure immediately.
+
 Repeated unchanged full-file reads are also compressed down to a short
 stub instead of re-sending the same file content over and over, and the
 runtime now warns then blocks obvious identical read loops with no
@@ -502,6 +511,13 @@ small session-local contract for the objective, success definition,
 baseline status, active hypothesis, and stable evaluator steps. This is
 paired with an append-only attempt ledger so the model can stop
 retrying failed ideas blindly.
+
+When the model needs a fresh checker instead of more implementation
+context, the same `subagent` tool now supports `role="verification"`.
+That launches a stricter read-only worker: no `write_file`, no
+`edit_file`, no nested delegation, and non-mutating bash only. The
+verification worker is meant to run the repo contract first, then prove
+behavior directly with runtime evidence.
 
 For the full contract, see [docs/file-tools.md](docs/file-tools.md).
 
@@ -700,14 +716,20 @@ an issue. I would rather over-credit than under-credit.
 ## Tests
 
 ```bash
-pytest
+ruff check src tests
+pytest -q
 ```
 
 The suite is hermetic. Each test gets its own
 `SUCCESSOR_CONFIG_DIR`, and bash dispatch tests use real shell
-builtins (no mocks). 1227 tests at the time of writing. Run them
+builtins (no mocks). 1234 tests at the time of writing. Run them
 with `pytest -q` for a clean dot view, or `pytest -xvs` to follow
 individual tests.
+
+For harness work, treat Ruff as part of the repo contract rather than
+an optional cleanup step. After touching Python files, run `ruff check`
+on the files you changed or `ruff check src tests` before you report the
+work complete.
 
 ## Docs
 

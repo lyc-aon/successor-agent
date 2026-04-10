@@ -112,6 +112,7 @@ def test_manager_completes_task_and_writes_transcript(temp_config_dir: Path) -> 
     _wait_until(lambda: not manager.has_active_tasks())
 
     task = next(t for t in manager.snapshots() if t.task_id == snapshot.task_id)
+    assert task.role == "worker"
     assert task.status == "completed"
     assert task.transcript_path.exists()
     payload = json.loads(task.transcript_path.read_text())
@@ -151,6 +152,50 @@ def test_manager_child_profile_strips_subagent_tool(temp_config_dir: Path) -> No
     _wait_until(lambda: not manager.has_active_tasks())
 
     assert seen_tools == [("bash",)]
+
+
+def test_manager_verification_role_strips_write_tools_and_mutating_bash(
+    temp_config_dir: Path,
+) -> None:
+    seen_profiles: list[Profile] = []
+
+    def client_factory(profile):
+        seen_profiles.append(profile)
+        return _MockClient(
+            lambda: _StaticStream([
+                StreamStarted(),
+                ContentChunk(text="Scope: verify\nChecks: pytest -q\nVerdict: PASS"),
+                StreamEnded(finish_reason="stop", usage=None, timings=None),
+            ])
+        )
+
+    manager = SubagentManager(
+        max_model_tasks=1,
+        transcript_dir=temp_config_dir / "subagents",
+        client_factory=client_factory,
+        settle_sleep_s=0.01,
+    )
+    manager.spawn_fork(
+        directive="verify the build",
+        role="verification",
+        context_snapshot=[],
+        profile=Profile(
+            name="subagent-test",
+            tools=("bash", "read_file", "write_file", "edit_file", "subagent"),
+        ),
+        config=SubagentConfig(),
+    )
+    _wait_until(lambda: not manager.has_active_tasks())
+
+    assert len(seen_profiles) == 1
+    child_profile = seen_profiles[0]
+    assert "subagent" not in child_profile.tools
+    assert "write_file" not in child_profile.tools
+    assert "edit_file" not in child_profile.tools
+    assert "read_file" in child_profile.tools
+    bash_cfg = child_profile.tool_config.get("bash", {})
+    assert bash_cfg["allow_mutating"] is False
+    assert bash_cfg["allow_dangerous"] is False
 
 
 def test_manager_queues_second_task_when_capacity_is_one(temp_config_dir: Path) -> None:

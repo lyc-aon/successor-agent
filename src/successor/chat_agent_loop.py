@@ -1,0 +1,1187 @@
+"""Agent-loop/controller orchestration extracted from SuccessorChat.
+
+This module keeps the current chat behavior intact while pulling the
+submit/turn/stream controller layer out of `chat.py`. The chat remains
+the owner of state, rendering, and trace sinks; this helper owns the
+core agent loop behavior and the API-history assembly helpers it uses.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any, Callable
+
+from .agent.bash_stream import BashStreamDetector
+from .bash import ToolCard, resolve_bash_config
+from .file_tools import note_non_read_tool_call
+from .profiles import DEFAULT_MAX_AGENT_TURNS, PROFILE_REGISTRY, get_profile
+from .providers.llama import (
+    ContentChunk,
+    ReasoningChunk,
+    StreamEnded,
+    StreamError,
+    StreamStarted,
+)
+from .render.theme import all_themes, get_theme
+from .runbook import (
+    build_runbook_execution_guidance,
+    build_runbook_prompt_section,
+)
+from .session_trace import clip_text as _trace_clip_text
+from .skills import (
+    build_skill_discovery_section,
+    build_skill_hint_section,
+)
+from .subagents.cards import SubagentToolCard
+from .tasks import (
+    build_task_continue_nudge,
+    build_task_execution_guidance,
+    build_task_prompt_section,
+)
+from .tools_registry import (
+    build_model_tool_guidance,
+    build_native_tool_schemas,
+)
+from .verification_contract import (
+    build_verification_execution_guidance,
+    build_verification_prompt_section,
+)
+from .verification_hints import build_repo_verification_guidance
+from .web.verification import build_browser_verification_guidance
+
+ToolArtifact = ToolCard | SubagentToolCard
+
+
+def _message_has_tool_artifact(msg: Any) -> bool:
+    return msg.tool_card is not None or msg.subagent_card is not None
+
+
+def _message_tool_artifact(msg: Any) -> ToolArtifact | None:
+    if msg.tool_card is not None:
+        return msg.tool_card
+    return msg.subagent_card
+
+
+def _api_role_for_message(msg: Any) -> str:
+    if msg.api_role_override:
+        return msg.api_role_override
+    if msg.role == "successor":
+        return "assistant"
+    return msg.role
+
+
+def _tool_name_for_card(card: ToolArtifact) -> str:
+    return "subagent" if isinstance(card, SubagentToolCard) else card.tool_name
+
+
+def _tool_arguments_for_card(card: ToolArtifact) -> dict[str, Any]:
+    if isinstance(card, SubagentToolCard):
+        payload = {"prompt": card.directive}
+        if card.name:
+            payload["name"] = card.name
+        if card.role:
+            payload["role"] = card.role
+        return payload
+    if card.tool_arguments:
+        return dict(card.tool_arguments)
+    return {"command": card.raw_command}
+
+
+def _assistant_with_tool_calls(content: str, cards: list[ToolArtifact]) -> dict:
+    """Build the assistant message dict for a tool-calling turn."""
+    return {
+        "role": "assistant",
+        "content": content or "",
+        "tool_calls": [
+            {
+                "id": card.tool_call_id,
+                "type": "function",
+                "function": {
+                    "name": _tool_name_for_card(card),
+                    "arguments": json.dumps(_tool_arguments_for_card(card)),
+                },
+            }
+            for card in cards
+        ],
+    }
+
+
+def _tool_card_content_for_api(card: ToolArtifact) -> str:
+    """Build the `role=tool` content that goes back to the model."""
+    if isinstance(card, SubagentToolCard):
+        return card.spawn_result
+    if card.api_content_override is not None:
+        return card.api_content_override
+
+    parts: list[str] = []
+    if card.output:
+        parts.append(card.output.rstrip())
+    if card.stderr and card.stderr.strip():
+        parts.append(card.stderr.rstrip())
+    if card.exit_code is not None and card.exit_code != 0:
+        parts.append(f"[command exited with code {card.exit_code}]")
+    return "\n".join(parts)
+
+
+def _find_last_user_excerpt(api_messages: list[dict[str, Any]]) -> str:
+    for msg in reversed(api_messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str) and content.strip():
+            return _trace_clip_text(content, limit=320)
+    return ""
+
+
+def _trace_tool_call_summary(tc: dict[str, Any]) -> dict[str, object]:
+    name = str(tc.get("name") or "")
+    args = tc.get("arguments") or {}
+    entry: dict[str, object] = {
+        "id": str(tc.get("id") or ""),
+        "name": name,
+    }
+    raw_arguments = str(tc.get("raw_arguments") or "")
+    parse_error = str(tc.get("arguments_parse_error") or "").strip()
+    parse_error_pos = tc.get("arguments_parse_error_pos")
+    if raw_arguments:
+        entry["raw_arguments_len"] = len(raw_arguments)
+    if parse_error:
+        entry["arguments_parse_error"] = parse_error
+        if isinstance(parse_error_pos, int):
+            entry["arguments_parse_error_pos"] = parse_error_pos
+    if name == "bash" and isinstance(args, dict):
+        entry["command_excerpt"] = _trace_clip_text(
+            str(args.get("command") or ""),
+            limit=320,
+        )
+    elif name == "bash" and raw_arguments:
+        entry["raw_arguments_excerpt"] = _trace_clip_text(raw_arguments, limit=320)
+    elif name == "task" and isinstance(args, dict):
+        items = args.get("items")
+        if isinstance(items, list):
+            entry["task_count"] = len(items)
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("status") or "").strip().lower() != "in_progress":
+                    continue
+                entry["active_task"] = _trace_clip_text(
+                    str(item.get("active_form") or item.get("content") or ""),
+                    limit=320,
+                )
+                break
+    elif name == "verify" and isinstance(args, dict):
+        items = args.get("items")
+        if isinstance(items, list):
+            entry["assertion_count"] = len(items)
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("status") or "").strip().lower() != "in_progress":
+                    continue
+                entry["active_claim"] = _trace_clip_text(
+                    str(item.get("claim") or ""),
+                    limit=320,
+                )
+                entry["active_evidence"] = _trace_clip_text(
+                    str(item.get("evidence") or ""),
+                    limit=320,
+                )
+                break
+    elif name == "runbook" and isinstance(args, dict):
+        if bool(args.get("clear")):
+            entry["cleared"] = True
+        objective = str(args.get("objective") or "").strip()
+        if objective:
+            entry["objective_excerpt"] = _trace_clip_text(objective, limit=320)
+        hypothesis = str(args.get("active_hypothesis") or "").strip()
+        if hypothesis:
+            entry["active_hypothesis"] = _trace_clip_text(hypothesis, limit=320)
+        status = str(args.get("status") or "").strip()
+        if status:
+            entry["status"] = status
+        baseline_status = str(args.get("baseline_status") or "").strip()
+        if baseline_status:
+            entry["baseline_status"] = baseline_status
+        evaluator = args.get("evaluator")
+        if isinstance(evaluator, list):
+            entry["evaluator_count"] = len(evaluator)
+        attempt = args.get("attempt")
+        if isinstance(attempt, dict):
+            entry["attempt_decision"] = str(attempt.get("decision") or "")
+            attempt_hypothesis = str(attempt.get("hypothesis") or "").strip()
+            if attempt_hypothesis:
+                entry["attempt_hypothesis"] = _trace_clip_text(
+                    attempt_hypothesis,
+                    limit=320,
+                )
+    elif name == "skill" and isinstance(args, dict):
+        entry["skill_name"] = str(args.get("skill") or "")
+        task = str(args.get("task") or "")
+        if task:
+            entry["task_excerpt"] = _trace_clip_text(task, limit=320)
+    elif name == "subagent" and isinstance(args, dict):
+        entry["prompt_excerpt"] = _trace_clip_text(
+            str(args.get("prompt") or ""),
+            limit=320,
+        )
+        label = str(args.get("name") or "")
+        if label:
+            entry["task_name"] = label
+        role = str(args.get("role") or "").strip()
+        if role:
+            entry["role"] = role
+    elif name == "holonet" and isinstance(args, dict):
+        entry["provider"] = str(args.get("provider") or "")
+        entry["query_excerpt"] = _trace_clip_text(
+            str(args.get("query") or args.get("url") or ""),
+            limit=320,
+        )
+    elif name == "browser" and isinstance(args, dict):
+        entry["action"] = str(args.get("action") or "")
+        entry["target_excerpt"] = _trace_clip_text(
+            str(args.get("target") or args.get("url") or ""),
+            limit=320,
+        )
+    elif args:
+        entry["arguments_excerpt"] = _trace_clip_text(str(args), limit=320)
+    return entry
+
+
+class ChatAgentLoop:
+    """Owns the agent-loop controller flow while the chat owns state."""
+
+    def __init__(
+        self,
+        host: Any,
+        message_cls: type[Any],
+        *,
+        densities: tuple[Any, ...],
+        find_density: Callable[[str], Any | None],
+        max_agent_turns_default: int = DEFAULT_MAX_AGENT_TURNS,
+    ) -> None:
+        self._host = host
+        self._message_cls = message_cls
+        self._densities = densities
+        self._find_density = find_density
+        self._max_agent_turns_default = max_agent_turns_default
+
+    def _message(self, role: str, raw_text: str, **kwargs: Any) -> Any:
+        return self._message_cls(role, raw_text, **kwargs)
+
+    def _append(self, message: Any) -> None:
+        self._host.messages.append(message)
+
+    def submit(self) -> None:
+        text = self._host.input_buffer.strip()
+        if text:
+            self._host._trace_event(
+                "user_submit",
+                text=text,
+                excerpt=_trace_clip_text(text, limit=320),
+            )
+        self._host._history_add(text)
+        if self._host._history_in_recall_mode():
+            self._host._history_exit_recall(restore_draft=False)
+        self._host.input_buffer = ""
+
+        if self._host._cache_warmer is not None:
+            self._host._cache_warmer.close()
+            self._host._cache_warmer = None
+
+        if self._host._running_tools:
+            self._host._cancel_running_tools()
+            self._host._pending_continuation = False
+        note_non_read_tool_call(self._host._file_read_tracker)
+
+        if text in ("/quit", "/exit", "/q"):
+            self._host.stop()
+            return
+
+        if text == "/config":
+            if self._host._has_active_subagent_tasks():
+                self._append(
+                    self._message(
+                        "successor",
+                        "wait for background subagent tasks to finish before opening /config.",
+                        synthetic=True,
+                    )
+                )
+                return
+            self._host._pending_action = "config"
+            self._host.stop()
+            return
+
+        if text.startswith("/fork"):
+            parts = text.split(maxsplit=1)
+            if len(parts) < 2 or not parts[1].strip():
+                self._append(
+                    self._message(
+                        "successor",
+                        "usage: /fork <directive>. Spawns a background subagent that inherits the current chat context.",
+                        synthetic=True,
+                    )
+                )
+                return
+            self._host._handle_fork_cmd(parts[1].strip())
+            return
+
+        if text == "/tasks":
+            self._host._handle_tasks_cmd()
+            return
+
+        if text.startswith("/task-cancel"):
+            parts = text.split(maxsplit=1)
+            if len(parts) < 2:
+                self._append(
+                    self._message(
+                        "successor",
+                        "usage: /task-cancel <task-id|all>",
+                        synthetic=True,
+                    )
+                )
+                return
+            self._host._handle_task_cancel_cmd(parts[1].strip())
+            return
+
+        if text.startswith("/bash"):
+            parts = text.split(maxsplit=1)
+            if len(parts) < 2 or not parts[1].strip():
+                self._append(
+                    self._message(
+                        "successor",
+                        "usage: /bash <command>. The command runs locally and "
+                        "renders as a structured tool card. Dangerous commands "
+                        "(rm -rf /, sudo, curl|sh, etc.) are refused with an "
+                        "explanation.",
+                        synthetic=True,
+                    )
+                )
+                return
+            command = parts[1].strip()
+            self._append(self._message("user", f"`{command}`", synthetic=True))
+            bash_cfg = resolve_bash_config(self._host.profile)
+            self._host._spawn_bash_runner(command, bash_cfg=bash_cfg)
+            return
+
+        if text == "/budget":
+            self._host._handle_budget_cmd()
+            return
+
+        if text.startswith("/burn"):
+            parts = text.split()
+            if len(parts) < 2:
+                self._append(
+                    self._message(
+                        "successor",
+                        "usage: /burn <N>  → inject N synthetic tokens of "
+                        "varied content into the chat history. Use this to "
+                        "stress-test compaction without burning real model "
+                        "calls. Pair with /budget to watch the fill % climb "
+                        "and /compact to fire the summarizer.",
+                        synthetic=True,
+                    )
+                )
+                return
+            try:
+                n_tokens = int(parts[1])
+            except ValueError:
+                self._append(
+                    self._message(
+                        "successor",
+                        f"unknown /burn argument '{parts[1]}'. Expected an integer token count.",
+                        synthetic=True,
+                    )
+                )
+                return
+            self._host._handle_burn_cmd(n_tokens)
+            return
+
+        if text == "/compact":
+            self._host._handle_compact_cmd()
+            return
+
+        if text.startswith("/profile"):
+            parts = text.split(maxsplit=1)
+            available_names = sorted(PROFILE_REGISTRY.names())
+            if len(parts) == 1:
+                names = ", ".join(available_names) or "(none loaded)"
+                hint = (
+                    f"current profile: {self._host.profile.name}"
+                    + (
+                        f" — {self._host.profile.description}"
+                        if self._host.profile.description else ""
+                    )
+                    + f". Available: {names}. "
+                    f"Use /profile <name> or Ctrl+P to cycle."
+                )
+                self._append(self._message("successor", hint, synthetic=True))
+                return
+            arg = parts[1].strip().lower()
+            if arg == "cycle":
+                self._host._cycle_profile()
+                return
+            target = get_profile(arg)
+            if target is None:
+                self._append(
+                    self._message(
+                        "successor",
+                        f"no profile named '{arg}'. try one of: "
+                        f"{', '.join(available_names) or '(none)'}.",
+                        synthetic=True,
+                    )
+                )
+                return
+            self._host._set_profile(target)
+            return
+
+        if text.startswith("/theme"):
+            parts = text.split(maxsplit=1)
+            available_names = [theme.name for theme in all_themes()]
+            if len(parts) == 1:
+                names = ", ".join(available_names) or "(none loaded)"
+                hint = (
+                    f"current theme: {self._host.theme.name} {self._host.theme.icon}. "
+                    f"Available: {names}. Use /theme <name> or Ctrl+T to cycle."
+                )
+                self._append(self._message("successor", hint, synthetic=True))
+                return
+            arg = parts[1].strip().lower()
+            if arg == "cycle":
+                self._host._cycle_theme()
+                return
+            target = get_theme(arg)
+            if target is None:
+                self._append(
+                    self._message(
+                        "successor",
+                        f"no theme named '{arg}'. try one of: "
+                        f"{', '.join(available_names) or '(none)'}.",
+                        synthetic=True,
+                    )
+                )
+                return
+            self._host._set_theme(target)
+            return
+
+        if text.startswith("/mode"):
+            parts = text.split(maxsplit=1)
+            if len(parts) == 1:
+                hint = (
+                    f"display mode: {self._host.display_mode}. "
+                    f"Use /mode dark|light|toggle or Alt+D to flip. "
+                    f"Mode is independent of theme — switching mode keeps "
+                    f"the same theme."
+                )
+                self._append(self._message("successor", hint, synthetic=True))
+                return
+            arg = parts[1].strip().lower()
+            if arg == "toggle":
+                self._host._toggle_display_mode()
+                return
+            if arg in ("dark", "light"):
+                self._host._set_display_mode(arg)
+                return
+            self._append(
+                self._message(
+                    "successor",
+                    f"unknown /mode argument '{arg}'. try dark, light, or toggle.",
+                    synthetic=True,
+                )
+            )
+            return
+
+        if text.startswith("/mouse"):
+            parts = text.split(maxsplit=1)
+            if len(parts) == 1:
+                state = "on" if self._host._mouse_enabled else "off"
+                hint = (
+                    f"mouse: {state}. Off means the terminal owns wheel/selection. "
+                    f"On enables in-chat wheel scrolling and clickable widgets; "
+                    f"hold Shift to drag-select text."
+                )
+                self._append(self._message("successor", hint, synthetic=True))
+                return
+            arg = parts[1].strip().lower()
+            if arg == "on":
+                self._host._enable_mouse()
+                self._append(
+                    self._message(
+                        "successor",
+                        "mouse on. Click the title-bar widgets, use scroll wheel "
+                        "to navigate history. Hold Shift while click-dragging to "
+                        "use native text selection.",
+                        synthetic=True,
+                    )
+                )
+                return
+            if arg == "off":
+                self._host._disable_mouse()
+                self._append(
+                    self._message(
+                        "successor",
+                        "mouse off. The terminal owns wheel scrolling and native "
+                        "click-drag selection again; clickable widgets are disabled.",
+                        synthetic=True,
+                    )
+                )
+                return
+            if arg == "toggle":
+                if self._host._mouse_enabled:
+                    self._host._disable_mouse()
+                else:
+                    self._host._enable_mouse()
+                return
+            self._append(
+                self._message(
+                    "successor",
+                    f"unknown /mouse argument '{arg}'. try on, off, or toggle.",
+                    synthetic=True,
+                )
+            )
+            return
+
+        if text.startswith("/playback") or text.startswith("/review"):
+            parts = text.split(maxsplit=1)
+            arg = parts[1].strip() if len(parts) > 1 else ""
+            self._host._open_playback_from_chat(arg)
+            return
+
+        if text.startswith("/recording"):
+            parts = text.split(maxsplit=1)
+            if len(parts) == 1:
+                state = "on" if bool(self._host._config.get("autorecord", True)) else "off"
+                hint = (
+                    f"recording: {state}. Auto-record writes local playback bundles under "
+                    "~/.local/share/successor/recordings/ by default. Bundles stay on "
+                    "local disk and pair playback.html with session_trace.json for debugging."
+                )
+                self._append(self._message("successor", hint, synthetic=True))
+                return
+            arg = parts[1].strip().lower()
+            if arg == "on":
+                self._host._set_autorecord(True)
+                self._append(
+                    self._message(
+                        "successor",
+                        "auto-record on. Future chat sessions will save local playback bundles "
+                        "for debugging and harness-building.",
+                        synthetic=True,
+                    )
+                )
+                return
+            if arg == "off":
+                self._host._set_autorecord(False)
+                self._append(
+                    self._message(
+                        "successor",
+                        "auto-record off. Future chat sessions will stop writing playback bundles.",
+                        synthetic=True,
+                    )
+                )
+                return
+            if arg == "toggle":
+                enabled = not bool(self._host._config.get("autorecord", True))
+                self._host._set_autorecord(enabled)
+                state = "on" if enabled else "off"
+                self._append(
+                    self._message(
+                        "successor",
+                        f"auto-record {state}.",
+                        synthetic=True,
+                    )
+                )
+                return
+            self._append(
+                self._message(
+                    "successor",
+                    f"unknown /recording argument '{arg}'. try on, off, or toggle.",
+                    synthetic=True,
+                )
+            )
+            return
+
+        if text.startswith("/density"):
+            parts = text.split(maxsplit=1)
+            if len(parts) == 1:
+                names = ", ".join(d.name for d in self._densities)
+                hint = (
+                    f"current density: {self._host.density.name}. "
+                    f"Available: {names}. Use /density <name> or Alt+=/Alt+- "
+                    f"or Ctrl+] to cycle."
+                )
+                self._append(self._message("successor", hint, synthetic=True))
+                return
+            arg = parts[1].strip().lower()
+            if arg == "cycle":
+                self._host._cycle_density()
+                return
+            target = self._find_density(arg)
+            if target is None:
+                self._append(
+                    self._message(
+                        "successor",
+                        f"no density named '{arg}'. try one of: "
+                        f"{', '.join(d.name for d in self._densities)}.",
+                        synthetic=True,
+                    )
+                )
+                return
+            self._host._set_density(target)
+            return
+
+        self._append(self._message("user", text))
+        self._host._scroll_to_bottom()
+        self._host._agent_turn = 0
+        self._host._task_continue_nudged_this_turn = False
+        self._host._task_continue_nudge = None
+        self._host._browser_verification_active = False
+        self._host._browser_verification_reason = ""
+        self._host._verification_continue_nudged_this_turn = False
+        self._host._verification_continue_nudge = None
+        self._host._file_tool_continue_nudged_this_turn = False
+        self._host._file_tool_continue_nudge = None
+        self._host._subagent_continue_nudged_this_turn = False
+        self._host._subagent_continue_nudge = None
+        self._host._autocompact_attempted_this_turn = False
+        self._host._begin_agent_turn()
+
+    def begin_agent_turn(self) -> None:
+        """Open a new stream for the next turn of the agent loop."""
+        if self._host._check_and_maybe_defer_for_autocompact():
+            return
+
+        self._host._agent_turn += 1
+        max_agent_turns = max(
+            1,
+            int(
+                getattr(
+                    self._host.profile,
+                    "max_agent_turns",
+                    self._max_agent_turns_default,
+                ) or self._max_agent_turns_default
+            ),
+        )
+        if self._host._agent_turn > max_agent_turns:
+            self._append(
+                self._message(
+                    "successor",
+                    f"[agent loop halted at {max_agent_turns} turns — "
+                    f"send a new message to continue]",
+                    synthetic=True,
+                )
+            )
+            self._host._agent_turn = 0
+            return
+
+        self._host._refresh_browser_verification_mode()
+
+        enabled_tools = self._host._enabled_tools_for_turn()
+        enabled_skills = self._host._enabled_skills_for_turn(enabled_tools)
+
+        sys_prompt = self._host.system_prompt
+        task_execution_guidance = ""
+        task_section = ""
+        verification_execution_guidance = ""
+        verification_section = ""
+        runbook_execution_guidance = ""
+        runbook_section = ""
+        browser_verification_guidance = ""
+        if "task" in enabled_tools:
+            task_execution_guidance = build_task_execution_guidance(self._host._task_ledger)
+            task_section = build_task_prompt_section(self._host._task_ledger)
+        if "verify" in enabled_tools:
+            verification_execution_guidance = build_verification_execution_guidance(
+                self._host._verification_ledger
+            )
+            verification_section = build_verification_prompt_section(
+                self._host._verification_ledger
+            )
+        if "runbook" in enabled_tools:
+            runbook_execution_guidance = build_runbook_execution_guidance(
+                self._host._runbook
+            )
+            runbook_section = build_runbook_prompt_section(self._host._runbook)
+        if self._host._browser_verification_active and "browser" in enabled_tools:
+            browser_verification_guidance = build_browser_verification_guidance(
+                latest_user_text=self._host._latest_real_user_text(),
+                active_task_text=self._host._browser_verification_context_text(),
+                vision_available="vision" in enabled_tools,
+                browser_verifier_available=(
+                    "skill" in enabled_tools
+                    and any(skill.name == "browser-verifier" for skill in enabled_skills)
+                ),
+                browser_verifier_loaded=self._host._skill_already_loaded("browser-verifier"),
+            )
+        if enabled_tools and (
+            "bash" in enabled_tools
+            or any(name in {"read_file", "write_file", "edit_file"} for name in enabled_tools)
+        ):
+            effective_cwd = self._host._tool_working_directory()
+            sys_prompt = (
+                f"{sys_prompt}\n\n"
+                f"## Working directory\n\n"
+                f"Native file tools and bash both resolve relative paths "
+                f"from `cwd={effective_cwd}`. If the user asks for a file "
+                f"in a specific location (like `~/Desktop/foo.html`), use "
+                f"the absolute path — do not assume your cwd is what the "
+                f"user had in mind.\n\n"
+                f"## Working with tool results\n\n"
+                f"Before making each tool call, scan the conversation "
+                f"history above and check what you have ALREADY done. "
+                f"A tool result with no stdout means the command "
+                f"succeeded — that is normal for writes, redirects, "
+                f"`mkdir`, `touch`, `chmod`, and most mutating "
+                f"commands. NEVER re-issue a tool call that already "
+                f"appears earlier in the conversation; instead, take "
+                f"the next step toward the user's goal, or respond "
+                f"with plain text if you are done. Plain text "
+                f"(no tool call) is how you finish the task and "
+                f"return control to the user."
+            )
+            repo_verification_guidance = build_repo_verification_guidance(
+                effective_cwd,
+            )
+            if repo_verification_guidance:
+                sys_prompt = f"{sys_prompt}\n\n{repo_verification_guidance}"
+        if enabled_tools:
+            execution_parts = [
+                "Use tools whenever they materially improve correctness, "
+                "completeness, grounding, or verification. Do not stop "
+                "early when another tool call would materially improve the "
+                "result. If you say you will inspect, edit, run, verify, or "
+                "check something, make the corresponding tool call in the "
+                "SAME response instead of promising future action. If a tool "
+                "returns partial, empty, or unhelpful results, change "
+                "strategy instead of blindly repeating the same call. Keep "
+                "working until the task is complete AND verified, then end "
+                "with plain text. Before reporting completion, verify that "
+                "the changed behavior actually works, and report failing "
+                "checks faithfully instead of implying success.",
+            ]
+            if task_execution_guidance:
+                execution_parts.append(task_execution_guidance)
+            if verification_execution_guidance:
+                execution_parts.append(verification_execution_guidance)
+            if runbook_execution_guidance:
+                execution_parts.append(runbook_execution_guidance)
+            if browser_verification_guidance:
+                execution_parts.append(browser_verification_guidance)
+            sys_prompt = (
+                f"{sys_prompt}\n\n"
+                f"## Execution discipline\n\n"
+                f"{execution_parts[0]}"
+            )
+            if len(execution_parts) > 1:
+                sys_prompt = f"{sys_prompt}\n\n" + "\n\n".join(execution_parts[1:])
+            if task_section:
+                sys_prompt = f"{sys_prompt}\n\n{task_section}"
+            if verification_section:
+                sys_prompt = f"{sys_prompt}\n\n{verification_section}"
+            if runbook_section:
+                sys_prompt = f"{sys_prompt}\n\n{runbook_section}"
+            capabilities = self._host._detect_client_runtime_capabilities()
+            if bool(getattr(capabilities, "supports_parallel_tool_calls", False)):
+                sys_prompt = (
+                    f"{sys_prompt}\n\n"
+                    f"## Parallel tool calls\n\n"
+                    f"When multiple tool calls are independent and the "
+                    f"result of one does not determine the arguments of "
+                    f"another, emit them in the SAME assistant turn instead "
+                    f"of serializing them one-by-one. This is especially "
+                    f"useful for parallel read-only inspection such as "
+                    f"multiple `read_file` calls, read-only `bash` checks, "
+                    f"or separate `holonet` lookups. Keep dependent steps, "
+                    f"writes, browser interaction sequences, and any "
+                    f"read-after-write verification serialized."
+                )
+        tool_guidance = build_model_tool_guidance(enabled_tools)
+        if tool_guidance:
+            sys_prompt = f"{sys_prompt}\n\n{tool_guidance}"
+        skill_hints = build_skill_hint_section(enabled_skills)
+        if skill_hints:
+            sys_prompt = f"{sys_prompt}\n\n{skill_hints}"
+        skill_discovery = build_skill_discovery_section(
+            enabled_skills,
+            context_window_tokens=self._host._resolve_context_window(),
+        )
+        if skill_discovery:
+            sys_prompt = f"{sys_prompt}\n\n{skill_discovery}"
+        if self._host._task_continue_nudge:
+            sys_prompt = (
+                f"{sys_prompt}\n\n"
+                f"## Continuation Reminder\n\n"
+                f"{self._host._task_continue_nudge}"
+            )
+            self._host._task_continue_nudge = None
+        if self._host._verification_continue_nudge:
+            sys_prompt = (
+                f"{sys_prompt}\n\n"
+                f"## Browser Verification Reminder\n\n"
+                f"{self._host._verification_continue_nudge}"
+            )
+            self._host._verification_continue_nudge = None
+        if self._host._file_tool_continue_nudge:
+            sys_prompt = (
+                f"{sys_prompt}\n\n"
+                f"## File Tool Recovery Reminder\n\n"
+                f"{self._host._file_tool_continue_nudge}"
+            )
+            self._host._file_tool_continue_nudge = None
+        if self._host._subagent_continue_nudge:
+            sys_prompt = (
+                f"{sys_prompt}\n\n"
+                f"## Background Task Reminder\n\n"
+                f"{self._host._subagent_continue_nudge}"
+            )
+            self._host._subagent_continue_nudge = None
+
+        api_messages = self._host._build_api_messages_native(sys_prompt)
+        native_tool_schemas = build_native_tool_schemas(enabled_tools)
+        self._host._trace_event(
+            "agent_turn_begin",
+            turn=self._host._agent_turn,
+            continuation=(self._host._agent_turn > 1),
+            enabled_tools=enabled_tools,
+            enabled_skills=[skill.name for skill in enabled_skills],
+            browser_verification_active=self._host._browser_verification_active,
+            browser_verification_reason=self._host._browser_verification_reason,
+            api_message_count=len(api_messages),
+            last_user_excerpt=_find_last_user_excerpt(api_messages),
+        )
+        try:
+            if native_tool_schemas:
+                self._host._stream = self._host.client.stream_chat(
+                    messages=api_messages,
+                    tools=native_tool_schemas,
+                )
+            else:
+                self._host._stream = self._host.client.stream_chat(messages=api_messages)
+        except Exception as exc:
+            self._host._trace_event(
+                "stream_open_failed",
+                turn=self._host._agent_turn,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
+        self._host._trace_event(
+            "stream_opened",
+            turn=self._host._agent_turn,
+            tool_schema_names=enabled_tools if native_tool_schemas else [],
+        )
+        self._host._stream_content = []
+        self._host._stream_reasoning_chars = 0
+        if "bash" in enabled_tools:
+            self._host._stream_bash_detector = BashStreamDetector()
+        else:
+            self._host._stream_bash_detector = None
+
+    def build_api_messages_native(self, sys_prompt: str) -> list[dict]:
+        """Build the api_messages list in native tool-call shape."""
+        api_messages: list[dict] = [{"role": "system", "content": sys_prompt}]
+        ordered = self._host._api_ordered_messages()
+
+        def _append_text_merging(role: str, content: str) -> None:
+            if not content:
+                return
+            if (
+                len(api_messages) > 1
+                and api_messages[-1].get("role") == role
+                and "tool_calls" not in api_messages[-1]
+            ):
+                api_messages[-1]["content"] = (
+                    api_messages[-1]["content"].rstrip() + "\n\n" + content
+                )
+                return
+            api_messages.append({"role": role, "content": content})
+
+        i = 0
+        n = len(ordered)
+        while i < n:
+            m = ordered[i]
+
+            if m.is_summary:
+                _append_text_merging(
+                    "user",
+                    "[summary of earlier conversation, provided by the "
+                    "harness — treat as authoritative context, not a "
+                    "user turn]\n\n" + m.raw_text,
+                )
+                i += 1
+                continue
+
+            if _api_role_for_message(m) == "user" and not _message_has_tool_artifact(m):
+                if m.synthetic:
+                    i += 1
+                    continue
+                _append_text_merging("user", m.raw_text)
+                i += 1
+                continue
+
+            if _api_role_for_message(m) == "assistant" and not _message_has_tool_artifact(m):
+                if m.synthetic:
+                    i += 1
+                    continue
+                tool_cards: list[ToolArtifact] = []
+                j = i + 1
+                while j < n and _message_has_tool_artifact(ordered[j]):
+                    card = _message_tool_artifact(ordered[j])
+                    if card is not None:
+                        tool_cards.append(card)
+                    j += 1
+
+                if tool_cards:
+                    api_messages.append(_assistant_with_tool_calls(m.raw_text or "", tool_cards))
+                    for card in tool_cards:
+                        api_messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": card.tool_call_id,
+                                "content": _tool_card_content_for_api(card),
+                            }
+                        )
+                else:
+                    _append_text_merging("assistant", m.raw_text)
+                i = j
+                continue
+
+            if _message_has_tool_artifact(m):
+                card = _message_tool_artifact(m)
+                if card is None:
+                    i += 1
+                    continue
+                tool_cards = [card]
+                j = i + 1
+                while j < n and _message_has_tool_artifact(ordered[j]):
+                    next_card = _message_tool_artifact(ordered[j])
+                    if next_card is not None:
+                        tool_cards.append(next_card)
+                    j += 1
+                api_messages.append(_assistant_with_tool_calls("", tool_cards))
+                for card in tool_cards:
+                    api_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": card.tool_call_id,
+                            "content": _tool_card_content_for_api(card),
+                        }
+                    )
+                i = j
+                continue
+
+            i += 1
+
+        return api_messages
+
+    def pump_stream(self) -> None:
+        """Drain any pending stream events and update accumulators."""
+        if self._host._stream is None:
+            return
+
+        events = self._host._stream.drain()
+        for ev in events:
+            if isinstance(ev, StreamStarted):
+                self._host._trace_event("stream_started", turn=self._host._agent_turn)
+            elif isinstance(ev, ReasoningChunk):
+                self._host._stream_reasoning_chars += len(ev.text)
+            elif isinstance(ev, ContentChunk):
+                self._host._stream_content.append(ev.text)
+                if self._host._stream_bash_detector is not None:
+                    self._host._stream_bash_detector.feed(ev.text)
+            elif isinstance(ev, StreamEnded):
+                raw_content = "".join(self._host._stream_content).strip()
+                if self._host._stream_bash_detector is not None:
+                    self._host._stream_bash_detector.flush()
+                    display_content = self._host._stream_bash_detector.cleaned_text().strip()
+                    legacy_blocks = self._host._stream_bash_detector.completed()
+                    self._host._stream_bash_detector = None
+                else:
+                    display_content = raw_content
+                    legacy_blocks = []
+                native_calls = list(getattr(ev, "tool_calls", ()) or ())
+                self._host._trace_event(
+                    "stream_end",
+                    turn=self._host._agent_turn,
+                    finish_reason=ev.finish_reason,
+                    finish_reason_reported=bool(getattr(ev, "finish_reason_reported", True)),
+                    assistant_excerpt=_trace_clip_text(raw_content, limit=400),
+                    reasoning_chars=self._host._stream_reasoning_chars,
+                    native_tool_calls=[
+                        _trace_tool_call_summary(tc) for tc in native_calls
+                    ],
+                    legacy_block_count=len(legacy_blocks),
+                )
+
+                if raw_content:
+                    self._append(
+                        self._message(
+                            "successor",
+                            raw_content,
+                            display_text=display_content,
+                        )
+                    )
+                elif legacy_blocks or native_calls:
+                    self._append(
+                        self._message(
+                            "successor",
+                            "",
+                            display_text="",
+                        )
+                    )
+                else:
+                    self._append(
+                        self._message(
+                            "successor",
+                            "(no answer — model produced only reasoning)",
+                        )
+                    )
+                self._host._last_usage = ev.usage
+                self._host._stream = None
+                self._host._stream_content = []
+                self._host._stream_reasoning_chars = 0
+                self._host._streaming_verb_cache = {}
+
+                any_ran = False
+                if native_calls:
+                    any_ran |= self._host._dispatch_native_tool_calls(
+                        native_calls,
+                        stream_finish_reason=ev.finish_reason,
+                        stream_finish_reason_reported=bool(
+                            getattr(ev, "finish_reason_reported", True)
+                        ),
+                    )
+                if legacy_blocks:
+                    any_ran |= self._host._dispatch_streamed_bash_blocks(legacy_blocks)
+                self._host._trace_event(
+                    "tool_dispatch_batch",
+                    turn=self._host._agent_turn,
+                    native_tool_count=len(native_calls),
+                    legacy_block_count=len(legacy_blocks),
+                    any_ran=any_ran,
+                    runner_count=len(self._host._running_tools),
+                )
+
+                if any_ran and self._host._agent_turn > 0:
+                    if self._host._running_tools:
+                        self._host._trace_event(
+                            "continuation_pending",
+                            turn=self._host._agent_turn,
+                            runner_count=len(self._host._running_tools),
+                        )
+                        self._host._pending_continuation = True
+                    else:
+                        self._host._pending_continuation = False
+                        self._host._trace_event(
+                            "continuation_immediate",
+                            turn=self._host._agent_turn,
+                        )
+                        self._host._begin_agent_turn()
+                    return
+
+                if (
+                    self._host._agent_turn > 0
+                    and self._host._task_ledger.has_in_progress()
+                    and not self._host._task_continue_nudged_this_turn
+                ):
+                    nudge = build_task_continue_nudge(self._host._task_ledger)
+                    if nudge:
+                        self._host._task_continue_nudged_this_turn = True
+                        self._host._task_continue_nudge = nudge
+                        active = self._host._task_ledger.in_progress_task()
+                        self._host._trace_event(
+                            "task_continue_nudge",
+                            turn=self._host._agent_turn,
+                            active_task=active.active_form if active else "",
+                            assistant_excerpt=_trace_clip_text(raw_content, limit=320),
+                        )
+                        self._host._begin_agent_turn()
+                        return
+
+                self._host._trace_event(
+                    "agent_turn_complete",
+                    turn=self._host._agent_turn,
+                    reason="plain_text_or_no_runnable_tools",
+                )
+                self._host._agent_turn = 0
+            elif isinstance(ev, StreamError):
+                partial = "".join(self._host._stream_content)
+                self._host._trace_event(
+                    "stream_error",
+                    turn=self._host._agent_turn,
+                    message=ev.message,
+                    partial_excerpt=_trace_clip_text(partial, limit=400),
+                )
+                if partial:
+                    msg = f"{partial}\n\n[stream interrupted: {ev.message}]"
+                else:
+                    msg = self.format_stream_error(ev.message)
+                self._append(self._message("successor", msg, synthetic=True))
+                self._host._stream = None
+                self._host._stream_content = []
+                self._host._stream_reasoning_chars = 0
+                self._host._streaming_verb_cache = {}
+                self._host._stream_bash_detector = None
+                self._host._agent_turn = 0
+
+    def format_stream_error(self, raw: str) -> str:
+        """Translate a raw stream error into a friendlier hint."""
+        provider_cfg = self._host.profile.provider or {}
+        base_url = provider_cfg.get("base_url", "http://localhost:8080")
+        lower = raw.lower()
+        is_conn_refused = (
+            "connection refused" in lower
+            or "errno 111" in lower
+            or "could not connect" in lower
+        )
+        is_dns = (
+            "name or service not known" in lower
+            or "nodename nor servname" in lower
+            or "temporary failure in name resolution" in lower
+        )
+        is_unreachable = "network is unreachable" in lower
+        is_timeout = (
+            "timed out" in lower
+            or "timeout" in lower
+            or "the read operation timed out" in lower
+        )
+        if is_conn_refused or is_dns or is_unreachable or is_timeout:
+            return (
+                f"[no server at {base_url}]\n"
+                f"\n"
+                f"successor expects an OpenAI-compatible HTTP endpoint at\n"
+                f"the URL above. Three ways to fix this:\n"
+                f"\n"
+                f"  1. Start a local llama.cpp server:\n"
+                f"     llama-server -m <your-model.gguf> --host 0.0.0.0 --port 8080\n"
+                f"\n"
+                f"  2. Quit (Ctrl+C) and run `successor setup` to create\n"
+                f"     a profile against OpenAI or OpenRouter instead.\n"
+                f"\n"
+                f"  3. Open /config and edit the active profile's\n"
+                f"     provider.base_url and provider.api_key fields."
+            )
+        if "http 401" in lower or "unauthorized" in lower:
+            return (
+                f"[unauthorized — {base_url}]\n"
+                f"\n"
+                f"The server rejected the request as unauthorized. Either\n"
+                f"the api_key is missing, malformed, or revoked. Open\n"
+                f"/config and check the active profile's provider.api_key\n"
+                f"field."
+            )
+        if "http 402" in lower or "payment required" in lower:
+            return (
+                f"[out of credits — {base_url}]\n"
+                f"\n"
+                f"The provider says the account is out of credits or owes\n"
+                f"a balance. Top up at the provider dashboard, then retry."
+            )
+        if "http 429" in lower or "too many requests" in lower:
+            return (
+                f"[rate limited by {base_url}]\n"
+                f"\n"
+                f"The provider is throttling requests. Wait a moment and\n"
+                f"retry, or switch to a different model / paid tier in\n"
+                f"the active profile via /config."
+            )
+        return f"[stream failed: {raw}]"

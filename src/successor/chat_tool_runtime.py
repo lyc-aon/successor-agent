@@ -54,7 +54,11 @@ from .skills import (
     build_skill_tool_result,
 )
 from .subagents.cards import SubagentToolCard
-from .subagents.prompt import build_spawn_result_display, build_spawn_result_payload
+from .subagents.prompt import (
+    build_spawn_result_display,
+    build_spawn_result_payload,
+    normalize_subagent_role,
+)
 from .tasks import (
     TaskLedgerError,
     build_task_card_output,
@@ -257,6 +261,7 @@ class ChatToolRuntime:
         prompt: str,
         *,
         name: str = "",
+        role: str = "worker",
         tool_call_id: str | None = None,
     ) -> bool:
         cfg = self._host.profile.subagents
@@ -274,10 +279,12 @@ class ChatToolRuntime:
         if not directive:
             self._append_successor("subagent tool call had no prompt.")
             return False
+        normalized_role = normalize_subagent_role(role)
 
         task = self._host._subagent_manager.spawn_fork(
             directive=directive,
             name=name,
+            role=normalized_role,
             context_snapshot=self._host._subagent_context_snapshot(),
             profile=self._host.profile,
             config=cfg,
@@ -288,6 +295,7 @@ class ChatToolRuntime:
             directive=directive,
             tool_call_id=tool_call_id or _new_tool_call_id(),
             spawn_result=build_spawn_result_payload(task),
+            role=normalized_role,
         )
         self._append(
             self._message(
@@ -1126,9 +1134,11 @@ class ChatToolRuntime:
                 if name == "subagent":
                     prompt = args.get("prompt") if isinstance(args, dict) else ""
                     label = args.get("name") if isinstance(args, dict) else ""
+                    role = args.get("role") if isinstance(args, dict) else "worker"
                     if self.spawn_subagent_task(
                         str(prompt or ""),
                         name=str(label or ""),
+                        role=str(role or "worker"),
                         tool_call_id=call_id,
                     ):
                         any_ran = True

@@ -45,7 +45,6 @@ communicate via a thread-safe queue.
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from dataclasses import dataclass
@@ -53,12 +52,18 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import __version__
+from .chat_agent_loop import (
+    ChatAgentLoop,
+    _api_role_for_message,
+    _message_has_tool_artifact,
+    _message_tool_artifact,
+)
+from .chat_display_runtime import ChatDisplayRuntime
 from .chat_tool_runtime import ChatToolRuntime
 from .config import load_chat_config, save_chat_config
 from .file_tools import (
     FileReadTracker,
     FileReadStateEntry,
-    note_non_read_tool_call,
 )
 from .graphemes import delete_prev_grapheme
 from .playback import RecordingBundle, default_recording_bundle_dir
@@ -79,24 +84,15 @@ from .profiles import (
     PROFILE_REGISTRY,
     Profile,
     get_active_profile,
-    get_profile,
     next_profile,
 )
 from .providers import make_provider
 from .providers.llama import (
     ChatStream,
-    ContentChunk,
     LlamaCppClient,
-    ReasoningChunk,
-    StreamEnded,
-    StreamError,
-    StreamStarted,
 )
 from .render.app import App
 from .render.cells import (
-    ATTR_BOLD,
-    ATTR_DIM,
-    ATTR_ITALIC,
     Grid,
     Style,
 )
@@ -117,31 +113,19 @@ from .bash.runner import (
     BashRunner,
 )
 from .tools_registry import (
-    build_model_tool_guidance,
-    build_native_tool_schemas,
     filter_known,
-    tool_label,
 )
 from .skills import (
-    build_skill_discovery_section,
-    build_skill_hint_section,
     enabled_profile_skills,
 )
 from .tasks import (
     SessionTaskLedger,
-    build_task_continue_nudge,
-    build_task_execution_guidance,
-    build_task_prompt_section,
 )
 from .verification_contract import (
     VerificationLedger,
-    build_verification_execution_guidance,
-    build_verification_prompt_section,
 )
 from .runbook import (
     SessionRunbook,
-    build_runbook_execution_guidance,
-    build_runbook_prompt_section,
 )
 from .subagents.cards import SubagentToolCard
 from .subagents.manager import (
@@ -164,49 +148,32 @@ from .web import (
     vision_runtime_status,
 )
 from .web.verification import (
-    build_browser_verification_guidance,
     classify_browser_verification,
 )
 from .session_trace import SessionTrace, clip_text as _trace_clip_text
-from .render.markdown import (
-    LaidOutLine,
-    LaidOutSpan,
-    PreparedMarkdown,
-)
+from .render.markdown import PreparedMarkdown
 from .render.chat_frame import HitBox, compute_chat_frame
 from .render.chat_header import build_header_plan
 from .render.chat_input import (
     paint_input as paint_input_surface,
     paint_search_bar as paint_search_bar_surface,
 )
-from .render.chat_intro import paint_empty_state as paint_empty_state_surface
 from .render.chat_overlays import (
     paint_arg_mode as paint_arg_mode_overlay,
     paint_help_overlay as paint_help_overlay_surface,
     paint_name_mode as paint_name_mode_overlay,
     paint_no_matches as paint_no_matches_overlay,
 )
-from .render.chat_rows import (
-    RenderedRow,
-    fade_prepainted_rows as fade_prepainted_chat_rows,
-    highlight_spans as highlight_row_spans,
-    paint_chat_row as paint_chat_scene_row,
-    render_md_lines_with_search as render_markdown_rows_with_search,
-    render_subagent_card_rows as render_subagent_chat_card_rows,
-    render_running_tool_card_rows as render_running_chat_card_rows,
-    render_tool_card_rows as render_tool_chat_card_rows,
-)
-from .render.chat_viewport import compute_viewport_decision
+from .render.chat_rows import RenderedRow
 from .render.paint import fill_region, paint_text
 from .render.terminal import Terminal
-from .render.text import ease_out_cubic, hard_wrap, lerp_rgb
+from .render.text import ease_out_cubic, hard_wrap
 from .render.theme import (
     Theme,
     ThemeVariant,
     all_themes,
     blend_variants,
     find_theme_or_fallback,
-    get_theme,
     next_theme,
     normalize_display_mode,
     toggle_display_mode,
@@ -451,203 +418,6 @@ INPUT_HISTORY_MAX = 100
 # Static commands use the static_args() helper. Dynamic commands
 # (e.g. file paths) supply a custom callable.
 
-
-ToolArtifact = ToolCard | SubagentToolCard
-
-
-def _infer_tool_preview(
-    command_text: str,
-) -> tuple[str, str, str] | None:
-    """Parse a (partial) bash command via `preview_bash` and return a
-    (glyph, verb_name, hint) triple for the streaming preview header.
-
-    Returns None when the command is too short, too malformed, or
-    the parser falls back to the generic "bash ?" card with
-    confidence < 0.7. The threshold is deliberately strict so the
-    preview verb only resolves once the parser is reasonably sure
-    — before that the user sees the generic "receiving arguments"
-    header, avoiding flicker on partial input.
-
-    The beauty of this function: it calls the SAME preview_bash that
-    the final card uses, so the inferred verb+params EXACTLY match
-    what the settled card will display. As the command streams in,
-    the preview resolves in stages:
-
-      "cat"                → generic (conf 0.60, too low)
-      "cat > ab"           → write-file, path=ab   (conf 0.90)
-      "cat > about.html"   → write-file, path=about.html
-
-    Risk escalation is preserved: `rm -rf /` shows as DANGER (⚠)
-    even mid-stream because the risk classifier runs on each
-    parse. This is useful — the user sees the danger class
-    resolve immediately, not after the dispatch gate fires.
-    """
-    if not command_text or len(command_text.strip()) < 3:
-        return None
-    try:
-        from .bash import preview_bash
-        from .bash.verbclass import glyph_for_class, verb_class_for
-        card = preview_bash(command_text)
-    except Exception:
-        return None
-    if card.confidence < 0.7:
-        return None
-    cls = verb_class_for(card.verb, card.risk)
-    glyph = glyph_for_class(cls)
-    # Pull the most informative parameter for the hint — usually
-    # the first one (parsers put `path`, `script`, `pattern` first).
-    hint = ""
-    for key, value in card.params:
-        if not value or value == "(missing)":
-            continue
-        # Clip the hint so multi-line heredoc content or very long
-        # paths don't blow out the preview row width.
-        text = str(value).replace("\n", " ").strip()
-        if len(text) > 50:
-            text = text[:47] + "…"
-        hint = f"{key}: {text}"
-        break
-    return (glyph, card.verb, hint)
-
-
-def _extract_command_tail(raw_args: str) -> str:
-    """Extract the progressively-streaming `command` field from a
-    partial tool_call arguments JSON blob, returning the unescaped
-    command body so the user sees readable heredoc content instead
-    of `\\n` escapes.
-
-    Input: a partial JSON string like:
-        '{"command":"cat > foo.html <<\\'EOF\\'\\n<!DOCTYPE html>\\n<h'
-    Output:
-        'cat > foo.html <<\'EOF\'\n<!DOCTYPE html>\n<h'
-
-    Best-effort — falls back to the raw text when the JSON is too
-    malformed to find the opening `"command":"` marker, so the
-    preview always shows SOMETHING rather than blanking on parse
-    failure. Doesn't need to produce a syntactically valid result
-    because this is a display-only preview.
-    """
-    if not raw_args:
-        return ""
-    # Look for the start of the command field's string value. Accept
-    # variants with or without whitespace around the colon.
-    for key_marker in ('"command":"', '"command": "'):
-        idx = raw_args.find(key_marker)
-        if idx != -1:
-            body = raw_args[idx + len(key_marker):]
-            # Progressive JSON unescape. We bail on unknown escapes
-            # rather than raising — the stream is still arriving
-            # and a partial escape is normal.
-            out: list[str] = []
-            i = 0
-            while i < len(body):
-                ch = body[i]
-                if ch == '"':
-                    # End of the string value — stop here
-                    break
-                if ch == "\\" and i + 1 < len(body):
-                    nxt = body[i + 1]
-                    if nxt == "n":
-                        out.append("\n")
-                        i += 2
-                        continue
-                    if nxt == "t":
-                        out.append("\t")
-                        i += 2
-                        continue
-                    if nxt == "r":
-                        out.append("\r")
-                        i += 2
-                        continue
-                    if nxt == '"':
-                        out.append('"')
-                        i += 2
-                        continue
-                    if nxt == "\\":
-                        out.append("\\")
-                        i += 2
-                        continue
-                    if nxt == "/":
-                        out.append("/")
-                        i += 2
-                        continue
-                    # Unknown escape — just emit the backslash and move on
-                    out.append("\\")
-                    i += 1
-                    continue
-                out.append(ch)
-                i += 1
-            return "".join(out)
-    # Couldn't find the marker — show the raw JSON so the user at
-    # least sees progress. Better than a blank preview.
-    return raw_args
-
-
-def _assistant_with_tool_calls(content: str, cards: list[ToolArtifact]) -> dict:
-    """Build the assistant-message dict for an assistant turn that
-    issued one or more tool calls.
-
-    Each card becomes one entry in the `tool_calls` list with its
-    call id, native tool name, and JSON arguments. This matches the
-    OpenAI tool-call shape that Qwen's chat template renders into
-    native `<tool_call>` blocks.
-    """
-    return {
-        "role": "assistant",
-        "content": content or "",
-        "tool_calls": [
-            {
-                "id": card.tool_call_id,
-                "type": "function",
-                "function": {
-                    "name": _tool_name_for_card(card),
-                    "arguments": json.dumps(_tool_arguments_for_card(card)),
-                },
-            }
-            for card in cards
-        ],
-    }
-
-
-def _tool_card_content_for_api(card: ToolArtifact) -> str:
-    """Build the message content for a ToolCard going back to the model.
-
-    Sent as a `role: "tool"` message. Qwen 3.5's chat template renders
-    role=tool as `<|im_start|>user\\n<tool_response>\\n…\\n</tool_response>`,
-    which matches the format Qwen was trained on for tool use. The model
-    natively recognizes empty content + role=tool as "command ran with
-    no output" — exactly what writes / mkdir / chmod / redirects produce
-    on success — and does NOT re-run.
-
-    Earlier iterations wrapped the content in `<tool-output name="bash" …>`
-    XML inside a user-role message. The model has never seen that format
-    in training, treated it as random user text, and looped on writes
-    because it couldn't tell success from failure. The fix is structural,
-    not prompted: use the role the chat template understands.
-
-    Content shape (mirrors free-code's pattern at BashTool.tsx:617-622):
-      - successful command (exit 0):       stdout (or empty string)
-      - failed command   (exit non-zero):  stdout + stderr + exit marker
-      - command with stderr but exit 0:    stdout + stderr (no marker)
-
-    No exit-code prefix for success. The empty-content / role=tool
-    pairing is the success signal — adding prose dilutes it.
-    """
-    if isinstance(card, SubagentToolCard):
-        return card.spawn_result
-    if card.api_content_override is not None:
-        return card.api_content_override
-
-    parts: list[str] = []
-    if card.output:
-        parts.append(card.output.rstrip())
-    if card.stderr and card.stderr.strip():
-        parts.append(card.stderr.rstrip())
-    if card.exit_code is not None and card.exit_code != 0:
-        parts.append(f"[command exited with code {card.exit_code}]")
-    return "\n".join(parts)
-
-
 def static_args(*choices: str) -> Callable[[str], list[str]]:
     """Build a completer for a fixed set of choices.
 
@@ -827,234 +597,6 @@ def find_slash_command(name: str) -> SlashCommand | None:
         if n in cmd.aliases:
             return cmd
     return None
-
-
-def _extract_json_string_field(raw_args: str, field: str) -> str:
-    """Best-effort extraction of one JSON string field from a partial blob."""
-    if not raw_args:
-        return ""
-    markers = (f'"{field}":"', f'"{field}": "')
-    for key_marker in markers:
-        idx = raw_args.find(key_marker)
-        if idx == -1:
-            continue
-        body = raw_args[idx + len(key_marker):]
-        out: list[str] = []
-        i = 0
-        while i < len(body):
-            ch = body[i]
-            if ch == '"':
-                break
-            if ch == "\\" and i + 1 < len(body):
-                nxt = body[i + 1]
-                if nxt == "n":
-                    out.append("\n")
-                    i += 2
-                    continue
-                if nxt == "t":
-                    out.append("\t")
-                    i += 2
-                    continue
-                if nxt == "r":
-                    out.append("\r")
-                    i += 2
-                    continue
-                if nxt in ('"', "\\", "/"):
-                    out.append(nxt)
-                    i += 2
-                    continue
-                out.append("\\")
-                i += 1
-                continue
-            out.append(ch)
-            i += 1
-        return "".join(out)
-    return raw_args
-
-
-def _tool_preview_text(name: str, raw_args: str) -> str:
-    if name == "bash":
-        return _extract_command_tail(raw_args)
-    if name == "task":
-        content = _extract_json_string_field(raw_args, "content")
-        return f"update tasks {content}" if content else "update tasks"
-    if name == "skill":
-        skill = _extract_json_string_field(raw_args, "skill")
-        task = _extract_json_string_field(raw_args, "task")
-        bits = [bit for bit in (skill, task) if bit]
-        return " ".join(bits) if bits else raw_args
-    if name == "subagent":
-        return _extract_json_string_field(raw_args, "prompt")
-    if name == "holonet":
-        provider = _extract_json_string_field(raw_args, "provider")
-        query = _extract_json_string_field(raw_args, "query")
-        url = _extract_json_string_field(raw_args, "url")
-        bits = [bit for bit in (provider, query or url) if bit]
-        return " ".join(bits) if bits else raw_args
-    if name == "browser":
-        action = _extract_json_string_field(raw_args, "action")
-        target = _extract_json_string_field(raw_args, "target")
-        url = _extract_json_string_field(raw_args, "url")
-        bits = [bit for bit in (action, target or url) if bit]
-        return " ".join(bits) if bits else raw_args
-    return raw_args
-
-
-def _message_has_tool_artifact(msg: "_Message") -> bool:
-    return msg.tool_card is not None or msg.subagent_card is not None
-
-
-def _message_tool_artifact(msg: "_Message") -> ToolArtifact | None:
-    if msg.tool_card is not None:
-        return msg.tool_card
-    return msg.subagent_card
-
-
-def _api_role_for_message(msg: "_Message") -> str:
-    if msg.api_role_override:
-        return msg.api_role_override
-    if msg.role == "successor":
-        return "assistant"
-    return msg.role
-
-
-def _tool_name_for_card(card: ToolArtifact) -> str:
-    return "subagent" if isinstance(card, SubagentToolCard) else card.tool_name
-
-
-def _tool_arguments_for_card(card: ToolArtifact) -> dict[str, Any]:
-    if isinstance(card, SubagentToolCard):
-        payload = {"prompt": card.directive}
-        if card.name:
-            payload["name"] = card.name
-        return payload
-    if card.tool_arguments:
-        return dict(card.tool_arguments)
-    return {"command": card.raw_command}
-
-
-def _find_last_user_excerpt(api_messages: list[dict[str, Any]]) -> str:
-    for msg in reversed(api_messages):
-        if msg.get("role") != "user":
-            continue
-        content = msg.get("content")
-        if isinstance(content, str) and content.strip():
-            return _trace_clip_text(content, limit=320)
-    return ""
-
-
-def _trace_tool_call_summary(tc: dict[str, Any]) -> dict[str, object]:
-    name = str(tc.get("name") or "")
-    args = tc.get("arguments") or {}
-    entry: dict[str, object] = {
-        "id": str(tc.get("id") or ""),
-        "name": name,
-    }
-    raw_arguments = str(tc.get("raw_arguments") or "")
-    parse_error = str(tc.get("arguments_parse_error") or "").strip()
-    parse_error_pos = tc.get("arguments_parse_error_pos")
-    if raw_arguments:
-        entry["raw_arguments_len"] = len(raw_arguments)
-    if parse_error:
-        entry["arguments_parse_error"] = parse_error
-        if isinstance(parse_error_pos, int):
-            entry["arguments_parse_error_pos"] = parse_error_pos
-    if name == "bash" and isinstance(args, dict):
-        entry["command_excerpt"] = _trace_clip_text(
-            str(args.get("command") or ""),
-            limit=320,
-        )
-    elif name == "bash" and raw_arguments:
-        entry["raw_arguments_excerpt"] = _trace_clip_text(raw_arguments, limit=320)
-    elif name == "task" and isinstance(args, dict):
-        items = args.get("items")
-        if isinstance(items, list):
-            entry["task_count"] = len(items)
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                if str(item.get("status") or "").strip().lower() != "in_progress":
-                    continue
-                entry["active_task"] = _trace_clip_text(
-                    str(item.get("active_form") or item.get("content") or ""),
-                    limit=320,
-                )
-                break
-    elif name == "verify" and isinstance(args, dict):
-        items = args.get("items")
-        if isinstance(items, list):
-            entry["assertion_count"] = len(items)
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                if str(item.get("status") or "").strip().lower() != "in_progress":
-                    continue
-                entry["active_claim"] = _trace_clip_text(
-                    str(item.get("claim") or ""),
-                    limit=320,
-                )
-                entry["active_evidence"] = _trace_clip_text(
-                    str(item.get("evidence") or ""),
-                    limit=320,
-                )
-                break
-    elif name == "runbook" and isinstance(args, dict):
-        if bool(args.get("clear")):
-            entry["cleared"] = True
-        objective = str(args.get("objective") or "").strip()
-        if objective:
-            entry["objective_excerpt"] = _trace_clip_text(objective, limit=320)
-        hypothesis = str(args.get("active_hypothesis") or "").strip()
-        if hypothesis:
-            entry["active_hypothesis"] = _trace_clip_text(hypothesis, limit=320)
-        status = str(args.get("status") or "").strip()
-        if status:
-            entry["status"] = status
-        baseline_status = str(args.get("baseline_status") or "").strip()
-        if baseline_status:
-            entry["baseline_status"] = baseline_status
-        evaluator = args.get("evaluator")
-        if isinstance(evaluator, list):
-            entry["evaluator_count"] = len(evaluator)
-        attempt = args.get("attempt")
-        if isinstance(attempt, dict):
-            entry["attempt_decision"] = str(attempt.get("decision") or "")
-            attempt_hypothesis = str(attempt.get("hypothesis") or "").strip()
-            if attempt_hypothesis:
-                entry["attempt_hypothesis"] = _trace_clip_text(
-                    attempt_hypothesis,
-                    limit=320,
-                )
-    elif name == "skill" and isinstance(args, dict):
-        entry["skill_name"] = str(args.get("skill") or "")
-        task = str(args.get("task") or "")
-        if task:
-            entry["task_excerpt"] = _trace_clip_text(task, limit=320)
-    elif name == "subagent" and isinstance(args, dict):
-        entry["prompt_excerpt"] = _trace_clip_text(
-            str(args.get("prompt") or ""),
-            limit=320,
-        )
-        label = str(args.get("name") or "")
-        if label:
-            entry["task_name"] = label
-    elif name == "holonet" and isinstance(args, dict):
-        entry["provider"] = str(args.get("provider") or "")
-        entry["query_excerpt"] = _trace_clip_text(
-            str(args.get("query") or args.get("url") or ""),
-            limit=320,
-        )
-    elif name == "browser" and isinstance(args, dict):
-        entry["action"] = str(args.get("action") or "")
-        entry["target_excerpt"] = _trace_clip_text(
-            str(args.get("target") or args.get("url") or ""),
-            limit=320,
-        )
-    elif args:
-        entry["arguments_excerpt"] = _trace_clip_text(str(args), limit=320)
-    return entry
-
-
 def _native_tool_call_failure_message(
     tc: dict[str, Any],
     *,
@@ -2062,6 +1604,24 @@ class SuccessorChat(App):
         # raw_text is set at construction and never mutated.
         self._cached_total_tokens: int | None = None
         self._cached_total_tokens_key: tuple[int, int] = (-1, -1)
+        self._agent_loop = ChatAgentLoop(
+            self,
+            _Message,
+            densities=DENSITIES,
+            find_density=find_density,
+            max_agent_turns_default=MAX_AGENT_TURNS,
+        )
+        self._display_runtime = ChatDisplayRuntime(
+            self,
+            rendered_row_cls=_RenderedRow,
+            user_prefix=_USER_PREFIX,
+            successor_prefix=_SUCCESSOR_PREFIX,
+            prefix_width=_PREFIX_W,
+            fade_in_s=FADE_IN_S,
+            spinner_fps=SPINNER_FPS,
+            spinner_frames=SPINNER_FRAMES,
+            reasoning_preview_chars=_REASONING_PREVIEW_CHARS,
+        )
         self._tool_runtime = ChatToolRuntime(self, _Message)
 
     def run(self) -> None:
@@ -3558,8 +3118,9 @@ class SuccessorChat(App):
         if len(directive) > 72:
             directive = directive[:71].rstrip() + "…"
         label = f" {task.name}" if task.name else ""
+        kind = "verify" if task.role == "verification" else "worker"
         header = (
-            f"{task.task_id}{label}  {task.status:<9} {mm:02d}:{ss:02d}  "
+            f"{task.task_id}{label}  {kind:<6} {task.status:<9} {mm:02d}:{ss:02d}  "
             f"{directive}"
         )
         lines = [header]
@@ -3728,850 +3289,13 @@ class SuccessorChat(App):
     # ─── Submission ───
 
     def _submit(self) -> None:
-        text = self.input_buffer.strip()
-        if text:
-            self._trace_event(
-                "user_submit",
-                text=text,
-                excerpt=_trace_clip_text(text, limit=320),
-            )
-        # Add the submitted text to the input history ring buffer
-        # BEFORE clearing the buffer. _history_add dedupes consecutive
-        # duplicates and skips empty strings, so /profile cycle spam
-        # and accidental empty Enters do not pollute the history.
-        self._history_add(text)
-        # Drop out of recall mode whether or not we used a recalled
-        # entry — the act of submitting always returns the user to a
-        # fresh "ready to type" state.
-        if self._history_in_recall_mode():
-            self._history_exit_recall(restore_draft=False)
-        self.input_buffer = ""
-
-        # Cancel any in-flight cache warmer — the user's message takes
-        # priority over background warming. If we let the warmer keep
-        # running, the user's request would queue behind it on the
-        # llama.cpp slot and they'd wait LONGER than if we'd never
-        # warmed at all.
-        if self._cache_warmer is not None:
-            self._cache_warmer.close()
-            self._cache_warmer = None
-
-        # Cancel any in-flight bash runners from a previous turn. The
-        # user starting a new turn voids the continuation queue —
-        # whatever the previous turn was doing, the new message takes
-        # over. Runners will surface as cancelled cards on the next
-        # tick via _pump_running_tools.
-        if self._running_tools:
-            self._cancel_running_tools()
-            self._pending_continuation = False
-        note_non_read_tool_call(self._file_read_tracker)
-
-        if text in ("/quit", "/exit", "/q"):
-            self.stop()
-            return
-
-        # /config — open the three-pane profile config menu
-        # The chat stops with _pending_action = "config" so the cli
-        # main loop opens the config menu, then resumes the chat.
-        if text == "/config":
-            if self._has_active_subagent_tasks():
-                self.messages.append(_Message(
-                    "successor",
-                    "wait for background subagent tasks to finish before opening /config.",
-                    synthetic=True,
-                ))
-                return
-            self._pending_action = "config"
-            self.stop()
-            return
-
-        # /fork <directive> — spawn a background subagent with the
-        # current chat context snapshot and a new directive.
-        if text.startswith("/fork"):
-            parts = text.split(maxsplit=1)
-            if len(parts) < 2 or not parts[1].strip():
-                self.messages.append(_Message(
-                    "successor",
-                    "usage: /fork <directive>. Spawns a background subagent that inherits the current chat context.",
-                    synthetic=True,
-                ))
-                return
-            self._handle_fork_cmd(parts[1].strip())
-            return
-
-        # /tasks — list queued/running/completed background tasks
-        if text == "/tasks":
-            self._handle_tasks_cmd()
-            return
-
-        # /task-cancel <id|all> — request cancellation
-        if text.startswith("/task-cancel"):
-            parts = text.split(maxsplit=1)
-            if len(parts) < 2:
-                self.messages.append(_Message(
-                    "successor",
-                    "usage: /task-cancel <task-id|all>",
-                    synthetic=True,
-                ))
-                return
-            self._handle_task_cancel_cmd(parts[1].strip())
-            return
-
-        # /bash <command> — run a bash command client-side and render
-        # it as a structured tool card. The user message preserves the
-        # /bash command verbatim; a tool-message follows with the parsed
-        # ToolCard. Dispatch goes through the SAME async runner path
-        # as the agent loop's tool calls so the user gets the live
-        # animated execution UX even for manual commands. The /bash
-        # path doesn't queue a continuation (no agent turn is in
-        # flight), so the runner finishes and the card settles
-        # without firing a model call.
-        if text.startswith("/bash"):
-            parts = text.split(maxsplit=1)
-            if len(parts) < 2 or not parts[1].strip():
-                self.messages.append(_Message(
-                    "successor",
-                    "usage: /bash <command>. The command runs locally and "
-                    "renders as a structured tool card. Dangerous commands "
-                    "(rm -rf /, sudo, curl|sh, etc.) are refused with an "
-                    "explanation.",
-                    synthetic=True,
-                ))
-                return
-            command = parts[1].strip()
-            # Echo the command as a synthetic user-style message so the
-            # scrollback shows the input that triggered the card
-            self.messages.append(_Message(
-                "user",
-                f"`{command}`",
-                synthetic=True,
-            ))
-            bash_cfg = resolve_bash_config(self.profile)
-            self._spawn_bash_runner(command, bash_cfg=bash_cfg)
-            return
-
-        # /budget — show context fill % + token usage stats
-        if text == "/budget":
-            self._handle_budget_cmd()
-            return
-
-        # /burn N — inject synthetic context to stress-test compaction
-        if text.startswith("/burn"):
-            parts = text.split()
-            if len(parts) < 2:
-                self.messages.append(_Message(
-                    "successor",
-                    "usage: /burn <N>  → inject N synthetic tokens of "
-                    "varied content into the chat history. Use this to "
-                    "stress-test compaction without burning real model "
-                    "calls. Pair with /budget to watch the fill % climb "
-                    "and /compact to fire the summarizer.",
-                    synthetic=True,
-                ))
-                return
-            try:
-                n_tokens = int(parts[1])
-            except ValueError:
-                self.messages.append(_Message(
-                    "successor",
-                    f"unknown /burn argument '{parts[1]}'. Expected an integer token count.",
-                    synthetic=True,
-                ))
-                return
-            self._handle_burn_cmd(n_tokens)
-            return
-
-        # /compact — manually fire compaction against the live client
-        if text == "/compact":
-            self._handle_compact_cmd()
-            return
-
-        # /profile         — show current profile and available options
-        # /profile <name>  — switch to a registered profile by name
-        # /profile cycle   — cycle to the next profile in registry order
-        if text.startswith("/profile"):
-            parts = text.split(maxsplit=1)
-            available_names = sorted(PROFILE_REGISTRY.names())
-            if len(parts) == 1:
-                names = ", ".join(available_names) or "(none loaded)"
-                hint = (
-                    f"current profile: {self.profile.name}"
-                    + (f" — {self.profile.description}" if self.profile.description else "")
-                    + f". Available: {names}. "
-                    f"Use /profile <name> or Ctrl+P to cycle."
-                )
-                self.messages.append(_Message("successor", hint, synthetic=True))
-                return
-            arg = parts[1].strip().lower()
-            if arg == "cycle":
-                self._cycle_profile()
-                return
-            target = get_profile(arg)
-            if target is None:
-                self.messages.append(
-                    _Message(
-                        "successor",
-                        f"no profile named '{arg}'. try one of: "
-                        f"{', '.join(available_names) or '(none)'}.",
-                        synthetic=True,
-                    )
-                )
-                return
-            self._set_profile(target)
-            return
-
-        # /theme       — show current theme and available options
-        # /theme <name>— switch to a registered theme by name
-        # /theme cycle — cycle to next theme in the supported catalog
-        if text.startswith("/theme"):
-            parts = text.split(maxsplit=1)
-            available_names = [theme.name for theme in all_themes()]
-            if len(parts) == 1:
-                names = ", ".join(available_names) or "(none loaded)"
-                hint = (
-                    f"current theme: {self.theme.name} {self.theme.icon}. "
-                    f"Available: {names}. Use /theme <name> or Ctrl+T to cycle."
-                )
-                self.messages.append(_Message("successor", hint, synthetic=True))
-                return
-            arg = parts[1].strip().lower()
-            if arg == "cycle":
-                self._cycle_theme()
-                return
-            target = get_theme(arg)
-            if target is None:
-                self.messages.append(
-                    _Message(
-                        "successor",
-                        f"no theme named '{arg}'. try one of: "
-                        f"{', '.join(available_names) or '(none)'}.",
-                        synthetic=True,
-                    )
-                )
-                return
-            self._set_theme(target)
-            return
-
-        # /mode         — show current display mode
-        # /mode dark    — switch to dark mode (preserve theme)
-        # /mode light   — switch to light mode (preserve theme)
-        # /mode toggle  — flip dark↔light
-        if text.startswith("/mode"):
-            parts = text.split(maxsplit=1)
-            if len(parts) == 1:
-                hint = (
-                    f"display mode: {self.display_mode}. "
-                    f"Use /mode dark|light|toggle or Alt+D to flip. "
-                    f"Mode is independent of theme — switching mode keeps "
-                    f"the same theme."
-                )
-                self.messages.append(_Message("successor", hint, synthetic=True))
-                return
-            arg = parts[1].strip().lower()
-            if arg == "toggle":
-                self._toggle_display_mode()
-                return
-            if arg in ("dark", "light"):
-                self._set_display_mode(arg)
-                return
-            self.messages.append(
-                _Message(
-                    "successor",
-                    f"unknown /mode argument '{arg}'. try dark, light, or toggle.",
-                    synthetic=True,
-                )
-            )
-            return
-
-        # /mouse         — show current state
-        # /mouse on      — enable mouse reporting (clickable widgets, scroll wheel)
-        # /mouse off     — disable
-        # /mouse toggle  — flip
-        if text.startswith("/mouse"):
-            parts = text.split(maxsplit=1)
-            if len(parts) == 1:
-                state = "on" if self._mouse_enabled else "off"
-                hint = (
-                    f"mouse: {state}. Off means the terminal owns wheel/selection. "
-                    f"On enables in-chat wheel scrolling and clickable widgets; "
-                    f"hold Shift to drag-select text."
-                )
-                self.messages.append(_Message("successor", hint, synthetic=True))
-                return
-            arg = parts[1].strip().lower()
-            if arg == "on":
-                self._enable_mouse()
-                self.messages.append(
-                    _Message(
-                        "successor",
-                        "mouse on. Click the title-bar widgets, use scroll wheel "
-                        "to navigate history. Hold Shift while click-dragging to "
-                        "use native text selection.",
-                        synthetic=True,
-                    )
-                )
-                return
-            if arg == "off":
-                self._disable_mouse()
-                self.messages.append(
-                    _Message(
-                        "successor",
-                        "mouse off. The terminal owns wheel scrolling and native "
-                        "click-drag selection again; clickable widgets are disabled.",
-                        synthetic=True,
-                    )
-                )
-                return
-            if arg == "toggle":
-                if self._mouse_enabled:
-                    self._disable_mouse()
-                else:
-                    self._enable_mouse()
-                return
-            self.messages.append(
-                _Message(
-                    "successor",
-                    f"unknown /mouse argument '{arg}'. try on, off, or toggle.",
-                    synthetic=True,
-                )
-            )
-            return
-
-        # /recording         — show current state
-        # /recording on      — enable local auto-record bundles
-        # /recording off     — disable
-        # /recording toggle  — flip
-        if text.startswith("/playback") or text.startswith("/review"):
-            parts = text.split(maxsplit=1)
-            arg = parts[1].strip() if len(parts) > 1 else ""
-            self._open_playback_from_chat(arg)
-            return
-
-        if text.startswith("/recording"):
-            parts = text.split(maxsplit=1)
-            if len(parts) == 1:
-                state = "on" if bool(self._config.get("autorecord", True)) else "off"
-                hint = (
-                    f"recording: {state}. Auto-record writes local playback bundles under "
-                    "~/.local/share/successor/recordings/ by default. Bundles stay on "
-                    "local disk and pair playback.html with session_trace.json for debugging."
-                )
-                self.messages.append(_Message("successor", hint, synthetic=True))
-                return
-            arg = parts[1].strip().lower()
-            if arg == "on":
-                self._set_autorecord(True)
-                self.messages.append(
-                    _Message(
-                        "successor",
-                        "auto-record on. Future chat sessions will save local playback bundles "
-                        "for debugging and harness-building.",
-                        synthetic=True,
-                    )
-                )
-                return
-            if arg == "off":
-                self._set_autorecord(False)
-                self.messages.append(
-                    _Message(
-                        "successor",
-                        "auto-record off. Future chat sessions will stop writing playback bundles.",
-                        synthetic=True,
-                    )
-                )
-                return
-            if arg == "toggle":
-                enabled = not bool(self._config.get("autorecord", True))
-                self._set_autorecord(enabled)
-                state = "on" if enabled else "off"
-                self.messages.append(
-                    _Message(
-                        "successor",
-                        f"auto-record {state}.",
-                        synthetic=True,
-                    )
-                )
-                return
-            self.messages.append(
-                _Message(
-                    "successor",
-                    f"unknown /recording argument '{arg}'. try on, off, or toggle.",
-                    synthetic=True,
-                )
-            )
-            return
-
-        # /density       — show current density and available options
-        # /density compact / normal / spacious — set
-        # /density cycle — cycle to next
-        if text.startswith("/density"):
-            parts = text.split(maxsplit=1)
-            if len(parts) == 1:
-                names = ", ".join(d.name for d in DENSITIES)
-                hint = (
-                    f"current density: {self.density.name}. "
-                    f"Available: {names}. Use /density <name> or Alt+=/Alt+- "
-                    f"or Ctrl+] to cycle."
-                )
-                self.messages.append(_Message("successor", hint, synthetic=True))
-                return
-            arg = parts[1].strip().lower()
-            if arg == "cycle":
-                self._cycle_density()
-                return
-            target = find_density(arg)
-            if target is None:
-                self.messages.append(
-                    _Message(
-                        "successor",
-                        f"no density named '{arg}'. try one of: "
-                        f"{', '.join(d.name for d in DENSITIES)}.",
-                        synthetic=True,
-                    )
-                )
-                return
-            self._set_density(target)
-            return
-
-        # Add the user's message and kick off turn 1 of the agent loop.
-        # _begin_agent_turn opens the stream and the continue-loop in
-        # _pump_stream calls it again when tool results come back.
-        self.messages.append(_Message("user", text))
-        self._scroll_to_bottom()
-        self._agent_turn = 0
-        self._task_continue_nudged_this_turn = False
-        self._task_continue_nudge = None
-        self._browser_verification_active = False
-        self._browser_verification_reason = ""
-        self._verification_continue_nudged_this_turn = False
-        self._verification_continue_nudge = None
-        self._file_tool_continue_nudged_this_turn = False
-        self._file_tool_continue_nudge = None
-        self._subagent_continue_nudged_this_turn = False
-        self._subagent_continue_nudge = None
-        # Reset the per-turn autocompact guard so a new user message
-        # gets exactly one autocompact attempt before falling through
-        # to the API (which may then trip reactive PTL recovery).
-        self._autocompact_attempted_this_turn = False
-        self._begin_agent_turn()
+        self._agent_loop.submit()
 
     def _begin_agent_turn(self) -> None:
-        """Open a new stream for the next turn of the agent loop.
-
-        Called once at the start of each user submission (from
-        `_submit`) AND again from `_pump_stream` after a bash batch
-        finishes, so the model gets a chance to react to its own
-        tool output. Increments `self._agent_turn` and refuses to
-        exceed `MAX_AGENT_TURNS` — a synthetic message is committed
-        instead so the user knows the loop stopped on its own.
-
-        The whole pipeline (enabled-tools resolution, system-prompt
-        assembly, api-messages build, stream open, detector init)
-        lives here rather than in `_submit` because the continue-loop
-        needs to re-run it for each turn against the updated
-        `self.messages` (which now contains the last turn's tool
-        cards serialized as assistant-role history).
-
-        AUTOCOMPACT GATE: before opening the stream, check whether
-        the active profile's CompactionConfig says we should compact
-        proactively. If yes, defer the turn — `_check_and_maybe_defer_for_autocompact()`
-        spawns the compaction worker and returns True; the worker's
-        poll callback re-enters this function after compaction
-        succeeds. If compaction fails, the turn falls through anyway
-        and reactive PTL recovery in the streaming layer catches it.
-        """
-        # Autocompact gate. Returns True if the turn was deferred.
-        if self._check_and_maybe_defer_for_autocompact():
-            return
-
-        self._agent_turn += 1
-        max_agent_turns = max(
-            1,
-            int(getattr(self.profile, "max_agent_turns", MAX_AGENT_TURNS) or MAX_AGENT_TURNS),
-        )
-        if self._agent_turn > max_agent_turns:
-            self.messages.append(_Message(
-                "successor",
-                f"[agent loop halted at {max_agent_turns} turns — "
-                f"send a new message to continue]",
-                synthetic=True,
-            ))
-            self._agent_turn = 0
-            return
-
-        self._refresh_browser_verification_mode()
-
-        # Resolve which tools are enabled for THIS turn from the active
-        # profile. filter_known() drops any unrecognized names so a
-        # stale profile referencing a future tool doesn't crash us.
-        enabled_tools = self._enabled_tools_for_turn()
-        enabled_skills = self._enabled_skills_for_turn(enabled_tools)
-
-        # Build the system prompt for THIS turn. When `tools=` is sent
-        # to the model, Qwen's chat template auto-injects its OWN
-        # canonical "use <tool_call> blocks" instructions into the
-        # system message — that's the format the model is trained on.
-        # We intentionally do NOT inject the legacy BASH_DOC fenced-
-        # bash guidance in that case because two conflicting sets of
-        # instructions confuse the model into emitting half-formed
-        # raw text instead of structured calls.
-        #
-        # We DO append two short sections for bash:
-        #   1. cwd hint — the chat template doesn't know about our
-        #      workspace pinning, so the model has to be told
-        #      explicitly. Without this, files land in the wrong
-        #      place or the model uses bare relative paths the user
-        #      didn't intend.
-        #   2. multi-step guidance — Qwen 3.5's reasoning chains
-        #      occasionally get stuck retrying the same successful
-        #      tool call when the task involves multiple steps and
-        #      tool results come back empty. The fix is one explicit
-        #      sentence: read your previous tool results before
-        #      deciding what to do next. This is the model behavior
-        #      analog of free-code's "If the user denies a tool you
-        #      call, do not re-attempt the exact same tool call"
-        #      guidance — same shape, different trigger.
-        sys_prompt = self.system_prompt
-        task_execution_guidance = ""
-        task_section = ""
-        verification_execution_guidance = ""
-        verification_section = ""
-        runbook_execution_guidance = ""
-        runbook_section = ""
-        browser_verification_guidance = ""
-        if "task" in enabled_tools:
-            task_execution_guidance = build_task_execution_guidance(self._task_ledger)
-            task_section = build_task_prompt_section(self._task_ledger)
-        if "verify" in enabled_tools:
-            verification_execution_guidance = build_verification_execution_guidance(
-                self._verification_ledger
-            )
-            verification_section = build_verification_prompt_section(
-                self._verification_ledger
-            )
-        if "runbook" in enabled_tools:
-            runbook_execution_guidance = build_runbook_execution_guidance(
-                self._runbook
-            )
-            runbook_section = build_runbook_prompt_section(self._runbook)
-        if self._browser_verification_active and "browser" in enabled_tools:
-            browser_verification_guidance = build_browser_verification_guidance(
-                latest_user_text=self._latest_real_user_text(),
-                active_task_text=self._browser_verification_context_text(),
-                vision_available="vision" in enabled_tools,
-                browser_verifier_available=(
-                    "skill" in enabled_tools
-                    and any(skill.name == "browser-verifier" for skill in enabled_skills)
-                ),
-                browser_verifier_loaded=self._skill_already_loaded("browser-verifier"),
-            )
-        if enabled_tools and (
-            "bash" in enabled_tools
-            or any(name in {"read_file", "write_file", "edit_file"} for name in enabled_tools)
-        ):
-            effective_cwd = self._tool_working_directory()
-            sys_prompt = (
-                f"{sys_prompt}\n\n"
-                f"## Working directory\n\n"
-                f"Native file tools and bash both resolve relative paths "
-                f"from `cwd={effective_cwd}`. If the user asks for a file "
-                f"in a specific location (like `~/Desktop/foo.html`), use "
-                f"the absolute path — do not assume your cwd is what the "
-                f"user had in mind.\n\n"
-                f"## Working with tool results\n\n"
-                f"Before making each tool call, scan the conversation "
-                f"history above and check what you have ALREADY done. "
-                f"A tool result with no stdout means the command "
-                f"succeeded — that is normal for writes, redirects, "
-                f"`mkdir`, `touch`, `chmod`, and most mutating "
-                f"commands. NEVER re-issue a tool call that already "
-                f"appears earlier in the conversation; instead, take "
-                f"the next step toward the user's goal, or respond "
-                f"with plain text if you are done. Plain text "
-                f"(no tool call) is how you finish the task and "
-                f"return control to the user."
-            )
-        if enabled_tools:
-            execution_parts = [
-                "Use tools whenever they materially improve correctness, "
-                "completeness, grounding, or verification. Do not stop "
-                "early when another tool call would materially improve the "
-                "result. If you say you will inspect, edit, run, verify, or "
-                "check something, make the corresponding tool call in the "
-                "SAME response instead of promising future action. If a tool "
-                "returns partial, empty, or unhelpful results, change "
-                "strategy instead of blindly repeating the same call. Keep "
-                "working until the task is complete AND verified, then end "
-                "with plain text.",
-            ]
-            if task_execution_guidance:
-                execution_parts.append(task_execution_guidance)
-            if verification_execution_guidance:
-                execution_parts.append(verification_execution_guidance)
-            if runbook_execution_guidance:
-                execution_parts.append(runbook_execution_guidance)
-            if browser_verification_guidance:
-                execution_parts.append(browser_verification_guidance)
-            sys_prompt = (
-                f"{sys_prompt}\n\n"
-                f"## Execution discipline\n\n"
-                f"{execution_parts[0]}"
-            )
-            if len(execution_parts) > 1:
-                sys_prompt = f"{sys_prompt}\n\n" + "\n\n".join(execution_parts[1:])
-            if task_section:
-                sys_prompt = f"{sys_prompt}\n\n{task_section}"
-            if verification_section:
-                sys_prompt = f"{sys_prompt}\n\n{verification_section}"
-            if runbook_section:
-                sys_prompt = f"{sys_prompt}\n\n{runbook_section}"
-            capabilities = self._detect_client_runtime_capabilities()
-            if bool(getattr(capabilities, "supports_parallel_tool_calls", False)):
-                sys_prompt = (
-                    f"{sys_prompt}\n\n"
-                    f"## Parallel tool calls\n\n"
-                    f"When multiple tool calls are independent and the "
-                    f"result of one does not determine the arguments of "
-                    f"another, emit them in the SAME assistant turn instead "
-                    f"of serializing them one-by-one. This is especially "
-                    f"useful for parallel read-only inspection such as "
-                    f"multiple `read_file` calls, read-only `bash` checks, "
-                    f"or separate `holonet` lookups. Keep dependent steps, "
-                    f"writes, browser interaction sequences, and any "
-                    f"read-after-write verification serialized."
-                )
-        tool_guidance = build_model_tool_guidance(enabled_tools)
-        if tool_guidance:
-            sys_prompt = f"{sys_prompt}\n\n{tool_guidance}"
-        skill_hints = build_skill_hint_section(enabled_skills)
-        if skill_hints:
-            sys_prompt = f"{sys_prompt}\n\n{skill_hints}"
-        skill_discovery = build_skill_discovery_section(
-            enabled_skills,
-            context_window_tokens=self._resolve_context_window(),
-        )
-        if skill_discovery:
-            sys_prompt = f"{sys_prompt}\n\n{skill_discovery}"
-        if self._task_continue_nudge:
-            sys_prompt = (
-                f"{sys_prompt}\n\n"
-                f"## Continuation Reminder\n\n"
-                f"{self._task_continue_nudge}"
-            )
-            self._task_continue_nudge = None
-        if self._verification_continue_nudge:
-            sys_prompt = (
-                f"{sys_prompt}\n\n"
-                f"## Browser Verification Reminder\n\n"
-                f"{self._verification_continue_nudge}"
-            )
-            self._verification_continue_nudge = None
-        if self._file_tool_continue_nudge:
-            sys_prompt = (
-                f"{sys_prompt}\n\n"
-                f"## File Tool Recovery Reminder\n\n"
-                f"{self._file_tool_continue_nudge}"
-            )
-            self._file_tool_continue_nudge = None
-        if self._subagent_continue_nudge:
-            sys_prompt = (
-                f"{sys_prompt}\n\n"
-                f"## Background Task Reminder\n\n"
-                f"{self._subagent_continue_nudge}"
-            )
-            self._subagent_continue_nudge = None
-
-        # Build the conversation history for the model in NATIVE Qwen
-        # tool-call shape. Each pass through the message list pairs an
-        # assistant message with any immediately-following tool cards
-        # and emits them as ONE assistant message with `tool_calls`
-        # populated, followed by `role: "tool"` messages linked via
-        # `tool_call_id`. Qwen's chat template renders this as
-        # `<tool_call>` and `<tool_response>` blocks — the format the
-        # model was trained on. Using fenced bash text in the
-        # assistant content (the previous approach) caused the model
-        # to loop on heredocs because text-format bash blocks are
-        # ambiguous between "I'm running this" and "I'm citing this
-        # for documentation".
-        api_messages = self._build_api_messages_native(sys_prompt)
-
-        # Build the OpenAI-style tools schema when bash is enabled.
-        # The chat template's `if tools` branch fires and injects the
-        # canonical "use <tool_call>" instructions into the system
-        # message, putting the model in its trained tool-calling mode.
-        # Only pass tools= when non-None so older client implementations
-        # (test mocks, providers without tool support) keep working.
-        native_tool_schemas = build_native_tool_schemas(enabled_tools)
-        self._trace_event(
-            "agent_turn_begin",
-            turn=self._agent_turn,
-            continuation=(self._agent_turn > 1),
-            enabled_tools=enabled_tools,
-            enabled_skills=[skill.name for skill in enabled_skills],
-            browser_verification_active=self._browser_verification_active,
-            browser_verification_reason=self._browser_verification_reason,
-            api_message_count=len(api_messages),
-            last_user_excerpt=_find_last_user_excerpt(api_messages),
-        )
-        try:
-            if native_tool_schemas:
-                self._stream = self.client.stream_chat(
-                    messages=api_messages,
-                    tools=native_tool_schemas,
-                )
-            else:
-                self._stream = self.client.stream_chat(messages=api_messages)
-        except Exception as exc:
-            self._trace_event(
-                "stream_open_failed",
-                turn=self._agent_turn,
-                error=f"{type(exc).__name__}: {exc}",
-            )
-            raise
-        self._trace_event(
-            "stream_opened",
-            turn=self._agent_turn,
-            tool_schema_names=enabled_tools if native_tool_schemas else [],
-        )
-        self._stream_content = []
-        self._stream_reasoning_chars = 0
-        # The bash detector stays active as a LEGACY fallback for
-        # streams where the model emits raw fenced bash blocks instead
-        # of structured tool_calls. With `tools` set, the model should
-        # almost always use the structured channel — but we keep the
-        # detector wired so a model that goes off-format still works.
-        if "bash" in enabled_tools:
-            self._stream_bash_detector = BashStreamDetector()
-        else:
-            self._stream_bash_detector = None
+        self._agent_loop.begin_agent_turn()
 
     def _build_api_messages_native(self, sys_prompt: str) -> list[dict]:
-        """Build the api_messages list in native Qwen tool-call shape.
-
-        Walks `_api_ordered_messages` and groups each assistant message
-        with the tool cards that immediately follow it. The group
-        becomes:
-
-            {"role": "assistant", "content": <prose>, "tool_calls": [
-                {"id", "type": "function",
-                 "function": {"name": "bash", "arguments": '{"command": ...}'}},
-                ...
-            ]}
-            {"role": "tool", "tool_call_id": <id>, "content": <stdout>}
-            {"role": "tool", "tool_call_id": <id>, "content": <stdout>}
-
-        Tool cards without a preceding assistant (e.g., the /bash
-        slash command echoes a card directly) get a synthesized
-        empty-content assistant turn so the tool message has a tool
-        call to link back to.
-
-        Summary messages from compaction are still emitted as user
-        messages with the standard `[summary of earlier conversation
-        …]` prefix.
-        """
-        api_messages: list[dict] = [{"role": "system", "content": sys_prompt}]
-        ordered = self._api_ordered_messages()
-
-        def _append_text_merging(role: str, content: str) -> None:
-            """Append with same-role merge for plain text turns. Tool
-            and tool_call-bearing messages bypass this and go straight
-            onto the list.
-            """
-            if not content:
-                return
-            if (
-                len(api_messages) > 1
-                and api_messages[-1].get("role") == role
-                and "tool_calls" not in api_messages[-1]
-            ):
-                api_messages[-1]["content"] = (
-                    api_messages[-1]["content"].rstrip() + "\n\n" + content
-                )
-                return
-            api_messages.append({"role": role, "content": content})
-
-        i = 0
-        n = len(ordered)
-        while i < n:
-            m = ordered[i]
-
-            if m.is_summary:
-                _append_text_merging(
-                    "user",
-                    "[summary of earlier conversation, provided by the "
-                    "harness — treat as authoritative context, not a "
-                    "user turn]\n\n" + m.raw_text,
-                )
-                i += 1
-                continue
-
-            # Plain user message
-            if _api_role_for_message(m) == "user" and not _message_has_tool_artifact(m):
-                if m.synthetic:
-                    i += 1
-                    continue
-                _append_text_merging("user", m.raw_text)
-                i += 1
-                continue
-
-            # Assistant message → look ahead for following tool cards
-            if _api_role_for_message(m) == "assistant" and not _message_has_tool_artifact(m):
-                if m.synthetic:
-                    i += 1
-                    continue
-                tool_cards: list[ToolArtifact] = []
-                j = i + 1
-                while j < n and _message_has_tool_artifact(ordered[j]):
-                    card = _message_tool_artifact(ordered[j])
-                    if card is not None:
-                        tool_cards.append(card)
-                    j += 1
-
-                if tool_cards:
-                    api_messages.append(_assistant_with_tool_calls(
-                        m.raw_text or "", tool_cards,
-                    ))
-                    for card in tool_cards:
-                        api_messages.append({
-                            "role": "tool",
-                            "tool_call_id": card.tool_call_id,
-                            "content": _tool_card_content_for_api(card),
-                        })
-                else:
-                    _append_text_merging("assistant", m.raw_text)
-                i = j
-                continue
-
-            # Tool card with no preceding assistant in this batch
-            # (e.g., /bash slash command). Synthesize an empty-content
-            # assistant turn carrying the tool call so the tool result
-            # has something to link to.
-            if _message_has_tool_artifact(m):
-                card = _message_tool_artifact(m)
-                if card is None:
-                    i += 1
-                    continue
-                tool_cards = [card]
-                j = i + 1
-                while j < n and _message_has_tool_artifact(ordered[j]):
-                    next_card = _message_tool_artifact(ordered[j])
-                    if next_card is not None:
-                        tool_cards.append(next_card)
-                    j += 1
-                api_messages.append(_assistant_with_tool_calls("", tool_cards))
-                for card in tool_cards:
-                    api_messages.append({
-                        "role": "tool",
-                        "tool_call_id": card.tool_call_id,
-                        "content": _tool_card_content_for_api(card),
-                    })
-                i = j
-                continue
-
-            # Anything else (synthetic placeholders, etc.) — skip
-            i += 1
-
-        return api_messages
+        return self._agent_loop.build_api_messages_native(sys_prompt)
 
     # ─── Agent loop adapter (for /budget /burn /compact) ───
     #
@@ -5262,290 +3986,10 @@ class SuccessorChat(App):
             self._cache_warmer = None
 
     def _pump_stream(self) -> None:
-        """Drain any pending stream events and update accumulators.
-
-        When bash is enabled in the active profile, ContentChunk text
-        is also fed to the BashStreamDetector. After StreamEnded, any
-        completed bash blocks are dispatched and tool cards appended
-        to self.messages, BELOW the assistant message.
-        """
-        if self._stream is None:
-            return
-
-        events = self._stream.drain()
-        for ev in events:
-            if isinstance(ev, StreamStarted):
-                self._trace_event("stream_started", turn=self._agent_turn)
-            elif isinstance(ev, ReasoningChunk):
-                self._stream_reasoning_chars += len(ev.text)
-            elif isinstance(ev, ContentChunk):
-                self._stream_content.append(ev.text)
-                # Feed the bash detector incrementally so we catch
-                # blocks as they arrive. Detection of completed blocks
-                # is queued internally; we drain the queue after
-                # StreamEnded so tool cards always appear AFTER the
-                # full assistant message in the chat flow.
-                if self._stream_bash_detector is not None:
-                    self._stream_bash_detector.feed(ev.text)
-            elif isinstance(ev, StreamEnded):
-                # The model can produce tool calls in two channels:
-                #
-                #   1. NATIVE  — `delta.tool_calls` chunks accumulated
-                #      by the provider into `ev.tool_calls`. This is
-                #      the format Qwen 3.5 was trained on, fired when
-                #      we send the `tools` parameter.
-                #
-                #   2. LEGACY — fenced ```bash blocks parsed by the
-                #      `BashStreamDetector` from `ContentChunk` text.
-                #      Kept as a fallback for streams where the model
-                #      goes off-format.
-                #
-                # We process BOTH and merge the results. Native takes
-                # precedence visually because the cards land with the
-                # exact tool_call_id the model used, which keeps the
-                # next turn's history coherent.
-                raw_content = "".join(self._stream_content).strip()
-                if self._stream_bash_detector is not None:
-                    self._stream_bash_detector.flush()
-                    display_content = self._stream_bash_detector.cleaned_text().strip()
-                    legacy_blocks = self._stream_bash_detector.completed()
-                    self._stream_bash_detector = None
-                else:
-                    display_content = raw_content
-                    legacy_blocks = []
-                native_calls = list(getattr(ev, "tool_calls", ()) or ())
-                self._trace_event(
-                    "stream_end",
-                    turn=self._agent_turn,
-                    finish_reason=ev.finish_reason,
-                    finish_reason_reported=bool(getattr(ev, "finish_reason_reported", True)),
-                    assistant_excerpt=_trace_clip_text(raw_content, limit=400),
-                    reasoning_chars=self._stream_reasoning_chars,
-                    native_tool_calls=[
-                        _trace_tool_call_summary(tc) for tc in native_calls
-                    ],
-                    legacy_block_count=len(legacy_blocks),
-                )
-
-                # Commit an assistant message for this stream UNCONDITIONALLY
-                # when there's prose text OR when there are tool calls
-                # of any kind. The empty-content variant acts as a TURN
-                # BOUNDARY MARKER so the api_messages builder knows
-                # where one assistant turn ends and the next begins.
-                # Without it, multiple tool cards from separate turns
-                # get bundled into a single assistant call in the next
-                # api_messages payload, and the model reads "I made N
-                # parallel calls in one turn" and loops re-running them.
-                if raw_content:
-                    self.messages.append(_Message(
-                        "successor",
-                        raw_content,
-                        display_text=display_content,
-                    ))
-                elif legacy_blocks or native_calls:
-                    # Empty-display assistant marker — display_text=""
-                    # so the renderer skips it; raw_text="" so the
-                    # api builder still recognizes the role boundary.
-                    self.messages.append(_Message(
-                        "successor",
-                        "",
-                        display_text="",
-                    ))
-                else:
-                    self.messages.append(_Message(
-                        "successor",
-                        "(no answer — model produced only reasoning)",
-                    ))
-                self._last_usage = ev.usage
-                self._stream = None
-                self._stream_content = []
-                self._stream_reasoning_chars = 0
-                # Clear the sticky verb-preview cache; a new stream
-                # will populate it fresh if it spawns more tool calls.
-                self._streaming_verb_cache = {}
-
-                # Dispatch native tool calls first (they carry the
-                # model-provided ids), then any legacy bash blocks the
-                # detector caught from raw text. Both paths now spawn
-                # async runners — they don't block the tick loop. The
-                # continuation stream fires from _pump_running_tools
-                # when the LAST runner in this batch completes.
-                any_ran = False
-                if native_calls:
-                    any_ran |= self._dispatch_native_tool_calls(
-                        native_calls,
-                        stream_finish_reason=ev.finish_reason,
-                        stream_finish_reason_reported=bool(
-                            getattr(ev, "finish_reason_reported", True)
-                        ),
-                    )
-                if legacy_blocks:
-                    any_ran |= self._dispatch_streamed_bash_blocks(legacy_blocks)
-                self._trace_event(
-                    "tool_dispatch_batch",
-                    turn=self._agent_turn,
-                    native_tool_count=len(native_calls),
-                    legacy_block_count=len(legacy_blocks),
-                    any_ran=any_ran,
-                    runner_count=len(self._running_tools),
-                )
-
-                # The `_agent_turn > 0` guard is important: tests drive
-                # `_pump_stream` directly with a pre-installed fake
-                # stream WITHOUT going through `_submit`, so they never
-                # increment the counter. Only user-initiated submissions
-                # trigger continuation; synthetic test streams don't.
-                if any_ran and self._agent_turn > 0:
-                    # Async tools (bash runners) resume once the last
-                    # runner finishes. Synchronous tools (like the
-                    # subagent spawn path) have no runner to wait on,
-                    # so continue immediately.
-                    if self._running_tools:
-                        self._trace_event(
-                            "continuation_pending",
-                            turn=self._agent_turn,
-                            runner_count=len(self._running_tools),
-                        )
-                        self._pending_continuation = True
-                    else:
-                        self._pending_continuation = False
-                        self._trace_event(
-                            "continuation_immediate",
-                            turn=self._agent_turn,
-                        )
-                        self._begin_agent_turn()
-                    return
-
-                if (
-                    self._agent_turn > 0
-                    and self._task_ledger.has_in_progress()
-                    and not self._task_continue_nudged_this_turn
-                ):
-                    nudge = build_task_continue_nudge(self._task_ledger)
-                    if nudge:
-                        self._task_continue_nudged_this_turn = True
-                        self._task_continue_nudge = nudge
-                        active = self._task_ledger.in_progress_task()
-                        self._trace_event(
-                            "task_continue_nudge",
-                            turn=self._agent_turn,
-                            active_task=active.active_form if active else "",
-                            assistant_excerpt=_trace_clip_text(raw_content, limit=320),
-                        )
-                        self._begin_agent_turn()
-                        return
-
-                # No tool calls OR nothing successfully ran — turn
-                # ends here. Reset the agent-turn counter so the next
-                # user submission starts fresh.
-                self._trace_event(
-                    "agent_turn_complete",
-                    turn=self._agent_turn,
-                    reason="plain_text_or_no_runnable_tools",
-                )
-                self._agent_turn = 0
-            elif isinstance(ev, StreamError):
-                partial = "".join(self._stream_content)
-                self._trace_event(
-                    "stream_error",
-                    turn=self._agent_turn,
-                    message=ev.message,
-                    partial_excerpt=_trace_clip_text(partial, limit=400),
-                )
-                if partial:
-                    msg = f"{partial}\n\n[stream interrupted: {ev.message}]"
-                else:
-                    msg = self._format_stream_error(ev.message)
-                self.messages.append(_Message("successor", msg, synthetic=True))
-                self._stream = None
-                self._stream_content = []
-                self._stream_reasoning_chars = 0
-                # Clear the sticky verb-preview cache; any tool-call
-                # previews for this dead stream no longer apply.
-                self._streaming_verb_cache = {}
-                # Drop the bash detector — partial bash blocks in a
-                # failed stream aren't safe to execute
-                self._stream_bash_detector = None
-                # A stream error inside a continuation kills the loop
-                # for this user submission. Reset the turn counter so
-                # the chat returns to IDLE instead of waiting forever
-                # for a stream that'll never come back.
-                self._agent_turn = 0
+        self._agent_loop.pump_stream()
 
     def _format_stream_error(self, raw: str) -> str:
-        """Translate a raw StreamError message into a friendlier hint.
-
-        The most common failure modes for new users:
-          - "[stream failed: connection failed: <urlopen error [Errno 111]
-             Connection refused>]" — local server not running
-          - "[stream failed: HTTP 401: Unauthorized]" — bad / missing api_key
-          - "[stream failed: HTTP 402: Payment Required]" — out of credits
-          - "[stream failed: HTTP 429: Too Many Requests]" — rate limited
-
-        Each of these gets translated into an actionable hint that names
-        the active profile's base_url and explains what the user should do.
-        Other errors fall through with the raw message.
-        """
-        provider_cfg = self.profile.provider or {}
-        base_url = provider_cfg.get("base_url", "http://localhost:8080")
-        lower = raw.lower()
-        is_conn_refused = (
-            "connection refused" in lower
-            or "errno 111" in lower
-            or "could not connect" in lower
-        )
-        is_dns = (
-            "name or service not known" in lower
-            or "nodename nor servname" in lower
-            or "temporary failure in name resolution" in lower
-        )
-        is_unreachable = "network is unreachable" in lower
-        is_timeout = (
-            "timed out" in lower
-            or "timeout" in lower
-            or "the read operation timed out" in lower
-        )
-        if is_conn_refused or is_dns or is_unreachable or is_timeout:
-            return (
-                f"[no server at {base_url}]\n"
-                f"\n"
-                f"successor expects an OpenAI-compatible HTTP endpoint at\n"
-                f"the URL above. Three ways to fix this:\n"
-                f"\n"
-                f"  1. Start a local llama.cpp server:\n"
-                f"     llama-server -m <your-model.gguf> --host 0.0.0.0 --port 8080\n"
-                f"\n"
-                f"  2. Quit (Ctrl+C) and run `successor setup` to create\n"
-                f"     a profile against OpenAI or OpenRouter instead.\n"
-                f"\n"
-                f"  3. Open /config and edit the active profile's\n"
-                f"     provider.base_url and provider.api_key fields."
-            )
-        if "http 401" in lower or "unauthorized" in lower:
-            return (
-                f"[unauthorized — {base_url}]\n"
-                f"\n"
-                f"The server rejected the request as unauthorized. Either\n"
-                f"the api_key is missing, malformed, or revoked. Open\n"
-                f"/config and check the active profile's provider.api_key\n"
-                f"field."
-            )
-        if "http 402" in lower or "payment required" in lower:
-            return (
-                f"[out of credits — {base_url}]\n"
-                f"\n"
-                f"The provider says the account is out of credits or owes\n"
-                f"a balance. Top up at the provider dashboard, then retry."
-            )
-        if "http 429" in lower or "too many requests" in lower:
-            return (
-                f"[rate limited by {base_url}]\n"
-                f"\n"
-                f"The provider is throttling requests. Wait a moment and\n"
-                f"retry, or switch to a different model / paid tier in\n"
-                f"the active profile via /config."
-            )
-        return f"[stream failed: {raw}]"
+        return self._agent_loop.format_stream_error(raw)
 
     def _spawn_bash_runner(
         self,
@@ -5882,153 +4326,18 @@ class SuccessorChat(App):
         width: int,
         theme: ThemeVariant,
     ) -> None:
-        if bottom <= top or width <= 2:
-            return
-
-        # Empty-state hero: when the user hasn't sent any real messages
-        # yet AND the active profile defines chat_intro_art, paint the
-        # ANSI art portrait + info panel instead of the normal message
-        # rendering. The painter handles all sizing, theming, and
-        # graceful fallback (info-only on narrow terminals, no panel
-        # if the art file is missing). Once the user submits anything,
-        # _is_empty_chat() returns False and we fall through to the
-        # normal painter.
-        if self._is_empty_chat() and self._has_intro_art():
-            self._paint_empty_state(grid, top, bottom, width, theme)
-            return
-
-        density = self._current_density()
-        geometry = compute_viewport_decision(
-            width=width,
-            top=top,
-            bottom=bottom,
-            density=density,
-            committed_height=0,
-            scroll_offset=self.scroll_offset,
-            auto_scroll=self._auto_scroll,
-            last_total_height=self._last_total_height,
-        )
-
-        # Build the flat list of committed-message lines.
-        committed = self._build_message_lines(geometry.body_width, theme)
-        committed_h = len(committed)
-        viewport = compute_viewport_decision(
-            width=width,
-            top=top,
-            bottom=bottom,
-            density=density,
-            committed_height=committed_h,
-            scroll_offset=self.scroll_offset,
-            auto_scroll=self._auto_scroll,
-            last_total_height=self._last_total_height,
-        )
-        self.scroll_offset = viewport.scroll_offset
-        self._auto_scroll = viewport.auto_scroll
-        self._last_chat_h = viewport.last_chat_h
-        self._last_chat_w = viewport.last_chat_w
-        self._last_total_height = viewport.last_total_height
-
-        # NB: there's no scroll override during compaction anymore.
-        # The boundary + summary now live at the END of self.messages
-        # (display order), so they naturally appear at the bottom of
-        # the chat where the user is auto-scrolled. The materialize
-        # animation plays in view without any forced snap.
-
-        # Slice the committed lines for the current scroll position.
-        visible = committed[viewport.start:viewport.end]
-
-        # Streaming reply — only when anchored at bottom.
-        if self._stream is not None and self.scroll_offset == 0:
-            stream_lines = self._build_streaming_lines(viewport.body_width, theme)
-            combined = visible + stream_lines
-            if len(combined) > viewport.chat_height:
-                combined = combined[-viewport.chat_height:]
-        else:
-            combined = visible
-
-        # Anchor the visible block to the BOTTOM of the chat area.
-        paint_y = bottom - len(combined)
-        if paint_y < top:
-            paint_y = top
-
-        for i, row in enumerate(combined):
-            y = paint_y + i
-            if y >= bottom:
-                break
-            self._paint_chat_row(
-                grid, viewport.body_x, y, viewport.body_width, row, theme
-            )
-
-        # NB: there is no centered "compacting" overlay anymore. The
-        # chat content stays fully visible during compaction so the
-        # user can scroll, search, and read freely while the model
-        # generates the summary in the background. The "compaction
-        # in progress" signal lives in the static footer instead.
+        self._display_runtime.paint_chat_area(grid, top, bottom, width, theme)
 
     # ─── Empty-state hero panel ───
 
     def _is_empty_chat(self) -> bool:
-        """True iff the chat has no visible content yet.
-
-        Used by _paint_chat_area to decide whether to paint the empty-
-        state hero + info panel or fall through to the normal message
-        rendering. Counts ANY of the following as "real content" that
-        should hide the hero:
-
-          - Non-synthetic messages (user input, committed assistant
-            replies)
-          - Tool cards (technically synthetic for API serialization
-            purposes, but visually they ARE real artifacts of a real
-            tool run that the user expects to see)
-          - Compaction boundaries and summaries (synthetic but
-            structurally important — without them the user would
-            see the hero come back AFTER a compaction, which would
-            be wrong)
-          - An in-flight stream (the chat is mid-response — show
-            whatever's streaming, not the hero)
-        """
-        if self._stream is not None:
-            return False
-        for m in self.messages:
-            if _message_has_tool_artifact(m):
-                return False
-            if getattr(m, "is_boundary", False):
-                return False
-            if getattr(m, "is_summary", False):
-                return False
-            if not m.synthetic:
-                return False
-        return True
+        return self._display_runtime.is_empty_chat()
 
     def _has_intro_art(self) -> bool:
-        """True iff the active profile has loadable chat_intro_art.
-
-        Calls _resolve_intro_art() lazily so disk I/O happens once,
-        on the first frame the empty state is painted, and the result
-        is cached on the chat instance. Switching profiles invalidates
-        the cache via _resolve_intro_art's check against the resolved
-        profile name.
-        """
-        return self._resolve_intro_art() is not None
+        return self._display_runtime.has_intro_art()
 
     def _resolve_intro_art(self):
-        """Lazy-load and cache the active profile's chat_intro_art.
-
-        Returns the BrailleArt instance, or None if the profile has
-        no art configured or the file failed to load. Cached on the
-        instance until the active profile changes — set
-        self._intro_art_resolved = False after a profile swap to
-        force a reload.
-        """
-        if self._intro_art_resolved:
-            return self._intro_art
-        from .render.intro_art import load_intro_art
-        if self.profile is None:
-            self._intro_art = None
-        else:
-            self._intro_art = load_intro_art(self.profile.chat_intro_art)
-        self._intro_art_resolved = True
-        return self._intro_art
+        return self._display_runtime.resolve_intro_art()
 
     def _paint_empty_state(
         self,
@@ -6038,96 +4347,10 @@ class SuccessorChat(App):
         width: int,
         theme: ThemeVariant,
     ) -> None:
-        paint_empty_state_surface(
-            grid,
-            top,
-            bottom,
-            width,
-            theme,
-            panel_lines=self._build_intro_panel_lines(),
-            resolve_intro_art=self._resolve_intro_art,
-        )
+        self._display_runtime.paint_empty_state(grid, top, bottom, width, theme)
 
     def _build_intro_panel_lines(self) -> list[tuple[str, str, bool, bool]]:
-        """Build the rows for the empty-state info panel.
-
-        Returns a list of (label, value, is_header, is_hint) tuples.
-        Headers paint as dim uppercase labels, value rows paint
-        indented two cells. The last row is the hint, painted in
-        accent_warm and centered.
-
-        Built from the active profile + client state, NOT from any
-        cached info — runs on every empty-state paint, so changes
-        propagate immediately if the user swaps theme or density
-        before sending their first message.
-        """
-        rows: list[tuple[str, str, bool, bool]] = []
-
-        # PROFILE section
-        rows.append(("profile", "", True, False))
-        rows.append(("", self.profile.name if self.profile else "(none)", False, False))
-        rows.append(("", "", False, False))
-
-        # PROVIDER section
-        provider_cfg = (self.profile.provider or {}) if self.profile else {}
-        provider_type = provider_cfg.get("type") or "llamacpp"
-        model = provider_cfg.get("model") or self.client.model
-        # Strip leading "openai/" from openrouter slugs since the panel
-        # already names openrouter as the provider type — keeps the
-        # value column tight.
-        if provider_type == "openai_compat":
-            base_url = provider_cfg.get("base_url", "")
-            if "openrouter" in base_url:
-                provider_label = "openrouter"
-            elif "openai.com" in base_url:
-                provider_label = "openai"
-            else:
-                provider_label = "openai-compat"
-        else:
-            provider_label = provider_type
-        rows.append(("provider", "", True, False))
-        rows.append(("", provider_label, False, False))
-        rows.append(("", model, False, False))
-        # Resolved context window — use the chat's existing resolver
-        # so the same number that drives compaction shows up here.
-        try:
-            window = self._resolve_context_window()
-            rows.append(("", f"{window:,} tokens", False, False))
-        except Exception:  # noqa: BLE001
-            pass
-        # Health: a one-word green/red signal so the user knows the
-        # next message will work.
-        if self._server_health_ok is True:
-            rows.append(("", "● reachable", False, False))
-        elif self._server_health_ok is False:
-            rows.append(("", "○ unreachable", False, False))
-        rows.append(("", "", False, False))
-
-        # TOOLS section
-        tools = list(self.profile.tools) if self.profile and self.profile.tools else []
-        rows.append(("tools", "", True, False))
-        if tools:
-            for t in tools:
-                rows.append(("", tool_label(t), False, False))
-        else:
-            rows.append(("", "(none enabled)", False, False))
-        rows.append(("", "", False, False))
-
-        # APPEARANCE section — read LIVE state, not the profile's
-        # stored values, so the panel reflects mid-session changes
-        # like Ctrl+T (cycle theme) or Alt+D (toggle dark/light) that
-        # haven't been written back to the profile yet.
-        theme_name = self.theme.name if self.theme else "steel"
-        mode = self.display_mode if self.display_mode else "dark"
-        density = self.density.name if self.density else "normal"
-        rows.append(("appearance", "", True, False))
-        rows.append(("", f"{theme_name} · {mode} · {density}", False, False))
-        rows.append(("", "", False, False))
-
-        # Hint at the bottom — the most actionable thing on the screen.
-        rows.append(("type / for commands · press ? for help", "", False, True))
-
-        return rows
+        return self._display_runtime.build_intro_panel_lines()
 
     # ─── Paint a single _RenderedRow ───
 
@@ -6140,16 +4363,7 @@ class SuccessorChat(App):
         row: _RenderedRow,
         theme: ThemeVariant,
     ) -> None:
-        paint_chat_scene_row(
-            grid,
-            x,
-            y,
-            body_width,
-            row,
-            theme,
-            prefix_width=_PREFIX_W,
-            elapsed=self.elapsed,
-        )
+        self._display_runtime.paint_chat_row(grid, x, y, body_width, row, theme)
 
     # ─── Flat-line builders ───
 
@@ -6158,60 +4372,7 @@ class SuccessorChat(App):
         body_width: int,
         theme: ThemeVariant,
     ) -> list[_RenderedRow]:
-        """Flatten the conversation into a list of paint-ready rows.
-
-        Each row holds enough information for the painter to draw it
-        without consulting the message list again. Spans inside rows
-        carry semantic tags (code, link, header, etc.) which the
-        painter resolves to theme colors at paint time.
-
-        When search is active, spans are split at match boundaries and
-        the matching cells get a highlight background applied via a
-        special tag the painter recognizes.
-
-        When a compaction animation is in progress, this method
-        switches between the snapshot (FOLD phase) and the post-compact
-        message list (MATERIALIZE / REVEAL / TOAST phases), and applies
-        per-row fade_alpha + boundary materialize_t overrides so the
-        painter draws the right frame.
-        """
-        # ─── Compaction animation routing ───
-        if self._compaction_anim is not None:
-            now = time.monotonic()
-            phase, phase_t = self._compaction_anim.phase_at(now)
-            if phase == "done":
-                # Animation finished — clear it and fall through to
-                # normal painting of self.messages
-                self._compaction_anim = None
-            elif phase in ("anticipation", "fold", "waiting"):
-                # The chat stays FULLY READABLE during waiting. The
-                # snapshot is the canonical "what the chat looked
-                # like before compaction started" — we paint it at
-                # full opacity so the user can scroll, search, and
-                # read freely while the model generates the summary
-                # in the background. The "compaction in progress"
-                # signal lives in the static footer (a small badge
-                # next to the context bar), NOT as a blocking overlay.
-                #
-                # This is the harness's strongpoint: every cell of
-                # past content is mutable data the user can interact
-                # with. Walling it off during a forced idle moment
-                # would be the opposite of what the architecture
-                # is good at.
-                return self._build_rows_from_messages(
-                    self._compaction_anim.pre_compact_snapshot,
-                    body_width, theme,
-                )
-            else:
-                # materialize / reveal / toast — paint the post-compact
-                # state with overrides on boundary materialize_t and
-                # summary fade_alpha
-                return self._build_rows_from_messages(
-                    self.messages, body_width, theme,
-                    anim_phase=phase, anim_t=phase_t,
-                )
-
-        return self._build_rows_from_messages(self.messages, body_width, theme)
+        return self._display_runtime.build_message_lines(body_width, theme)
 
     def _build_rows_from_messages(
         self,
@@ -6224,187 +4385,27 @@ class SuccessorChat(App):
         anim_phase: str = "",
         anim_t: float = 1.0,
     ) -> list[_RenderedRow]:
-        """The actual row builder. Pulled out of _build_message_lines so
-        the animation routing can pass the snapshot or self.messages
-        with appropriate per-row overrides.
+        return self._display_runtime.build_rows_from_messages(
+            messages,
+            body_width,
+            theme,
+            global_fade_alpha=global_fade_alpha,
+            anticipation_glow=anticipation_glow,
+            anim_phase=anim_phase,
+            anim_t=anim_t,
+        )
 
-        global_fade_alpha: applied to every emitted row's fade_alpha
-            (used by the FOLD phase)
-        anticipation_glow: when True, base_color shifts toward accent_warm
-            for the soon-to-be-summarized rounds
-        anim_phase: when "materialize" / "reveal", boundary/summary
-            rows get the appropriate animation state
-        anim_t: 0-1 progress within the current phase
-        """
-        out: list[_RenderedRow] = []
-        now = time.monotonic()
-        n = len(messages)
-        spacing = self._current_density().message_spacing
-        md_width = max(1, body_width - _PREFIX_W)
-
-        for i, msg in enumerate(messages):
-            age = now - msg.created_at
-            fade_t = (
-                ease_out_cubic(min(1.0, age / FADE_IN_S))
-                if age < FADE_IN_S
-                else 1.0
-            )
-            base_color = theme.fg if msg.role == "user" else theme.accent
-            if msg.synthetic:
-                base_color = theme.fg_dim
-            if anticipation_glow:
-                # Subtle warm tint on every row to "preview" the fold
-                base_color = lerp_rgb(base_color, theme.accent_warm, 0.35)
-            if fade_t < 1.0:
-                base_color = lerp_rgb(theme.fg_subtle, base_color, fade_t)
-
-            # ─── Boundary marker message ───
-            # Emit a special row that the painter routes to
-            # _paint_compaction_boundary. During materialize phase the
-            # divider draws in from the center outward; otherwise it's
-            # fully visible.
-            if msg.is_boundary:
-                materialize_t = 1.0
-                if anim_phase == "materialize":
-                    materialize_t = ease_out_cubic(anim_t)
-                elif anim_phase in ("", "reveal", "toast"):
-                    materialize_t = 1.0
-                out.append(_RenderedRow(
-                    is_boundary=True,
-                    boundary_meta=msg.boundary_meta,
-                    materialize_t=materialize_t,
-                    base_color=base_color,
-                    fade_alpha=global_fade_alpha,
-                ))
-                if i < n - 1:
-                    for _ in range(spacing):
-                        out.append(_RenderedRow(base_color=base_color))
-                continue
-
-            # ─── Summary message ───
-            # The boundary divider is the FIRST row of the summary's
-            # render (integrated header). The summary content fades
-            # in below it. Both come together — the user always sees
-            # the divider with the summary, no scrolling needed.
-            if msg.is_summary:
-                summary_alpha = global_fade_alpha
-                materialize_t = 1.0
-                if anim_phase == "materialize":
-                    # Boundary divider grows from center; summary not
-                    # yet visible
-                    summary_alpha = 0.0
-                    materialize_t = ease_out_cubic(anim_t)
-                elif anim_phase == "reveal":
-                    # Boundary fully drawn; summary fading in
-                    summary_alpha = ease_out_cubic(anim_t)
-                    materialize_t = 1.0
-                elif anim_phase in ("toast", ""):
-                    # Settled — boundary fully visible, summary at full opacity
-                    materialize_t = 1.0
-                    if not anim_phase:
-                        summary_alpha = global_fade_alpha
-
-                # ROW 1: the integrated boundary divider header
-                if msg.boundary_meta is not None:
-                    out.append(_RenderedRow(
-                        is_boundary=True,
-                        boundary_meta=msg.boundary_meta,
-                        materialize_t=materialize_t,
-                        base_color=base_color,
-                        fade_alpha=global_fade_alpha,
-                    ))
-
-                # ROW 2+: the summary text with dim styling
-                prefix = "▼ "  # marker glyph instead of role prefix
-                md_lines = msg.body.lines(md_width)
-                summary_color = lerp_rgb(theme.fg_subtle, theme.fg_dim, 0.6)
-                rendered_rows = self._render_md_lines_with_search(
-                    md_lines, msg.display_text, [], prefix, summary_color,
-                )
-                for r in rendered_rows:
-                    r.is_summary = True
-                    r.fade_alpha = summary_alpha
-                out.extend(rendered_rows)
-                if i < n - 1:
-                    for _ in range(spacing):
-                        out.append(_RenderedRow(base_color=base_color))
-                continue
-
-            # ─── Tool card message ───
-            if _message_has_tool_artifact(msg):
-                card_rows = self._render_tool_card_rows(
-                    msg, body_width, theme,
-                )
-                # Apply global_fade_alpha to tool card rows by tinting
-                # their pre-painted cells (a no-op when 1.0)
-                if global_fade_alpha < 1.0:
-                    card_rows = self._fade_prepainted_rows(
-                        card_rows, theme.bg, 1.0 - global_fade_alpha,
-                    )
-                out.extend(card_rows)
-                if i < n - 1:
-                    for _ in range(spacing):
-                        out.append(_RenderedRow(base_color=base_color))
-                continue
-
-            # If the message's display body is empty (e.g., assistant
-            # turn that was nothing but a fenced bash block — the
-            # block lives in raw_text for the model but shouldn't
-            # paint as a bare "successor ▸" line above the tool card),
-            # skip the row entirely. The tool card that follows
-            # speaks for the message.
-            if msg.role != "user" and not msg.display_text.strip():
-                if i < n - 1:
-                    for _ in range(spacing):
-                        out.append(_RenderedRow(base_color=base_color))
-                continue
-
-            prefix = _USER_PREFIX if msg.role == "user" else _SUCCESSOR_PREFIX
-            md_lines = msg.body.lines(md_width)
-
-            msg_matches: list[tuple[int, int, int]] = []
-            if self._search_active and self._search_matches:
-                for mi_focused, start, end in self._search_matches:
-                    if mi_focused == i:
-                        is_focused = (
-                            self._search_matches.index(
-                                (mi_focused, start, end)
-                            ) == self._search_focused
-                        )
-                        msg_matches.append((start, end, 2 if is_focused else 1))
-
-            if not md_lines:
-                out.append(
-                    _RenderedRow(
-                        leading_text=prefix,
-                        leading_attrs=ATTR_BOLD,
-                        leading_color_kind="accent",
-                        base_color=base_color,
-                        fade_alpha=global_fade_alpha,
-                    )
-                )
-            else:
-                rendered_rows = self._render_md_lines_with_search(
-                    md_lines, msg.display_text, msg_matches, prefix, base_color,
-                )
-                # Apply the global fade to every row produced by this msg
-                if global_fade_alpha < 1.0:
-                    for r in rendered_rows:
-                        r.fade_alpha = global_fade_alpha
-                out.extend(rendered_rows)
-
-            if i < n - 1:
-                for _ in range(spacing):
-                    out.append(_RenderedRow(base_color=base_color))
-        return out
-
-    @staticmethod
     def _fade_prepainted_rows(
+        self,
         rows: list[_RenderedRow],
         bg_color: int,
         toward_bg_amount: float,
     ) -> list[_RenderedRow]:
-        return fade_prepainted_chat_rows(rows, bg_color, toward_bg_amount)
+        return self._display_runtime.fade_prepainted_rows(
+            rows,
+            bg_color,
+            toward_bg_amount,
+        )
 
     def _render_tool_card_rows(
         self,
@@ -6412,7 +4413,7 @@ class SuccessorChat(App):
         body_width: int,
         theme: ThemeVariant,
     ) -> list[_RenderedRow]:
-        return render_tool_chat_card_rows(msg, body_width, theme)
+        return self._display_runtime.render_tool_card_rows(msg, body_width, theme)
 
     def _render_running_tool_card_rows(
         self,
@@ -6421,7 +4422,12 @@ class SuccessorChat(App):
         theme: ThemeVariant,
         runner: BashRunner,
     ) -> list[_RenderedRow]:
-        return render_running_chat_card_rows(msg, body_width, theme, runner)
+        return self._display_runtime.render_running_tool_card_rows(
+            msg,
+            body_width,
+            theme,
+            runner,
+        )
 
     def _render_subagent_card_rows(
         self,
@@ -6429,218 +4435,37 @@ class SuccessorChat(App):
         body_width: int,
         theme: ThemeVariant,
     ) -> list[_RenderedRow]:
-        return render_subagent_chat_card_rows(msg, body_width, theme)
+        return self._display_runtime.render_subagent_card_rows(msg, body_width, theme)
 
     def _render_md_lines_with_search(
         self,
-        md_lines: list[LaidOutLine],
+        md_lines: list,
         msg_raw_text: str,
         matches: list[tuple[int, int, int]],
         prefix: str,
         base_color: int,
     ) -> list[_RenderedRow]:
-        query = self._search_query.lower() if self._search_active else ""
-        return render_markdown_rows_with_search(
+        return self._display_runtime.render_md_lines_with_search(
             md_lines,
-            query,
+            msg_raw_text,
             matches,
             prefix,
             base_color,
-            prefix_width=_PREFIX_W,
         )
 
     def _highlight_spans(
         self,
-        spans: list[LaidOutSpan],
+        spans: list,
         query: str,
-    ) -> list[LaidOutSpan]:
-        return highlight_row_spans(spans, query)
+    ) -> list:
+        return self._display_runtime.highlight_spans(spans, query)
 
     def _build_streaming_lines(
         self,
         body_width: int,
         theme: ThemeVariant,
     ) -> list[_RenderedRow]:
-        """Render the in-flight streaming reply as paint-ready rows.
-
-        Four phases can appear in a single turn:
-
-          1. THINKING — no content yet. Spinner + reasoning preview
-             tail (last ~80 chars of reasoning_content) as a dim
-             scrolling lane beneath the spinner.
-          2. CONTENT — model emits user-visible text. Rendered as
-             markdown with a typewriter cursor. Fenced bash blocks
-             get elided via BashStreamDetector.cleaned_text() so
-             they don't pop in and then disappear.
-          3. TOOL CALL ARGUMENTS — model emits `delta.tool_calls`
-             chunks that accumulate in stream.tool_calls_so_far.
-             We paint a "tool call arriving" preview card showing
-             the raw_arguments JSON streaming in live, just like
-             the thinking reasoning tail. Without this the user
-             sees a dead pause while 44 lines of heredoc content
-             stream in silently.
-          4. QUEUED BASH (legacy detector) — a dim marker showing
-             "queuing bash command…" when the fenced-block detector
-             is inside a block but hasn't seen the closing fence.
-        """
-        if self._stream is None:
-            return []
-        now = time.monotonic()
-        spinner_idx = int(now * SPINNER_FPS) % len(SPINNER_FRAMES)
-        spinner = SPINNER_FRAMES[spinner_idx]
-
-        # Visible stream content: prefer the detector's cleaned text
-        # (which elides fenced bash blocks in real time) over the raw
-        # stream buffer. Falls back to the raw buffer when bash isn't
-        # enabled for this turn.
-        block_in_flight = False
-        if self._stream_bash_detector is not None:
-            content_so_far = self._stream_bash_detector.cleaned_text()
-            block_in_flight = self._stream_bash_detector.is_inside_block()
-        else:
-            content_so_far = "".join(self._stream_content)
-
-        # Live tool_call accumulator snapshot. Each entry has
-        # `{"index", "id", "name", "raw_arguments"}` where
-        # raw_arguments is the running JSON text. Empty until the
-        # model starts emitting `delta.tool_calls`. Use getattr so
-        # test fakes that don't implement this interface still work.
-        tool_calls_in_flight = getattr(
-            self._stream, "tool_calls_so_far", None,
-        ) or []
-
-        out: list[_RenderedRow] = [_RenderedRow(base_color=theme.accent)]
-
-        if not content_so_far:
-            # Thinking phase — show spinner + char counter on the
-            # successor line, plus a live reasoning preview underneath
-            # showing the last few words of the model's internal
-            # reasoning. Makes the wait feel productive instead of
-            # opaque. Other harnesses can't show this because they
-            # don't separate the reasoning channel.
-            if self._stream_reasoning_chars > 0:
-                text = f"{spinner} thinking… ({self._stream_reasoning_chars} chars)"
-            else:
-                text = f"{spinner} thinking…"
-            out.append(
-                _RenderedRow(
-                    leading_text=_SUCCESSOR_PREFIX,
-                    leading_attrs=ATTR_BOLD,
-                    leading_color_kind="accent",
-                    body_spans=(LaidOutSpan(text=text),),
-                    base_color=theme.accent,
-                )
-            )
-
-            # Live reasoning preview lane — show the last ~80 chars of
-            # the model's reasoning_content as a dim italic indented
-            # line under the spinner. Updates every frame as new chars
-            # arrive.
-            reasoning_text = self._stream.reasoning_so_far
-            if reasoning_text:
-                tail = reasoning_text[-_REASONING_PREVIEW_CHARS:]
-                # Collapse internal whitespace runs to a single space
-                # so the preview reads as a continuous flow.
-                tail = " ".join(tail.split())
-                if tail:
-                    # Account for the leading "  ↳ " prefix when wrapping.
-                    avail_w = max(1, body_width - _PREFIX_W - 4)
-                    if len(tail) > avail_w:
-                        # Show only the END of the tail (most recent text)
-                        tail = "…" + tail[-(avail_w - 1):]
-                    out.append(
-                        _RenderedRow(
-                            leading_text=" " * _PREFIX_W + "  ↳ ",
-                            leading_color_kind="fg_dim",
-                            leading_attrs=ATTR_DIM,
-                            body_spans=(
-                                LaidOutSpan(
-                                    text=tail,
-                                    attrs=ATTR_DIM | ATTR_ITALIC,
-                                ),
-                            ),
-                            base_color=theme.fg_subtle,
-                        )
-                    )
-            # Fall through to the tool-call preview block below —
-            # the model may skip text entirely and go straight from
-            # reasoning → tool_calls, in which case the preview is
-            # the only visual cue that anything is happening.
-            for tc in tool_calls_in_flight:
-                raw_args = tc.get("raw_arguments", "")
-                if not raw_args:
-                    continue
-                out.extend(self._streaming_tool_call_preview_rows(
-                    name=tc.get("name") or "bash",
-                    raw_arguments=raw_args,
-                    call_index=tc.get("index", 0),
-                    body_width=body_width,
-                    theme=theme,
-                    spinner=spinner,
-                ))
-            return out
-
-        # Content streaming — render the live text as markdown.
-        # Append a trailing block-cursor to the visible text so the
-        # user can see the typewriter advancing.
-        live_md = PreparedMarkdown(content_so_far + "▌")
-        md_width = max(1, body_width - _PREFIX_W)
-        md_lines = live_md.lines(md_width)
-        for line_idx, md_line in enumerate(md_lines):
-            leading = _SUCCESSOR_PREFIX if line_idx == 0 else " " * _PREFIX_W
-            out.append(
-                _RenderedRow(
-                    leading_text=leading,
-                    leading_attrs=ATTR_BOLD if line_idx == 0 else 0,
-                    leading_color_kind="accent",
-                    body_spans=tuple(md_line.spans),
-                    base_color=theme.accent,
-                    line_tag=md_line.line_tag,
-                    body_indent=md_line.indent,
-                )
-            )
-
-        # Mid-stream bash block indicator. When the detector is inside
-        # a fenced bash block, those characters are already elided
-        # from the visible text above — this row gives the user a
-        # concrete signal that a command is being queued so the layout
-        # doesn't feel like it froze or dropped content.
-        if block_in_flight:
-            out.append(
-                _RenderedRow(
-                    leading_text=" " * _PREFIX_W + "  ↳ ",
-                    leading_color_kind="fg_dim",
-                    leading_attrs=ATTR_DIM,
-                    body_spans=(
-                        LaidOutSpan(
-                            text=f"{spinner} queuing bash command…",
-                            attrs=ATTR_DIM | ATTR_ITALIC,
-                        ),
-                    ),
-                    base_color=theme.fg_subtle,
-                )
-            )
-
-        # ─── Streaming tool-call preview ──────────────────────────
-        # The model's tool_calls arrive as `delta.tool_calls` chunks
-        # over the same stream. Without any visual, the user stares
-        # at a dead screen while the heredoc body (which can be
-        # dozens of lines) streams in silently. Show it as a scrolling
-        # tail just like the reasoning preview — the last ~3 wrapped
-        # lines of the accumulated raw_arguments, with a cursor.
-        for tc in tool_calls_in_flight:
-            raw_args = tc.get("raw_arguments", "")
-            if not raw_args:
-                continue
-            out.extend(self._streaming_tool_call_preview_rows(
-                name=tc.get("name") or "bash",
-                raw_arguments=raw_args,
-                call_index=tc.get("index", 0),
-                body_width=body_width,
-                theme=theme,
-                spinner=spinner,
-            ))
-        return out
+        return self._display_runtime.build_streaming_lines(body_width, theme)
 
     def _streaming_tool_call_preview_rows(
         self,
@@ -6652,108 +4477,14 @@ class SuccessorChat(App):
         theme: ThemeVariant,
         spinner: str,
     ) -> list[_RenderedRow]:
-        """Build the rows for a "tool call arriving" live preview.
-
-        Design:
-          Row 1:  ✎ write-file  path: about.html   (header, inferred
-                  verb + glyph + param hint when parse_bash resolves
-                  the partial command; falls back to a generic
-                  "⟡ bash — receiving arguments…" header when the
-                  command is too short or too malformed to classify)
-          Row 2+: scrolling tail of the command body, last N wrapped
-                  lines, dim italic with a typewriter cursor on the
-                  final line. Mirrors the reasoning-preview aesthetic
-                  so the user immediately recognizes "this is content
-                  pouring in, not a hang".
-        """
-        # Try to extract the "command" field from the partial JSON
-        # so the preview shows a readable command body instead of
-        # escaped JSON. Failing that, fall back to the raw text.
-        display_text = _tool_preview_text(name, raw_arguments)
-
-        # How many lines of tail we show. Bounded so the preview
-        # doesn't take over the chat.
-        MAX_PREVIEW_LINES = 5
-        avail_w = max(10, body_width - _PREFIX_W - 6)
-
-        # Split on newlines first, then wrap long lines hard to fit
-        # the available width. Take the LAST MAX_PREVIEW_LINES so
-        # the freshest content is always visible.
-        raw_lines = display_text.replace("\\n", "\n").split("\n")
-        wrapped: list[str] = []
-        for rl in raw_lines:
-            if not rl:
-                wrapped.append("")
-                continue
-            offset = 0
-            while offset < len(rl):
-                wrapped.append(rl[offset:offset + avail_w])
-                offset += avail_w
-        tail_lines = wrapped[-MAX_PREVIEW_LINES:]
-        if not tail_lines:
-            tail_lines = [""]
-        # Append a cursor to the very last line so the user sees it
-        # advancing as chars arrive.
-        tail_lines[-1] = tail_lines[-1] + "▌"
-
-        rows: list[_RenderedRow] = []
-        # Header row — try to infer the verb from the partial command
-        # so the header mirrors the final card instead of saying
-        # "receiving arguments…" forever.
-        #
-        # Stickiness: once a high-confidence inference resolves for a
-        # given call, cache it keyed by (stream_id, call_index) so
-        # subsequent frames where the parser momentarily loses
-        # confidence (mid-stream unclosed quotes, etc.) don't flicker
-        # the header back to the generic message. We only REPLACE a
-        # cached inference with a NEW successful inference — never
-        # with a fallback.
-        inferred = _infer_tool_preview(display_text) if name == "bash" else None
-        cache_key = (id(self._stream), call_index)
-        if inferred is not None:
-            self._streaming_verb_cache[cache_key] = inferred
-        else:
-            inferred = self._streaming_verb_cache.get(cache_key)
-
-        if inferred is not None:
-            glyph, verb_name, hint = inferred
-            if hint:
-                header_text = f"{spinner} {glyph} {verb_name}  {hint}"
-            else:
-                header_text = f"{spinner} {glyph} {verb_name}"
-        else:
-            header_text = f"{spinner} ⟡ {name} — receiving arguments…"
-        rows.append(
-            _RenderedRow(
-                leading_text=" " * _PREFIX_W + "  ↳ ",
-                leading_color_kind="fg_dim",
-                leading_attrs=ATTR_DIM,
-                body_spans=(
-                    LaidOutSpan(
-                        text=header_text,
-                        attrs=ATTR_DIM | ATTR_BOLD,
-                    ),
-                ),
-                base_color=theme.accent_warm,
-            )
+        return self._display_runtime.streaming_tool_call_preview_rows(
+            name=name,
+            raw_arguments=raw_arguments,
+            call_index=call_index,
+            body_width=body_width,
+            theme=theme,
+            spinner=spinner,
         )
-        # Tail rows
-        for line in tail_lines:
-            rows.append(
-                _RenderedRow(
-                    leading_text=" " * _PREFIX_W + "    ",
-                    leading_color_kind="fg_dim",
-                    leading_attrs=ATTR_DIM,
-                    body_spans=(
-                        LaidOutSpan(
-                            text=line,
-                            attrs=ATTR_DIM | ATTR_ITALIC,
-                        ),
-                    ),
-                    base_color=theme.fg_subtle,
-                )
-            )
-        return rows
 
     # ─── Slash command autocomplete dropdown ───
 
@@ -6851,157 +4582,7 @@ class SuccessorChat(App):
         width: int,
         theme: ThemeVariant,
     ) -> None:
-        """Paint the bottom-row context fill bar.
-
-        Token count comes from the agent's TokenCounter (driven by
-        llama.cpp's /tokenize endpoint when available, char heuristic
-        fallback). The window size comes from the profile's
-        provider.context_window — this lets a small-context profile
-        (e.g. 50K for compaction stress testing) show a properly-scaled
-        fill bar instead of the default 262K denominator.
-
-        Threshold state drives:
-          - bar fill color (accent → accent_warm → accent_warn)
-          - a subtle continuous pulse when past the autocompact
-            threshold (signals "compact me!")
-          - an explicit state badge ("AUTOCOMPACT" / "BLOCKING") on
-            the right side when over threshold
-        """
-        # Compute token usage via the chat-level cached total. The
-        # cache is invalidated at every self.messages mutation site;
-        # in steady state this is O(1). The first read after a mutation
-        # is O(N) but uses per-message caches on _Message so even at
-        # 200K context it's well under a frame budget.
-        if self._cached_token_counter is not None:
-            try:
-                used = self._total_tokens()
-            except Exception:
-                used = self._fallback_token_count()
-        elif self._last_usage and "total_tokens" in self._last_usage:
-            used = int(self._last_usage["total_tokens"])
-        else:
-            used = self._fallback_token_count()
-
-        # Window: profile override → provider auto-detect → CONTEXT_MAX.
-        # Cached on the chat after the first resolution so the per-frame
-        # painter doesn't pay any overhead.
-        window = self._resolve_context_window()
-        used = max(0, min(used, window))
-        pct = used / window if window > 0 else 0.0
-
-        # Footer background
-        fill_region(grid, 0, y, width, 1, style=Style(bg=theme.bg_footer))
-
-        # ─── Threshold state classification ───
-        # Mirrors agent.budget.ContextBudget but inlined here so the
-        # footer doesn't need an active BudgetTracker.
-        autocompact_at = window - max(4_000, window // 32)
-        warning_at = window - max(8_000, window // 16)
-        blocking_at = window - max(1_000, window // 128)
-        if used >= blocking_at:
-            state = "blocking"
-        elif used >= autocompact_at:
-            state = "autocompact"
-        elif used >= warning_at:
-            state = "warning"
-        else:
-            state = "ok"
-
-        # ─── Continuous pulse when past autocompact ───
-        # Slow sine wave (0.5 Hz) blends the bar color toward fg so
-        # the bar gently breathes — signals "compact me!" without
-        # being jarring.
-        pulse = 0.0
-        if state in ("autocompact", "blocking"):
-            import math
-            pulse = 0.5 + 0.5 * math.sin(self.elapsed * 0.5 * 2 * math.pi)
-
-        label = f" ctx {used:>7}/{window:>7} "
-        # State badge: empty in ok/warning, explicit in autocompact/blocking
-        state_badge = ""
-        if state == "autocompact":
-            state_badge = " ◉ COMPACT "
-        elif state == "blocking":
-            state_badge = " ⚠ BLOCKED "
-        # Compacting indicator: tiny spinner + elapsed time while a
-        # /compact is in progress in the background. The chat content
-        # stays fully readable during compaction; this badge is the
-        # only visual signal that something's happening behind the
-        # scenes. Disappears once the result lands and the materialize
-        # animation begins.
-        compacting_badge = ""
-        if self._compaction_worker is not None and self._compaction_anim is not None:
-            spinner_idx = int(self.elapsed * 10) % len(SPINNER_FRAMES)
-            elapsed_compact = self._compaction_worker.elapsed()
-            m, s = divmod(int(elapsed_compact), 60)
-            n_rounds = self._compaction_anim.rounds_summarized
-            compacting_badge = (
-                f" {SPINNER_FRAMES[spinner_idx]} compacting "
-                f"{n_rounds}r · {m:02d}:{s:02d} "
-            )
-        # Warming indicator: tiny spinner when the cache pre-warmer is
-        # running in the background. Disappears when warming completes.
-        warming_badge = ""
-        if self._cache_warmer is not None and self._cache_warmer.is_running():
-            spinner_idx = int(self.elapsed * 10) % len(SPINNER_FRAMES)
-            warming_badge = f" {SPINNER_FRAMES[spinner_idx]} warming "
-        right_label = (
-            f"{compacting_badge}{warming_badge}{state_badge} "
-            f"{pct * 100:5.2f}%  {self.client.model[:20]} "
-        )
-        label_style = Style(fg=theme.fg_dim, bg=theme.bg_footer, attrs=ATTR_DIM)
-
-        # Right-label color depends on state — warm in autocompact,
-        # warn in blocking, accent_warm if compacting/warming is active
-        if state == "blocking":
-            right_fg = theme.accent_warn
-        elif state == "autocompact":
-            right_fg = lerp_rgb(theme.accent_warm, theme.accent_warn, pulse)
-        elif compacting_badge or warming_badge:
-            right_fg = theme.accent_warm
-        elif state == "warning":
-            right_fg = theme.accent_warm
-        else:
-            right_fg = theme.fg
-        right_style = Style(fg=right_fg, bg=theme.bg_footer, attrs=ATTR_BOLD)
-
-        paint_text(grid, label, 0, y, style=label_style)
-
-        bar_x = len(label) + 1
-        right_x = max(0, width - len(right_label))
-        bar_w = max(0, right_x - bar_x - 1)
-
-        if bar_w > 0:
-            filled = int(round(bar_w * pct))
-            empty = bar_w - filled
-            # Bar color thresholds (smoother than the old hardcoded 0.6/0.85)
-            if state == "ok":
-                bar_fg = lerp_rgb(theme.accent, theme.accent_warm, pct / 0.85)
-            elif state == "warning":
-                bar_fg = theme.accent_warm
-            elif state == "autocompact":
-                # Pulse between accent_warm and accent_warn
-                bar_fg = lerp_rgb(theme.accent_warm, theme.accent_warn, pulse)
-            else:  # blocking
-                bar_fg = theme.accent_warn
-            if filled > 0:
-                paint_text(
-                    grid,
-                    "█" * filled,
-                    bar_x,
-                    y,
-                    style=Style(fg=bar_fg, bg=theme.bg_footer),
-                )
-            if empty > 0:
-                paint_text(
-                    grid,
-                    "░" * empty,
-                    bar_x + filled,
-                    y,
-                    style=Style(fg=theme.fg_subtle, bg=theme.bg_footer),
-                )
-
-        paint_text(grid, right_label, right_x, y, style=right_style)
+        self._display_runtime.paint_static_footer(grid, y, width, theme)
 
     def _fallback_token_count(self) -> int:
         """Char-count heuristic for the footer when no agent counter is

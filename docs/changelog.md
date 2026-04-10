@@ -11,6 +11,168 @@ unit on top of phase 0.
 
 ---
 
+## Unreleased, repo-aware verification contract + verifier workers (2026-04-10)
+
+This pass hardens the post-file-tools workflow so the model sees the
+workspace verification contract directly in the prompt, gets immediate
+feedback after native file mutations, and can launch a stricter
+read-only verification worker when implementation context is no longer
+trustworthy.
+
+### What landed
+
+- `src/successor/verification_hints.py`
+  - new workspace-aware repo-contract helper
+  - detects local Python / JS verification affordances from
+    `pyproject.toml` and `package.json`
+  - adds deterministic prompt guidance like `ruff check`, `pytest -q`,
+    `npm run lint`, `npm run typecheck`, and `npm test` when the local
+    workspace actually advertises them
+- `src/successor/chat_agent_loop.py`
+  - now injects repo verification hints into tool-enabled runs based on
+    the active tool working directory
+  - strengthens execution discipline so completion claims are expected
+    to carry real verification evidence
+- `src/successor/file_tools.py`
+  - native `write_file` / `edit_file` now run one fast post-write
+    sanity check when possible
+  - Python prefers `ruff check` when the local workspace advertises Ruff
+    and falls back to `py_compile`
+  - JSON uses `python -m json.tool`
+  - JS uses `node --check` when available
+  - validation results now surface in tool output and metadata instead
+    of being hidden behind the mutation path
+- `src/successor/subagents/`
+  - `subagent` now accepts `role="verification"`
+  - verification workers use a stricter child prompt
+  - verification workers are read-only by construction:
+    - no `write_file`
+    - no `edit_file`
+    - no nested `subagent`
+    - bash forced to non-mutating / non-dangerous mode
+  - cards, progress summaries, spawn payloads, and notifications now
+    distinguish `verifier` from generic `subagent`
+- repo contract / docs
+  - `pyproject.toml` now carries repo Ruff configuration
+  - `.github/workflows/test.yml` now runs Ruff before pytest
+  - updated `README.md`
+  - updated `docs/file-tools.md`
+  - updated `docs/changelog.md`
+
+### Verification
+
+- lint:
+  - `ruff check src tests`
+- bytecode:
+  - `python3 -m py_compile src/successor/verification_hints.py src/successor/file_tools.py src/successor/progress.py src/successor/subagents/cards.py src/successor/subagents/prompt.py src/successor/subagents/manager.py src/successor/subagents/render.py src/successor/chat_tool_runtime.py src/successor/chat_agent_loop.py src/successor/chat.py`
+- targeted:
+  - `PYTHONPATH=src pytest -q tests/test_file_tools.py tests/test_progress.py tests/test_snapshot_subagents.py tests/test_subagent_manager.py tests/test_chat_subagents.py tests/test_verification_hints.py`
+  - `45 passed`
+- full suite:
+  - `PYTHONPATH=src pytest -q`
+  - `1234 passed in 12.59s`
+
+## Unreleased, chat display-runtime seam extraction + live streaming visual verification (2026-04-10)
+
+This pass continues the `chat.py` cleanup by pulling the display-facing
+row-builder and footer cluster out of `src/successor/chat.py` while
+keeping the existing `SuccessorChat` wrapper surface intact.
+
+### What landed
+
+- `src/successor/chat_display_runtime.py`
+  - new helper for empty-state intro resolution, intro panel assembly,
+    committed-row flattening, streaming row assembly, streaming
+    tool-call previews, and static footer paint
+- `src/successor/chat.py`
+  - now delegates the display/runtime cluster to `ChatDisplayRuntime`
+  - keeps the existing `_paint_*`, `_build_*`, and `_render_*` wrapper
+    methods so tests and higher-level runtime code still call the same
+    `SuccessorChat` surface
+- docs
+  - added `docs/chat-display-runtime-refactor-plan.md`
+  - updated `docs/changelog.md`
+
+### Verification
+
+- lint:
+  - `PYTHONPATH=src ruff check src/successor/chat.py src/successor/chat_display_runtime.py`
+- bytecode:
+  - `PYTHONPATH=src python3 -m py_compile src/successor/chat.py src/successor/chat_display_runtime.py`
+- targeted display slice:
+  - `PYTHONPATH=src pytest -q tests/test_intro_art.py tests/test_context_fill_bar.py tests/test_snapshot_themes.py`
+  - `57 passed`
+  - `PYTHONPATH=src pytest -q tests/test_chat_bash.py tests/test_bash_prepared_output.py`
+  - `72 passed`
+  - `PYTHONPATH=src pytest -q tests/test_compaction_animation.py tests/test_chat_mouse.py tests/test_chat_paste.py tests/test_chat_perf.py`
+  - `55 passed`
+- full suite:
+  - `PYTHONPATH=src pytest -q`
+  - `1227 passed in 12.42s`
+- live human-emulated visual/runtime verification:
+  - drove a real local `SuccessorChat` session against
+    `http://localhost:8080`
+  - visually verified:
+    - intro state
+    - slash-command draft state
+    - post-command theme application
+    - thinking frame
+    - content-streaming frame
+    - settled response frame
+  - captured browser-rendered screenshots in:
+    - `/tmp/successor-chat-display-browser-verify-20260410`
+
+## Unreleased, chat agent-loop seam extraction + live browser-grounded verification (2026-04-10)
+
+This pass continues the post-`v0.1.29` cleanup by pulling the submit /
+turn / stream controller cluster out of `src/successor/chat.py` while
+keeping the existing `SuccessorChat` method surface intact.
+
+### What landed
+
+- `src/successor/chat_agent_loop.py`
+  - new helper for `_submit`, `_begin_agent_turn`,
+    `_build_api_messages_native`, `_pump_stream`, and
+    `_format_stream_error`
+  - owns the pure helper functions that support native tool-call
+    history assembly and stream trace summaries
+- `src/successor/chat.py`
+  - now delegates the controller layer to `ChatAgentLoop`
+  - keeps the existing wrapper methods so tests and controller code
+    still call the same `SuccessorChat` methods
+- docs
+  - added `docs/chat-agent-loop-refactor-plan.md`
+  - updated `docs/changelog.md`
+
+### Verification
+
+- lint:
+  - `PYTHONPATH=src ruff check src/successor/chat.py src/successor/chat_agent_loop.py`
+- bytecode:
+  - `PYTHONPATH=src python3 -m py_compile src/successor/chat.py src/successor/chat_agent_loop.py`
+- targeted controller slice:
+  - `PYTHONPATH=src pytest -q tests/test_chat_bash.py tests/test_chat_tasks.py tests/test_chat_web_tools.py tests/test_chat_subagents.py tests/test_chat_stream_error.py`
+  - `78 passed`
+  - `PYTHONPATH=src pytest -q tests/test_file_tools.py tests/test_input_history.py tests/test_playback.py tests/test_chat_autocompact_gate.py`
+  - `59 passed`
+- full suite:
+  - `PYTHONPATH=src pytest -q`
+  - `1227 passed in 12.52s`
+- live human-emulated runtime verification:
+  - built and verified a real issue-triage app in
+    `/tmp/successor-agent-loop-live-o7z3xj1r`
+  - captured chat artifacts in
+    `/tmp/successor-agent-loop-live-artifacts`
+  - observed completed tool mix:
+    - `write_file`: 3
+    - `bash`: 5
+    - `browser`: 42
+  - visually inspected desktop and mobile screenshots:
+    - `/tmp/successor-agent-loop-live-app.png`
+    - `/tmp/successor-agent-loop-live-app-mobile.png`
+  - independently re-verified search, filters, create, close/reopen,
+    and theme + data persistence with Playwright
+
 ## Unreleased, chat runtime seam extraction + live headless E2E verification (2026-04-10)
 
 This pass continues the post-`v0.1.29` cleanup by pulling the native

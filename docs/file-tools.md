@@ -55,6 +55,27 @@ Recovery posture:
 - retry `write_file` / `edit_file` with the native tool
 - do not bypass the guard with heredocs, `sed`, `awk`, inline Python, or shell redirection
 
+## Fast Post-Write Checks
+
+Native file mutation does not stop at "bytes changed on disk".
+`write_file` and `edit_file` now try one fast deterministic
+post-write sanity check when the file type and local workspace make that
+possible.
+
+- Python:
+  - prefer `ruff check <path>` when the nearest workspace advertises
+    Ruff
+  - otherwise fall back to `python -m py_compile <path>`
+- JSON:
+  - `python -m json.tool <path>`
+- JavaScript:
+  - `node --check <path>` when Node is available
+
+These fast checks are advisory, not hidden retries. The file mutation
+still completes, but the tool output, progress summary, trace, and
+playback all surface whether the fast check passed or failed so the
+model can react in the next turn.
+
 ## User-Visible Surfaces
 
 The same native file-tool surface now appears in:
@@ -77,6 +98,13 @@ File tools solve authoring. Verification is a separate control problem.
   output, runtime logs, or a small verifier/player script.
 - Recording bundles persist the latest contract as `assertions.json`
   when the run produced explicit proof state.
+- When the model needs a fresh checker, use `subagent` with
+  `role="verification"`. That worker is read-only by construction:
+  no `write_file`, no `edit_file`, no nested subagents, and
+  non-mutating bash only.
+- Verification workers should start with the repo contract when
+  available, then try to prove the changed behavior directly with
+  runtime evidence rather than source inspection alone.
 
 ## Notes
 

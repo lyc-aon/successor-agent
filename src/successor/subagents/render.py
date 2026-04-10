@@ -36,7 +36,7 @@ def _wrapped_output(card: SubagentToolCard, width: int) -> list[str]:
 def measure_subagent_card_height(card: SubagentToolCard, *, width: int) -> int:
     if width < 24:
         return 0
-    params = 3 if card.name else 2
+    params = 4 if card.name else 3
     return 2 + params + len(_wrapped_output(card, width))
 
 
@@ -55,6 +55,7 @@ def paint_subagent_card(
 
     params: list[tuple[str, str]] = [
         ("task", card.task_id),
+        ("role", card.kind_label),
         ("status", "queued"),
     ]
     if card.name:
@@ -69,7 +70,7 @@ def paint_subagent_card(
         chars=BOX_ROUND,
     )
 
-    header = " ⎇ subagent "
+    header = f" ⎇ {card.kind_label} "
     header = header[: max(0, w - 4)]
     paint_text(
         grid,

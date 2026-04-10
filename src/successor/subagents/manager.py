@@ -33,7 +33,7 @@ from typing import Any, Callable
 from ..loader import config_dir
 from ..profiles import Profile
 from .config import SubagentConfig
-from .prompt import build_child_prompt
+from .prompt import build_child_prompt, normalize_subagent_role
 
 
 def _default_transcript_dir() -> Path:
@@ -86,6 +86,7 @@ class SubagentTaskSnapshot:
     task_id: str
     name: str
     directive: str
+    role: str
     status: str
     created_at: float
     started_at: float | None
@@ -132,6 +133,7 @@ class _TaskState:
     task_id: str
     name: str
     directive: str
+    role: str
     profile: Profile
     config: SubagentConfig
     context_snapshot: list[dict[str, Any]]
@@ -156,6 +158,7 @@ class _TaskState:
             task_id=self.task_id,
             name=self.name,
             directive=self.directive,
+            role=self.role,
             status=self.status,
             created_at=self.created_at,
             started_at=self.started_at,
@@ -214,11 +217,13 @@ class SubagentManager:
         *,
         directive: str,
         name: str = "",
+        role: str = "worker",
         context_snapshot: list[dict[str, Any]],
         profile: Profile,
         config: SubagentConfig,
     ) -> SubagentTaskSnapshot:
         directive = directive.strip()
+        normalized_role = normalize_subagent_role(role)
         created_at = time.monotonic()
         task_id = self._new_task_id()
         transcript_path = self._transcript_dir / f"{_now_ts()}-{task_id}.json"
@@ -226,6 +231,7 @@ class SubagentManager:
             task_id=task_id,
             name=" ".join(name.split()),
             directive=directive,
+            role=normalized_role,
             profile=profile,
             config=config,
             context_snapshot=list(context_snapshot),
@@ -308,6 +314,27 @@ class SubagentManager:
             self._next_id += 1
         return task_id
 
+    def _build_child_profile(self, task: _TaskState) -> Profile:
+        tools = tuple(
+            tool for tool in (task.profile.tools or ())
+            if tool != "subagent"
+        )
+        tool_config = dict(task.profile.tool_config or {})
+        if task.role == "verification":
+            tools = tuple(
+                tool for tool in tools
+                if tool not in {"write_file", "edit_file"}
+            )
+            bash_config = dict(tool_config.get("bash") or {})
+            bash_config["allow_mutating"] = False
+            bash_config["allow_dangerous"] = False
+            tool_config["bash"] = bash_config
+        return replace(
+            task.profile,
+            tools=tools,
+            tool_config=tool_config,
+        )
+
     def _run_task(self, task: _TaskState) -> None:
         acquired = False
         try:
@@ -323,13 +350,7 @@ class SubagentManager:
 
             from ..chat import SuccessorChat, _Message
 
-            child_profile = replace(
-                task.profile,
-                tools=tuple(
-                    tool for tool in (task.profile.tools or ())
-                    if tool != "subagent"
-                ),
-            )
+            child_profile = self._build_child_profile(task)
             child = SuccessorChat(
                 profile=child_profile,
                 client=self._client_factory(child_profile),
@@ -355,7 +376,7 @@ class SubagentManager:
                 )
                 for snap in task.context_snapshot
             ]
-            child.input_buffer = build_child_prompt(task.directive)
+            child.input_buffer = build_child_prompt(task.directive, role=task.role)
             with self._lock:
                 task.child_chat = child
             child._submit()

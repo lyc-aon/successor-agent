@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import os
+import shlex
+import shutil
 import stat
+import subprocess
+import sys
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+
+import tomllib
 
 from .bash.cards import ToolCard
 from .bash.diff_artifact import build_change_artifact_from_text
@@ -41,6 +47,24 @@ class FileReadStateEntry:
 class FileReadTracker:
     last_key: tuple[str, int, int | None] | None = None
     consecutive: int = 0
+
+
+@dataclass(slots=True, frozen=True)
+class FileValidationResult:
+    command: str
+    ok: bool
+    skipped: bool = False
+    summary: str = ""
+    output: str = ""
+
+    def to_metadata(self) -> dict[str, Any]:
+        return {
+            "command": self.command,
+            "ok": self.ok,
+            "skipped": self.skipped,
+            "summary": self.summary,
+            "output": self.output,
+        }
 
 
 def normalize_file_path(file_path: str, *, working_directory: str) -> str:
@@ -280,7 +304,8 @@ def run_write_file(
     )
     artifact = build_change_artifact_from_text(path, before_raw, after_raw)
     action = "created" if before_raw is None else "updated"
-    output = f"{action} {path}"
+    validation = _validate_written_file(path, working_directory=working_directory)
+    output = _format_mutation_output(f"{action} {path}", validation)
     final_card = replace(
         preview,
         params=_replace_param(preview.params, "path", path),
@@ -294,7 +319,15 @@ def run_write_file(
         output=output,
         exit_code=0,
         final_card=final_card,
-        metadata={"path": path, "created": before_raw is None},
+        metadata={
+            "path": path,
+            "created": before_raw is None,
+            **(
+                {"validation": validation.to_metadata()}
+                if validation is not None
+                else {}
+            ),
+        },
     )
 
 
@@ -359,7 +392,11 @@ def run_edit_file(
     artifact = build_change_artifact_from_text(path, raw_text, replaced_raw)
     count = matches if replace_all else 1
     noun = "occurrence" if count == 1 else "occurrences"
-    output = f"replaced {count} {noun} in {path}"
+    validation = _validate_written_file(path, working_directory=working_directory)
+    output = _format_mutation_output(
+        f"replaced {count} {noun} in {path}",
+        validation,
+    )
     final_card = replace(
         preview,
         params=_replace_param(preview.params, "path", path),
@@ -377,6 +414,11 @@ def run_edit_file(
             "path": path,
             "replacement_count": count,
             "replace_all": replace_all,
+            **(
+                {"validation": validation.to_metadata()}
+                if validation is not None
+                else {}
+            ),
         },
     )
 
@@ -443,6 +485,133 @@ def _write_text_file(path: str, content: str) -> None:
     file_path = Path(path)
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_text(content, encoding="utf-8", newline="")
+
+
+def _validate_written_file(
+    path: str,
+    *,
+    working_directory: str,
+) -> FileValidationResult | None:
+    candidate = Path(path)
+    suffix = candidate.suffix.lower()
+
+    command: list[str] | None = None
+    cwd: str | None = None
+    summary = ""
+    if suffix == ".py":
+        ruff_root = _find_ruff_root(
+            start=candidate.parent,
+            working_directory=Path(working_directory),
+        )
+        if ruff_root is not None and shutil.which("ruff"):
+            command = ["ruff", "check", path]
+            cwd = str(ruff_root)
+            summary = "ruff check"
+        else:
+            command = [sys.executable, "-m", "py_compile", path]
+            summary = "py_compile"
+    elif suffix == ".json":
+        command = [sys.executable, "-m", "json.tool", path]
+        summary = "json.tool"
+    elif suffix in {".js", ".mjs", ".cjs"} and shutil.which("node"):
+        command = ["node", "--check", path]
+        summary = "node --check"
+
+    if command is None:
+        return None
+
+    quoted = " ".join(shlex.quote(part) for part in command)
+    try:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return FileValidationResult(
+            command=quoted,
+            ok=False,
+            summary=summary,
+            output=str(exc),
+        )
+
+    output = (result.stdout or "").strip()
+    stderr = (result.stderr or "").strip()
+    detail = stderr or output
+    if detail:
+        detail = _clip_text(detail, limit=1600)
+    return FileValidationResult(
+        command=quoted,
+        ok=(result.returncode == 0),
+        summary=summary,
+        output=detail,
+    )
+
+
+def _find_ruff_root(start: Path, *, working_directory: Path) -> Path | None:
+    current = start.resolve()
+    boundary = working_directory.expanduser().resolve()
+    candidates = [current, *current.parents]
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        if (candidate / "ruff.toml").is_file() or (candidate / ".ruff.toml").is_file():
+            return candidate
+        pyproject = candidate / "pyproject.toml"
+        if pyproject.is_file() and _pyproject_declares_ruff(pyproject):
+            return candidate
+        if candidate == boundary:
+            break
+    return None
+
+
+def _pyproject_declares_ruff(path: Path) -> bool:
+    try:
+        with path.open("rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    tool = data.get("tool")
+    if isinstance(tool, dict) and isinstance(tool.get("ruff"), dict):
+        return True
+    project = data.get("project")
+    if not isinstance(project, dict):
+        return False
+    optional = project.get("optional-dependencies")
+    if not isinstance(optional, dict):
+        return False
+    for group in optional.values():
+        if not isinstance(group, list):
+            continue
+        for item in group:
+            if isinstance(item, str) and item.strip().lower().startswith("ruff"):
+                return True
+    return False
+
+
+def _format_mutation_output(
+    base_output: str,
+    validation: FileValidationResult | None,
+) -> str:
+    if validation is None:
+        return base_output
+    if validation.ok:
+        status_line = f"fast check: {validation.command} (ok)"
+    else:
+        status_line = f"fast check: {validation.command} (failed)"
+    if validation.output:
+        return f"{base_output}\n\n{status_line}\n\n{validation.output}"
+    return f"{base_output}\n\n{status_line}"
+
+
+def _clip_text(text: str, *, limit: int) -> str:
+    compact = text.strip()
+    if len(compact) <= limit:
+        return compact
+    return compact[: max(0, limit - 1)].rstrip() + "…"
 
 
 def _coerce_offset(value: Any) -> int:

@@ -358,11 +358,16 @@ notification.
 
 Call the `subagent` tool with a short `prompt` directive and, when
 helpful, a short `name` so the task badge and `/tasks` list are easy
-to scan.
+to scan. You may also pass `role="verification"` to launch a stricter
+read-only verifier instead of a normal worker.
 
 Example — fork a repo audit:
 
     {"prompt": "Audit the repo for version mismatches between pyproject.toml and src/successor/__init__.py. Report what is actually true.", "name": "version-audit"}
+
+Example — fork a verification pass:
+
+    {"prompt": "Verify the new playback zoom controls. Run the relevant tests, use the browser if needed, and report PASS/FAIL with evidence.", "name": "playback-qa", "role": "verification"}
 
 ### Critical rules
 
@@ -370,6 +375,9 @@ Example — fork a repo audit:
   directive, not a full re-explanation of the task.
 - Use subagents when intermediate tool noise would clutter the main
   context or when background work can proceed independently.
+- Use `role="verification"` when you want an independent read-only
+  checker that runs tests, browser checks, or edge cases without
+  editing project files.
 - Do not assume results before the completion notification arrives.
 - Do not read the worker transcript while it is still running unless
   the user explicitly asks for a progress check.
@@ -391,6 +399,9 @@ independently.
   background while you keep the foreground turn clean.
 - Narrow, self-contained tasks where a concise final report is more useful
   than watching every intermediate tool call.
+- Use `role="verification"` when you want a fresh read-only checker to
+  run tests, lint, browser checks, or adversarial probes before you
+  declare the work done.
 
 ### Writing the prompt
 
@@ -435,6 +446,15 @@ _SUBAGENT_TOOL_SCHEMA: dict[str, Any] = {
                     "description": (
                         "Optional short task label, ideally one or two words, "
                         "used in the task badge and completion notice."
+                    ),
+                },
+                "role": {
+                    "type": "string",
+                    "enum": ["worker", "verification"],
+                    "description": (
+                        "Optional worker role. Use `worker` for normal background "
+                        "execution. Use `verification` for a stricter read-only "
+                        "verifier that should prove the work with evidence."
                     ),
                 },
             },
