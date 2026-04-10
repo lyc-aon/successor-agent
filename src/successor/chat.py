@@ -65,8 +65,10 @@ from .context_usage import (
     ContextUsageSnapshot,
     PromptSection,
     RequestTokenEstimate,
+    StreamPerfSnapshot,
     TurnRequestEnvelope,
     build_context_usage_snapshot,
+    build_stream_perf_snapshot,
     estimate_live_output_tokens,
     estimate_request_input_tokens,
     normalize_usage_payload,
@@ -175,6 +177,7 @@ from .render.chat_input import (
 from .render.chat_overlays import (
     paint_arg_mode as paint_arg_mode_overlay,
     paint_help_overlay as paint_help_overlay_surface,
+    paint_history_overlay as paint_history_overlay_surface,
     paint_name_mode as paint_name_mode_overlay,
     paint_no_matches as paint_no_matches_overlay,
 )
@@ -295,6 +298,7 @@ _HELP_SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("Ctrl+B Ctrl+F", "vim-style page up / down"),
         ("Ctrl+N",      "vim-style line down"),
         ("Ctrl+E Ctrl+Y", "vim-style end / top"),
+        ("Ctrl+R",      "open the history browser"),
     )),
     ("look & feel", (
         ("Ctrl+,",      "open profile config menu"),
@@ -412,7 +416,7 @@ WHEEL_SCROLL_LINES = 3
 MAX_AGENT_TURNS = DEFAULT_MAX_AGENT_TURNS
 
 
-# ─── Input history recall ───
+# ─── Input history ───
 #
 # Cap the per-session history at 100 entries. The ring buffer drops
 # the oldest entries past the cap. 100 is enough for a long working
@@ -508,6 +512,16 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
     SlashCommand(
         name="budget",
         description="show current context fill % + token usage stats",
+    ),
+    SlashCommand(
+        name="perf",
+        aliases=("kv",),
+        description="show stream latency + prompt-cache diagnostics",
+    ),
+    SlashCommand(
+        name="history",
+        description="open the prompt history browser",
+        args_hint="[query]",
     ),
     SlashCommand(
         name="burn",
@@ -1390,6 +1404,18 @@ class SuccessorChat(App):
         self._help_open: bool = False
         self._help_opened_at: float = 0.0
 
+        # ─── History overlay state ───
+        # Dedicated prompt-history browser opened via Ctrl+R or
+        # /history. This replaces the old shell-style "empty prompt +
+        # Up arrow" recall path so bare arrows can remain pure scroll
+        # keys and mouse-off alternate-scroll can translate wheel
+        # motion into scroll without colliding with prompt recall.
+        self._history_overlay_open: bool = False
+        self._history_overlay_opened_at: float = 0.0
+        self._history_overlay_query: str = ""
+        self._history_overlay_selected: int = 0
+        self._history_overlay_draft: str = ""
+
         # ─── Search state ───
         # When _search_active is True, the input area is replaced with
         # a search bar. As the user types a query, every match in the
@@ -1462,6 +1488,10 @@ class SuccessorChat(App):
         # completed stream, kept for diagnostics and normalization.
         self._last_usage: dict | None = None
         self._last_usage_telemetry = None  # UsageTelemetry | None
+        self._stream_opened_at: float | None = None
+        self._stream_started_at: float | None = None
+        self._last_stream_perf: StreamPerfSnapshot | None = None
+        self._recent_stream_perf: list[StreamPerfSnapshot] = []
         # Bash detector for the current stream — when bash is in
         # profile.tools, _submit creates one of these and _pump_stream
         # feeds ContentChunk text to it. After StreamEnded, we drain
@@ -1568,26 +1598,12 @@ class SuccessorChat(App):
         # the model produces a huge summary.
         self._autocompact_attempted_this_turn: bool = False
 
-        # ─── Input history recall (Up/Down arrow shell-style) ───
-        # Ring buffer of submitted user messages so Up arrow can
-        # recall previous prompts without retyping them. Bash and zsh
-        # users expect this; the absence is jarring on the first
-        # session. Behavior:
-        #
-        #   * EMPTY input + Up = enter recall mode, load most recent
-        #   * Recall mode + Up = older entry
-        #   * Recall mode + Down = newer entry, then back to draft
-        #   * Any editing key in recall mode = exit recall, keep buffer
-        #   * Esc in recall mode = restore the saved draft
-        #   * Submit always exits recall mode and adds to history
-        #
-        # History is in-memory only (not persisted across sessions)
-        # for v1. Slash commands are included but consecutive
-        # duplicates are deduped so /profile cycle spam doesn't fill
-        # the buffer.
+        # ─── Input history ───
+        # Ring buffer of submitted prompts, surfaced through the
+        # dedicated history overlay. History is in-memory only for v1.
+        # Slash commands are included, but consecutive duplicates are
+        # deduped so /profile cycle spam doesn't fill the buffer.
         self._input_history: list[str] = []
-        self._input_history_idx: int | None = None  # None = not in recall mode
-        self._input_history_draft: str = ""  # saved draft for restore
 
         # Cache pre-warming worker — fires after compaction completes
         # to populate llama.cpp's KV cache with the post-compact prefix.
@@ -1778,6 +1794,25 @@ class SuccessorChat(App):
             self._help_open = False
             return
 
+        if self._history_overlay_open:
+            if event.button == MouseButton.WHEEL_UP:
+                self._history_overlay_move(-1)
+                return
+            if event.button == MouseButton.WHEEL_DOWN:
+                self._history_overlay_move(+1)
+                return
+            if event.button == MouseButton.LEFT and event.pressed:
+                for hb in self._hit_boxes:
+                    if hb.contains(event.col, event.row) and hb.action.startswith("history:"):
+                        try:
+                            self._history_overlay_selected = int(hb.action.split(":", 1)[1])
+                        except ValueError:
+                            self._history_overlay_selected = 0
+                        self._history_overlay_accept()
+                        return
+                self._close_history_overlay(restore_draft=True)
+                return
+
         # Scroll wheel — always navigate the chat history.
         if event.button == MouseButton.WHEEL_UP:
             self._scroll_lines(WHEEL_SCROLL_LINES)
@@ -1829,18 +1864,7 @@ class SuccessorChat(App):
                         self._autocomplete_accept()
                 return
 
-    # ─── Input history recall ───
-
-    def _history_in_recall_mode(self) -> bool:
-        """True when the user is currently navigating input history.
-
-        Set by Up arrow on an empty buffer, cleared by submit, by an
-        editing key, or by Esc. Used by the Up/Down handlers to know
-        whether they should navigate history vs scroll the chat, and
-        by the printable/backspace handlers to know whether they
-        should snap out of recall mode before applying the edit.
-        """
-        return self._input_history_idx is not None
+    # ─── Input history ───
 
     def _history_add(self, text: str) -> None:
         """Append `text` to the in-memory history if it is non-empty
@@ -1859,64 +1883,59 @@ class SuccessorChat(App):
             # Drop the oldest entries until we are back at the cap.
             self._input_history = self._input_history[-INPUT_HISTORY_MAX:]
 
-    def _history_enter_recall(self) -> None:
-        """Enter history recall mode from the empty-buffer state.
+    def _history_overlay_entries(self) -> list[str]:
+        query = self._history_overlay_query.strip().casefold()
+        entries = list(reversed(self._input_history))
+        if not query:
+            return entries
+        return [entry for entry in entries if query in entry.casefold()]
 
-        Saves whatever is currently in the input buffer (the
-        in-progress draft, possibly empty) so Down-past-newest can
-        restore it later. Loads the most recent history entry into
-        the buffer and points the recall cursor at it.
-        """
+    def _open_history_overlay(self, *, initial_query: str = "") -> bool:
         if not self._input_history:
-            return  # nothing to recall
-        self._input_history_draft = self.input_buffer
-        self._input_history_idx = len(self._input_history) - 1
-        self.input_buffer = self._input_history[self._input_history_idx]
-        # Reset autocomplete state — the recalled text is data, not
-        # an interactive command-typing session.
-        self._autocomplete_selected = 0
-        self._autocomplete_dismissed = True
+            self.messages.append(_Message(
+                "successor",
+                "history is empty. Submit a prompt first, then open /history or press Ctrl+R.",
+                synthetic=True,
+            ))
+            return False
+        self._help_open = False
+        self._history_overlay_open = True
+        self._history_overlay_opened_at = time.monotonic()
+        self._history_overlay_query = initial_query.strip()
+        self._history_overlay_selected = 0
+        self._history_overlay_draft = self.input_buffer
+        return True
 
-    def _history_recall_older(self) -> None:
-        """Move the recall cursor one entry older. No-op at the top.
-
-        Called from the Up arrow handler when already in recall mode.
-        """
-        if self._input_history_idx is None:
-            return
-        if self._input_history_idx > 0:
-            self._input_history_idx -= 1
-            self.input_buffer = self._input_history[self._input_history_idx]
-
-    def _history_recall_newer(self) -> None:
-        """Move the recall cursor one entry newer.
-
-        If we step past the newest entry, exit recall mode and
-        restore the saved draft (which may be the empty string).
-        Called from the Down arrow handler when already in recall
-        mode.
-        """
-        if self._input_history_idx is None:
-            return
-        if self._input_history_idx < len(self._input_history) - 1:
-            self._input_history_idx += 1
-            self.input_buffer = self._input_history[self._input_history_idx]
-        else:
-            # Past the newest entry — restore the draft and exit recall
-            self._history_exit_recall(restore_draft=True)
-
-    def _history_exit_recall(self, *, restore_draft: bool = False) -> None:
-        """Exit recall mode without losing the buffer.
-
-        With restore_draft=True, restores the in-progress draft that
-        was saved when recall mode was entered. With restore_draft=False
-        (the default), keeps whatever is currently in the buffer so
-        the user can edit the recalled text directly.
-        """
+    def _close_history_overlay(self, *, restore_draft: bool = False) -> None:
         if restore_draft:
-            self.input_buffer = self._input_history_draft
-        self._input_history_idx = None
-        self._input_history_draft = ""
+            self.input_buffer = self._history_overlay_draft
+        self._history_overlay_open = False
+        self._history_overlay_opened_at = 0.0
+        self._history_overlay_query = ""
+        self._history_overlay_selected = 0
+        self._history_overlay_draft = ""
+
+    def _history_overlay_move(self, delta: int) -> None:
+        entries = self._history_overlay_entries()
+        if not entries:
+            self._history_overlay_selected = 0
+            return
+        new_index = self._history_overlay_selected + delta
+        if new_index < 0:
+            new_index = 0
+        if new_index >= len(entries):
+            new_index = len(entries) - 1
+        self._history_overlay_selected = new_index
+
+    def _history_overlay_accept(self) -> None:
+        entries = self._history_overlay_entries()
+        if not entries:
+            return
+        selected = min(max(0, self._history_overlay_selected), len(entries) - 1)
+        self.input_buffer = entries[selected]
+        self._autocomplete_selected = 0
+        self._autocomplete_dismissed = False
+        self._close_history_overlay(restore_draft=False)
 
     def _handle_key_event(self, event: KeyEvent) -> None:
         # ─── Help overlay dismiss ───
@@ -1925,6 +1944,49 @@ class SuccessorChat(App):
         # we don't pass it through to the normal handlers.
         if self._help_open:
             self._help_open = False
+            return
+
+        # ─── History overlay (modal prompt recall browser) ───
+        if self._history_overlay_open:
+            if event.key == Key.ESC:
+                self._close_history_overlay(restore_draft=True)
+                return
+            if event.key == Key.ENTER:
+                self._history_overlay_accept()
+                return
+            if event.key == Key.UP or (event.is_ctrl and event.char == "p"):
+                self._history_overlay_move(-1)
+                return
+            if event.key == Key.DOWN or (event.is_ctrl and event.char == "n"):
+                self._history_overlay_move(+1)
+                return
+            if event.key == Key.PG_UP:
+                self._history_overlay_move(-6)
+                return
+            if event.key == Key.PG_DOWN:
+                self._history_overlay_move(+6)
+                return
+            if event.key == Key.HOME:
+                self._history_overlay_selected = 0
+                return
+            if event.key == Key.END:
+                entries = self._history_overlay_entries()
+                self._history_overlay_selected = max(0, len(entries) - 1)
+                return
+            if event.key == Key.BACKSPACE:
+                if self._history_overlay_query:
+                    self._history_overlay_query, _ = delete_prev_grapheme(
+                        self._history_overlay_query,
+                        len(self._history_overlay_query),
+                    )
+                    self._history_overlay_selected = 0
+                return
+            if event.is_char and event.char and not event.is_ctrl:
+                safe = "".join(c for c in event.char if ord(c) >= 0x20)
+                if safe:
+                    self._history_overlay_query += safe
+                    self._history_overlay_selected = 0
+                return
             return
 
         # ─── Search mode (when active, intercepts most keys) ───
@@ -1982,6 +2044,11 @@ class SuccessorChat(App):
             self._search_open()
             return
 
+        # ─── History browser open (Ctrl+R) ───
+        if event.is_ctrl and event.char == "r":
+            self._open_history_overlay()
+            return
+
         # ─── Theme cycle (always available, even mid-stream) ───
         if event.is_ctrl and event.char == "t":
             self._cycle_theme()
@@ -2025,27 +2092,21 @@ class SuccessorChat(App):
         # ─── Scroll keys (always available, even mid-stream) ───
         # Up/Down arrow key dispatch is layered:
         #   1. autocomplete dropdown open → navigate dropdown selection
-        #   2. already in input history recall mode → navigate history
-        #   3. empty input buffer + history exists → ENTER recall mode
-        #   4. otherwise → scroll the chat by one line
-        # That priority lets bash users hit Up to recall when they
-        # have nothing typed, scroll the chat when they have a draft
-        # in flight, and never accidentally clobber typed input.
+        #   2. otherwise → scroll the chat by one line
+        #
+        # Prompt history moved into the dedicated history browser
+        # (Ctrl+R / /history). That keeps bare arrows pure scroll keys
+        # and lets alternate-scroll terminals translate wheel input into
+        # Up/Down without colliding with prompt recall.
         if event.key == Key.UP:
             if self._autocomplete_active():
                 self._autocomplete_move(-1)
-            elif self._history_in_recall_mode():
-                self._history_recall_older()
-            elif not self.input_buffer and self._input_history:
-                self._history_enter_recall()
             else:
                 self._scroll_lines(1)
             return
         if event.key == Key.DOWN:
             if self._autocomplete_active():
                 self._autocomplete_move(1)
-            elif self._history_in_recall_mode():
-                self._history_recall_newer()
             else:
                 self._scroll_lines(-1)
             return
@@ -2124,12 +2185,6 @@ class SuccessorChat(App):
         # ─── Editing ───
         if event.key == Key.BACKSPACE:
             if self.input_buffer:
-                # If we are mid-recall, exit recall mode FIRST so the
-                # user is editing the recalled text as a normal draft,
-                # not a frozen history snapshot. The buffer keeps its
-                # current contents, the recall cursor is dropped.
-                if self._history_in_recall_mode():
-                    self._history_exit_recall(restore_draft=False)
                 self.input_buffer, _ = delete_prev_grapheme(
                     self.input_buffer,
                     len(self.input_buffer),
@@ -2190,12 +2245,6 @@ class SuccessorChat(App):
             # with / so we never blow away a long message.
             if self.input_buffer.startswith("/"):
                 self._autocomplete_dismiss()
-            # Esc in history recall mode: bail out of recall and put
-            # back whatever in-progress draft was on screen before
-            # the user pressed Up. This is the "I changed my mind"
-            # escape hatch.
-            if self._history_in_recall_mode():
-                self._history_exit_recall(restore_draft=True)
             return
 
         # ─── Character input (printable + UTF-8 + paste chunks) ───
@@ -2215,11 +2264,6 @@ class SuccessorChat(App):
                 if c == "\n" or ord(c) >= 0x20
             )
             if safe:
-                # If we are mid-recall, exit recall mode FIRST so the
-                # user is editing the recalled text as a normal draft,
-                # not appending to a frozen history snapshot.
-                if self._history_in_recall_mode():
-                    self._history_exit_recall(restore_draft=False)
                 self.input_buffer += safe
                 # New character → re-filter the autocomplete from the top
                 # and bring the dropdown back if it was dismissed.
@@ -3621,6 +3665,64 @@ class SuccessorChat(App):
         self._active_request_estimate = estimate
         self._invalidate_token_cache()
 
+    def _mark_stream_opened(self) -> None:
+        self._stream_opened_at = time.monotonic()
+        self._stream_started_at = None
+
+    def _mark_stream_started(self) -> float | None:
+        if self._stream_opened_at is None:
+            return None
+        if self._stream_started_at is None:
+            self._stream_started_at = time.monotonic()
+        return max(0.0, (self._stream_started_at - self._stream_opened_at) * 1000.0)
+
+    def _clear_stream_perf_markers(self) -> None:
+        self._stream_opened_at = None
+        self._stream_started_at = None
+
+    def _record_stream_perf(
+        self,
+        *,
+        turn: int,
+        finish_reason: str,
+        raw_usage: dict | None,
+        raw_timings: dict | None,
+    ) -> StreamPerfSnapshot:
+        envelope = self._active_request_envelope
+        total_stream_ms: float | None = None
+        if self._stream_opened_at is not None:
+            total_stream_ms = max(0.0, (time.monotonic() - self._stream_opened_at) * 1000.0)
+        first_token_ms: float | None = None
+        if self._stream_opened_at is not None and self._stream_started_at is not None:
+            first_token_ms = max(
+                0.0,
+                (self._stream_started_at - self._stream_opened_at) * 1000.0,
+            )
+
+        snapshot = build_stream_perf_snapshot(
+            turn=turn,
+            finish_reason=finish_reason,
+            provider=str((self.profile.provider or {}).get("type") or ""),
+            stable_system_hash=envelope.stable_system_hash if envelope is not None else "",
+            request_slot_id=envelope.request_slot_id if envelope is not None else None,
+            request_cache_prompt=envelope.request_cache_prompt if envelope is not None else None,
+            cache_break_reasons=(
+                tuple(envelope.cache_break_reasons)
+                if envelope is not None else ()
+            ),
+            first_token_ms=first_token_ms,
+            total_stream_ms=total_stream_ms,
+            raw_usage=raw_usage,
+            raw_timings=raw_timings,
+            prior_snapshots=tuple(self._recent_stream_perf),
+        )
+        self._last_stream_perf = snapshot
+        self._recent_stream_perf.append(snapshot)
+        if len(self._recent_stream_perf) > 16:
+            self._recent_stream_perf = self._recent_stream_perf[-16:]
+        self._clear_stream_perf_markers()
+        return snapshot
+
     def _finalize_active_request_usage(self, raw_usage: dict | None) -> None:
         self._last_request_estimate = self._active_request_estimate
         telemetry = normalize_usage_payload(raw_usage)
@@ -3747,6 +3849,96 @@ class SuccessorChat(App):
                 lines.append(f"  {entry.label}: {entry.tokens:,}")
         msg = "\n".join(lines)
         self.messages.append(_Message("successor", msg, synthetic=True))
+
+    def _handle_perf_cmd(self) -> None:
+        active_duration_ms: float | None = None
+        if self._stream is not None and self._stream_opened_at is not None:
+            active_duration_ms = max(0.0, (time.monotonic() - self._stream_opened_at) * 1000.0)
+
+        if not self._recent_stream_perf and active_duration_ms is None:
+            self.messages.append(
+                _Message(
+                    "successor",
+                    "performance: no completed streams yet.",
+                    synthetic=True,
+                )
+            )
+            return
+
+        def _fmt_ms(value: float | None) -> str:
+            if value is None:
+                return "?"
+            if value >= 1000.0:
+                return f"{value / 1000.0:.2f}s"
+            return f"{value:.0f}ms"
+
+        def _fmt_pct(value: float | None) -> str:
+            if value is None:
+                return "?"
+            return f"{value * 100.0:.1f}%"
+
+        latest = self._last_stream_perf
+        lines: list[str] = []
+        if latest is not None:
+            lines.append(
+                f"last turn {latest.turn} · provider {latest.provider or '?'} · "
+                f"first token {_fmt_ms(latest.first_token_ms)} · "
+                f"stream {_fmt_ms(latest.total_stream_ms)} · "
+                f"finish {latest.finish_reason}"
+            )
+            breaks = ", ".join(latest.cache_break_reasons) if latest.cache_break_reasons else "none"
+            lines.append(
+                f"request: slot {latest.request_slot_id if latest.request_slot_id is not None else '?'} · "
+                f"cache_prompt {latest.request_cache_prompt if latest.request_cache_prompt is not None else '?'} · "
+                f"stable hash {latest.stable_system_hash or '?'} · "
+                f"breaks {breaks}"
+            )
+            if latest.timings is not None:
+                lines.append(
+                    "provider timings: "
+                    f"cache_n={latest.cache_hit_tokens if latest.cache_hit_tokens is not None else '?'} · "
+                    f"prompt_n={latest.prompt_eval_tokens if latest.prompt_eval_tokens is not None else '?'} · "
+                    f"hit={_fmt_pct(latest.prompt_cache_hit_ratio)} · "
+                    f"prompt_ms={_fmt_ms(latest.prompt_eval_ms)} · "
+                    f"gen_ms={_fmt_ms(latest.generation_ms)}"
+                )
+            if latest.usage is not None:
+                lines.append(
+                    "provider usage: "
+                    f"input={latest.usage.input_tokens if latest.usage.input_tokens is not None else '?'} · "
+                    f"output={latest.usage.output_tokens if latest.usage.output_tokens is not None else '?'} · "
+                    f"total={latest.usage.total_tokens if latest.usage.total_tokens is not None else '?'}"
+                )
+            if latest.suspected_kv_miss:
+                lines.append(
+                    f"diagnostic: suspected KV miss · {latest.suspected_kv_miss_reason}"
+                )
+            elif latest.prompt_cache_hit_ratio is not None:
+                lines.append(
+                    f"diagnostic: prompt cache reuse {_fmt_pct(latest.prompt_cache_hit_ratio)}"
+                )
+            elif latest.timings is None:
+                lines.append("diagnostic: provider did not report prompt timings")
+
+        if active_duration_ms is not None:
+            lines.append(f"active stream: open for {_fmt_ms(active_duration_ms)}")
+
+        if self._recent_stream_perf:
+            lines.append("recent turns:")
+            for snapshot in reversed(self._recent_stream_perf[-6:]):
+                tag = "suspected-miss" if snapshot.suspected_kv_miss else "ok"
+                lines.append(
+                    "  "
+                    f"turn {snapshot.turn} · first {_fmt_ms(snapshot.first_token_ms)} · "
+                    f"prompt {_fmt_ms(snapshot.prompt_eval_ms)} · "
+                    f"hit {_fmt_pct(snapshot.prompt_cache_hit_ratio)} · "
+                    f"slot {snapshot.request_slot_id if snapshot.request_slot_id is not None else '?'} · "
+                    f"{tag}"
+                )
+
+        self.messages.append(
+            _Message("successor", "\n".join(lines), synthetic=True)
+        )
 
     # ─── /burn ───
 
@@ -4444,11 +4636,15 @@ class SuccessorChat(App):
             self._paint_static_footer(grid, layout.static_y, cols, theme)
 
         # ─── Slash command autocomplete dropdown ───
-        # Painted LAST so it overlays the chat area cells just above the
-        # input. The chat content underneath is temporarily hidden while
-        # the dropdown is visible; closing it (Esc / submit / type a
-        # space) restores everything on the next frame's diff.
-        self._paint_autocomplete(grid, theme, layout.input_y)
+        # Painted late so it overlays the chat area cells just above the
+        # input. When the history browser is open, it owns the modal
+        # layer instead and autocomplete stays hidden under it.
+        if not self._history_overlay_open:
+            self._paint_autocomplete(grid, theme, layout.input_y)
+
+        # ─── History browser ───
+        if self._history_overlay_open:
+            self._paint_history_overlay(grid, theme)
 
         # ─── Help overlay ───
         # Painted EVEN LATER so it overlays everything else, including
@@ -4717,6 +4913,19 @@ class SuccessorChat(App):
             theme,
             opened_at=self._help_opened_at,
             sections=sections,
+        )
+
+    def _paint_history_overlay(self, grid: Grid, theme: ThemeVariant) -> None:
+        self._hit_boxes.extend(
+            paint_history_overlay_surface(
+                grid,
+                theme,
+                opened_at=self._history_overlay_opened_at,
+                entries=self._history_overlay_entries(),
+                selected=self._history_overlay_selected,
+                query=self._history_overlay_query,
+                draft=self._history_overlay_draft,
+            )
         )
 
     # ─── Static footer ───

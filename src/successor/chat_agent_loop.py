@@ -386,9 +386,8 @@ class ChatAgentLoop:
                 text=text,
                 excerpt=_trace_clip_text(text, limit=320),
             )
-        self._host._history_add(text)
-        if self._host._history_in_recall_mode():
-            self._host._history_exit_recall(restore_draft=False)
+        if not text.startswith("/history"):
+            self._host._history_add(text)
         self._host.input_buffer = ""
 
         if self._host._cache_warmer is not None:
@@ -472,6 +471,16 @@ class ChatAgentLoop:
 
         if text == "/budget":
             self._host._handle_budget_cmd()
+            return
+
+        if text in ("/perf", "/kv"):
+            self._host._handle_perf_cmd()
+            return
+
+        if text.startswith("/history"):
+            parts = text.split(maxsplit=1)
+            initial_query = parts[1].strip() if len(parts) > 1 else ""
+            self._host._open_history_overlay(initial_query=initial_query)
             return
 
         if text.startswith("/burn"):
@@ -1364,6 +1373,7 @@ class ChatAgentLoop:
             raise
         self._host._last_sent_stable_prompt_key = prepared.stable_prompt_key
         self._host._remember_active_request_usage(envelope)
+        self._host._mark_stream_opened()
         self._host._trace_event(
             "stream_opened",
             turn=envelope.turn,
@@ -1484,7 +1494,11 @@ class ChatAgentLoop:
         events = self._host._stream.drain()
         for ev in events:
             if isinstance(ev, StreamStarted):
-                self._host._trace_event("stream_started", turn=self._host._agent_turn)
+                self._host._trace_event(
+                    "stream_started",
+                    turn=self._host._agent_turn,
+                    first_token_ms=self._host._mark_stream_started(),
+                )
             elif isinstance(ev, ReasoningChunk):
                 self._host._stream_reasoning_chars += len(ev.text)
             elif isinstance(ev, ContentChunk):
@@ -1502,6 +1516,12 @@ class ChatAgentLoop:
                     display_content = raw_content
                     legacy_blocks = []
                 native_calls = list(getattr(ev, "tool_calls", ()) or ())
+                perf_snapshot = self._host._record_stream_perf(
+                    turn=self._host._agent_turn,
+                    finish_reason=ev.finish_reason,
+                    raw_usage=ev.usage,
+                    raw_timings=getattr(ev, "timings", None),
+                )
                 self._host._trace_event(
                     "stream_end",
                     turn=self._host._agent_turn,
@@ -1513,6 +1533,20 @@ class ChatAgentLoop:
                         _trace_tool_call_summary(tc) for tc in native_calls
                     ],
                     legacy_block_count=len(legacy_blocks),
+                    first_token_ms=perf_snapshot.first_token_ms,
+                    total_stream_ms=perf_snapshot.total_stream_ms,
+                    provider_timings=(
+                        perf_snapshot.timings.raw_timings
+                        if perf_snapshot.timings is not None else None
+                    ),
+                    prompt_cache_hit_ratio=perf_snapshot.prompt_cache_hit_ratio,
+                    cache_hit_tokens=perf_snapshot.cache_hit_tokens,
+                    prompt_eval_tokens=perf_snapshot.prompt_eval_tokens,
+                    prompt_eval_ms=perf_snapshot.prompt_eval_ms,
+                    output_tokens=perf_snapshot.output_tokens,
+                    generation_ms=perf_snapshot.generation_ms,
+                    suspected_kv_miss=perf_snapshot.suspected_kv_miss,
+                    suspected_kv_miss_reason=perf_snapshot.suspected_kv_miss_reason,
                 )
 
                 if raw_content:
@@ -1645,6 +1679,7 @@ class ChatAgentLoop:
                     msg = self.format_stream_error(ev.message)
                 self._append(self._message("successor", msg, synthetic=True))
                 self._host._finalize_active_request_usage(None)
+                self._host._clear_stream_perf_markers()
                 self._host._stream = None
                 self._host._stream_content = []
                 self._host._stream_reasoning_chars = 0

@@ -7,7 +7,7 @@ import time
 from .cells import ATTR_BOLD, ATTR_DIM, Grid, Style
 from .chat_frame import HitBox
 from .paint import fill_region, paint_box, paint_text
-from .text import ease_out_cubic, lerp_rgb
+from .text import ease_out_cubic, hard_wrap, lerp_rgb
 from .theme import ThemeVariant
 
 
@@ -333,3 +333,234 @@ def paint_help_overlay(
                 attrs=ATTR_DIM,
             ),
         )
+
+
+def _history_snippet(text: str, width: int) -> str:
+    collapsed = " ".join(
+        text.replace("\n", " ↵ ").replace("\r", "").split()
+    ).strip()
+    if not collapsed:
+        collapsed = "∅"
+    if width <= 1 or len(collapsed) <= width:
+        return collapsed[:width]
+    return collapsed[: max(1, width - 1)] + "…"
+
+
+def paint_history_overlay(
+    grid: Grid,
+    theme: ThemeVariant,
+    *,
+    opened_at: float,
+    entries: list[str],
+    selected: int,
+    query: str,
+    draft: str,
+    title_text: str = "history browser",
+) -> list[HitBox]:
+    rows, cols = grid.rows, grid.cols
+    if rows < 12 or cols < 64:
+        return []
+
+    box_w = min(max(72, cols - 18), cols - 4)
+    box_h = min(max(14, rows - 6), rows - 2)
+    box_x = max(0, (cols - box_w) // 2)
+    box_y = max(0, (rows - box_h) // 2)
+
+    elapsed = time.monotonic() - opened_at
+    fade_t = ease_out_cubic(min(1.0, elapsed / 0.18))
+
+    def fade(target: int) -> int:
+        return lerp_rgb(theme.bg, target, fade_t)
+
+    border_style = Style(
+        fg=fade(theme.accent_warm),
+        bg=theme.bg_input,
+        attrs=ATTR_BOLD,
+    )
+    fill_style = Style(fg=fade(theme.fg), bg=theme.bg_input)
+    paint_box(
+        grid,
+        box_x,
+        box_y,
+        box_w,
+        box_h,
+        style=border_style,
+        fill_style=fill_style,
+    )
+
+    title_y = box_y + 1
+    if title_y < box_y + box_h - 1:
+        tx = box_x + (box_w - len(title_text)) // 2
+        paint_text(
+            grid,
+            title_text,
+            tx,
+            title_y,
+            style=Style(
+                fg=fade(theme.accent),
+                bg=theme.bg_input,
+                attrs=ATTR_BOLD,
+            ),
+        )
+
+    meta_y = title_y + 1
+    query_text = query if query else "all entries"
+    draft_text = _history_snippet(draft, max(12, box_w - 34))
+    meta = f" filter: {query_text} "
+    draft_meta = f" draft: {draft_text} "
+    if meta_y < box_y + box_h - 1:
+        fill_region(
+            grid,
+            box_x + 1,
+            meta_y,
+            box_w - 2,
+            1,
+            style=Style(bg=theme.bg_footer),
+        )
+        paint_text(
+            grid,
+            meta,
+            box_x + 2,
+            meta_y,
+            style=Style(
+                fg=fade(theme.fg_dim),
+                bg=theme.bg_footer,
+                attrs=ATTR_BOLD,
+            ),
+        )
+        if len(draft_meta) < box_w - 8:
+            dx = box_x + box_w - 2 - len(draft_meta)
+            paint_text(
+                grid,
+                draft_meta,
+                dx,
+                meta_y,
+                style=Style(
+                    fg=fade(theme.fg_subtle),
+                    bg=theme.bg_footer,
+                    attrs=ATTR_DIM,
+                ),
+            )
+
+    preview_rows = min(4, max(2, (box_h - 8) // 3))
+    list_rows = max(3, box_h - 6 - preview_rows)
+    list_top = box_y + 3
+    preview_top = list_top + list_rows
+    hint_y = box_y + box_h - 2
+
+    entry_count = len(entries)
+    selected = min(max(0, selected), max(0, entry_count - 1))
+    if entry_count <= list_rows:
+        start = 0
+    else:
+        start = min(
+            max(0, selected - (list_rows // 2)),
+            max(0, entry_count - list_rows),
+        )
+    visible = entries[start : start + list_rows]
+
+    hitboxes: list[HitBox] = []
+    row_w = box_w - 4
+    snippet_w = max(8, row_w - 8)
+    row_idx_w = max(2, len(str(entry_count)))
+    for offset, entry in enumerate(visible):
+        row_y = list_top + offset
+        row_index = start + offset
+        is_selected = row_index == selected
+        row_bg = theme.accent if is_selected else theme.bg_input
+        num_fg = theme.bg if is_selected else theme.accent_warm
+        row_fg = theme.bg if is_selected else theme.fg
+        fill_region(
+            grid,
+            box_x + 1,
+            row_y,
+            box_w - 2,
+            1,
+            style=Style(bg=row_bg),
+        )
+        num_text = str(row_index + 1).rjust(row_idx_w)
+        paint_text(
+            grid,
+            num_text,
+            box_x + 2,
+            row_y,
+            style=Style(fg=fade(num_fg), bg=row_bg, attrs=ATTR_BOLD),
+        )
+        paint_text(
+            grid,
+            _history_snippet(entry, snippet_w),
+            box_x + 4 + row_idx_w,
+            row_y,
+            style=Style(fg=fade(row_fg), bg=row_bg),
+        )
+        hitboxes.append(
+            HitBox(box_x + 1, row_y, box_w - 2, 1, f"history:{row_index}")
+        )
+
+    if not visible:
+        empty = "no matching history entries"
+        ex = box_x + (box_w - len(empty)) // 2
+        ey = list_top + max(0, list_rows // 2)
+        paint_text(
+            grid,
+            empty,
+            ex,
+            ey,
+            style=Style(
+                fg=fade(theme.fg_dim),
+                bg=theme.bg_input,
+                attrs=ATTR_DIM,
+            ),
+        )
+
+    if preview_top < hint_y:
+        fill_region(
+            grid,
+            box_x + 1,
+            preview_top,
+            box_w - 2,
+            1,
+            style=Style(bg=theme.bg_footer),
+        )
+        paint_text(
+            grid,
+            " preview ",
+            box_x + 2,
+            preview_top,
+            style=Style(
+                fg=fade(theme.fg_dim),
+                bg=theme.bg_footer,
+                attrs=ATTR_BOLD,
+            ),
+        )
+
+        preview_text = entries[selected] if entry_count else ""
+        wrapped = hard_wrap(preview_text or " ", max(8, box_w - 4))
+        preview_lines = wrapped[:preview_rows]
+        for idx in range(preview_rows):
+            row_y = preview_top + 1 + idx
+            if row_y >= hint_y:
+                break
+            line = preview_lines[idx] if idx < len(preview_lines) else ""
+            paint_text(
+                grid,
+                line,
+                box_x + 2,
+                row_y,
+                style=Style(fg=fade(theme.fg), bg=theme.bg_input),
+            )
+
+    hint = "↑/↓ move · type to filter · enter load · esc close"
+    hx = box_x + (box_w - len(hint)) // 2
+    paint_text(
+        grid,
+        hint,
+        hx,
+        hint_y,
+        style=Style(
+            fg=fade(theme.fg_subtle),
+            bg=theme.bg_input,
+            attrs=ATTR_DIM,
+        ),
+    )
+    return hitboxes

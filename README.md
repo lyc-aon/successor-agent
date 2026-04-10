@@ -176,10 +176,11 @@ as downloadable assets.
 The chat interface keeps every command discoverable from the
 keyboard. Press `?` for the full help overlay (it lists every
 keybinding *and* every slash command), or type `/` to open the inline
-command palette. `/mouse off` leaves wheel scrolling and text
-selection to the terminal. `/mouse on` gives Successor ownership of
-wheel scroll plus clickable title-bar widgets; hold Shift to use
-native drag selection while it is on.
+command palette. `Ctrl+R` or `/history` opens the prompt-history
+browser. `/mouse off` leaves selection to the terminal and restores
+alternate-scroll wheel behavior in terminals that support it. `/mouse on`
+gives Successor ownership of wheel scroll plus clickable title-bar
+widgets; hold Shift to use native drag selection while it is on.
 
 ```
 type / to see commands         press ? for the full help overlay
@@ -193,7 +194,8 @@ editing            scroll                 look & feel        commands
 ```
 
 Common runtime commands not shown in the compact grid:
-`/recording`, `/playback`, `/fork`, `/tasks`, and `/task-cancel`.
+`/perf`, `/recording`, `/playback`, `/fork`, `/tasks`, and
+`/task-cancel`.
 
 `/fork <directive>` spawns a background subagent against the current
 chat context. `/tasks` lists queued/running/completed background
@@ -346,14 +348,20 @@ autocompactor without spending real model time. `/compact` fires the
 summarizer manually if you want to reset the window before a long
 turn.
 
+`/perf` (alias `/kv`) reports the last few completed stream timings.
+On llama.cpp it shows `cache_n`, `prompt_n`, prompt-eval latency,
+first-token latency, and a conservative "suspected KV miss" diagnostic
+when the same slot/hash suddenly stops reusing cached prompt tokens.
+
 For llama.cpp specifically, the request builder is now cache-friendly
 by design. Successor keeps the system-prefix bytes stable across normal
 turns, moves volatile ledger/runtime nudges to a tail context message,
 explicitly requests prompt caching from the provider, and reserves one
 foreground slot for the parent chat when slot-aware scheduling is
 available. The same canonical outbound envelope now drives `/budget`,
-the context fill bar, and the autocompact gate, so the UI tracks the
-real request shape instead of a separate estimate path.
+the context fill bar, the autocompact gate, and the cache/perf
+diagnostics, so the UI tracks the real request shape instead of a
+separate estimate path.
 
 ## What it does
 
@@ -443,12 +451,12 @@ Multi-line paste handling normalizes CRLF to `\n`, expands tabs to
 visible input rows you get an `↑ N more lines` overflow indicator so
 you know your content is still there.
 
-Input history recall works the way it does in any shell. Up arrow on
-an empty input loads the most recent submitted message. Up walks
-older, Down walks newer, Down past the newest restores any draft you
-were working on before you started recalling. Esc bails out of recall
-mode and brings the draft back. Any editing key turns the recalled
-text into a fresh draft you can edit normally.
+Prompt history lives in a dedicated browser now. Press `Ctrl+R` or run
+`/history` to open a centered overlay with filter-as-you-type recall,
+a full preview pane for the selected entry, and draft restoration on
+Esc. Bare `↑` and `↓` stay pure scroll keys so mouse-off alternate
+scroll can translate wheel motion into chat scrolling without colliding
+with prompt recall.
 
 ## Commands
 

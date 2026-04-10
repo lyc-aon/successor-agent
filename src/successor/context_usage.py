@@ -90,6 +90,44 @@ class UsageTelemetry:
 
 
 @dataclass(frozen=True, slots=True)
+class TimingTelemetry:
+    cache_hit_tokens: int | None
+    prompt_eval_tokens: int | None
+    prompt_eval_ms: float | None
+    prompt_ms_per_token: float | None
+    prompt_tokens_per_second: float | None
+    generation_tokens: int | None
+    generation_ms: float | None
+    generation_ms_per_token: float | None
+    generation_tokens_per_second: float | None
+    source: str
+    raw_timings: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StreamPerfSnapshot:
+    turn: int
+    finish_reason: str
+    provider: str
+    stable_system_hash: str
+    request_slot_id: int | None
+    request_cache_prompt: bool | None
+    cache_break_reasons: tuple[str, ...]
+    first_token_ms: float | None
+    total_stream_ms: float | None
+    cache_hit_tokens: int | None
+    prompt_eval_tokens: int | None
+    prompt_eval_ms: float | None
+    prompt_cache_hit_ratio: float | None
+    output_tokens: int | None
+    generation_ms: float | None
+    suspected_kv_miss: bool
+    suspected_kv_miss_reason: str = ""
+    usage: UsageTelemetry | None = None
+    timings: TimingTelemetry | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ContextUsageSnapshot:
     source: str
     turn: int
@@ -167,6 +205,81 @@ def normalize_usage_payload(raw_usage: dict[str, Any] | None) -> UsageTelemetry 
         reasoning_tokens=reasoning_tokens,
         source="provider_usage",
         raw_usage=raw_usage,
+    )
+
+
+def normalize_timings_payload(raw_timings: dict[str, Any] | None) -> TimingTelemetry | None:
+    if not isinstance(raw_timings, dict):
+        return None
+
+    cache_hit_tokens = _first_int(raw_timings, "cache_n")
+    prompt_eval_tokens = _first_int(
+        raw_timings,
+        "prompt_n",
+        "prompt_eval_count",
+        "prompt_tokens",
+    )
+    prompt_eval_ms = _first_float(
+        raw_timings,
+        "prompt_ms",
+        "prompt_eval_ms",
+    )
+    prompt_ms_per_token = _first_float(
+        raw_timings,
+        "prompt_per_token_ms",
+        "prompt_eval_per_token_ms",
+    )
+    prompt_tokens_per_second = _first_float(
+        raw_timings,
+        "prompt_per_second",
+        "prompt_eval_per_second",
+    )
+    generation_tokens = _first_int(
+        raw_timings,
+        "predicted_n",
+        "completion_eval_count",
+        "completion_tokens",
+    )
+    generation_ms = _first_float(
+        raw_timings,
+        "predicted_ms",
+        "completion_eval_ms",
+        "generation_ms",
+    )
+    generation_ms_per_token = _first_float(
+        raw_timings,
+        "predicted_per_token_ms",
+        "completion_eval_per_token_ms",
+        "generation_ms_per_token",
+    )
+    generation_tokens_per_second = _first_float(
+        raw_timings,
+        "predicted_per_second",
+        "completion_eval_per_second",
+        "generation_per_second",
+    )
+
+    if (
+        cache_hit_tokens is None
+        and prompt_eval_tokens is None
+        and prompt_eval_ms is None
+        and generation_tokens is None
+        and generation_ms is None
+    ):
+        return None
+
+    return TimingTelemetry(
+        cache_hit_tokens=cache_hit_tokens,
+        prompt_eval_tokens=prompt_eval_tokens,
+        prompt_eval_ms=prompt_eval_ms,
+        prompt_ms_per_token=prompt_ms_per_token,
+        prompt_tokens_per_second=prompt_tokens_per_second,
+        generation_tokens=generation_tokens,
+        generation_ms=generation_ms,
+        generation_ms_per_token=generation_ms_per_token,
+        generation_tokens_per_second=generation_tokens_per_second,
+        source="provider_timings",
+        raw_timings=raw_timings,
     )
 
 
@@ -320,6 +433,75 @@ def estimate_request_input_tokens(
     )
 
 
+def build_stream_perf_snapshot(
+    *,
+    turn: int,
+    finish_reason: str,
+    provider: str,
+    stable_system_hash: str = "",
+    request_slot_id: int | None = None,
+    request_cache_prompt: bool | None = None,
+    cache_break_reasons: tuple[str, ...] = (),
+    first_token_ms: float | None = None,
+    total_stream_ms: float | None = None,
+    raw_usage: dict[str, Any] | None = None,
+    raw_timings: dict[str, Any] | None = None,
+    prior_snapshots: tuple[StreamPerfSnapshot, ...] = (),
+) -> StreamPerfSnapshot:
+    usage = normalize_usage_payload(raw_usage)
+    timings = normalize_timings_payload(raw_timings)
+    cache_hit_tokens = timings.cache_hit_tokens if timings is not None else None
+    prompt_eval_tokens = timings.prompt_eval_tokens if timings is not None else None
+    prompt_eval_ms = timings.prompt_eval_ms if timings is not None else None
+    generation_ms = timings.generation_ms if timings is not None else None
+    output_tokens = (
+        usage.output_tokens
+        if usage is not None and usage.output_tokens is not None
+        else (timings.generation_tokens if timings is not None else None)
+    )
+    prompt_cache_hit_ratio: float | None = None
+    if (
+        cache_hit_tokens is not None
+        and prompt_eval_tokens is not None
+        and cache_hit_tokens + prompt_eval_tokens > 0
+    ):
+        prompt_cache_hit_ratio = cache_hit_tokens / (cache_hit_tokens + prompt_eval_tokens)
+
+    suspected_kv_miss, suspected_reason = _classify_suspected_kv_miss(
+        turn=turn,
+        stable_system_hash=stable_system_hash,
+        request_slot_id=request_slot_id,
+        request_cache_prompt=request_cache_prompt,
+        cache_break_reasons=cache_break_reasons,
+        cache_hit_tokens=cache_hit_tokens,
+        prompt_eval_tokens=prompt_eval_tokens,
+        prompt_cache_hit_ratio=prompt_cache_hit_ratio,
+        prior_snapshots=prior_snapshots,
+    )
+
+    return StreamPerfSnapshot(
+        turn=turn,
+        finish_reason=finish_reason,
+        provider=provider,
+        stable_system_hash=stable_system_hash,
+        request_slot_id=request_slot_id,
+        request_cache_prompt=request_cache_prompt,
+        cache_break_reasons=cache_break_reasons,
+        first_token_ms=first_token_ms,
+        total_stream_ms=total_stream_ms,
+        cache_hit_tokens=cache_hit_tokens,
+        prompt_eval_tokens=prompt_eval_tokens,
+        prompt_eval_ms=prompt_eval_ms,
+        prompt_cache_hit_ratio=prompt_cache_hit_ratio,
+        output_tokens=output_tokens,
+        generation_ms=generation_ms,
+        suspected_kv_miss=suspected_kv_miss,
+        suspected_kv_miss_reason=suspected_reason,
+        usage=usage,
+        timings=timings,
+    )
+
+
 def build_context_usage_snapshot(
     estimate: RequestTokenEstimate,
     *,
@@ -437,3 +619,71 @@ def _first_nested_int(
         if valid and isinstance(node, int) and node >= 0:
             return node
     return None
+
+
+def _first_float(payload: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, (int, float)) and value >= 0:
+            return float(value)
+    return None
+
+
+def _classify_suspected_kv_miss(
+    *,
+    turn: int,
+    stable_system_hash: str,
+    request_slot_id: int | None,
+    request_cache_prompt: bool | None,
+    cache_break_reasons: tuple[str, ...],
+    cache_hit_tokens: int | None,
+    prompt_eval_tokens: int | None,
+    prompt_cache_hit_ratio: float | None,
+    prior_snapshots: tuple[StreamPerfSnapshot, ...],
+) -> tuple[bool, str]:
+    if turn <= 1:
+        return False, ""
+    if not stable_system_hash or request_slot_id is None or request_cache_prompt is not True:
+        return False, ""
+    if cache_break_reasons:
+        return False, ""
+    if (
+        cache_hit_tokens is None
+        or prompt_eval_tokens is None
+        or prompt_cache_hit_ratio is None
+    ):
+        return False, ""
+    prompt_total = cache_hit_tokens + prompt_eval_tokens
+    if prompt_total < 512:
+        return False, ""
+
+    comparable = [
+        snapshot
+        for snapshot in prior_snapshots
+        if (
+            snapshot.stable_system_hash == stable_system_hash
+            and snapshot.request_slot_id == request_slot_id
+            and snapshot.request_cache_prompt is True
+            and not snapshot.cache_break_reasons
+            and snapshot.prompt_cache_hit_ratio is not None
+        )
+    ]
+    if not comparable:
+        return False, ""
+
+    prior_best_ratio = max(snapshot.prompt_cache_hit_ratio or 0.0 for snapshot in comparable)
+    prior_best_cache_tokens = max(snapshot.cache_hit_tokens or 0 for snapshot in comparable)
+    if prompt_cache_hit_ratio < 0.05 and prior_best_ratio >= 0.20:
+        if cache_hit_tokens == 0 and prior_best_cache_tokens > 0:
+            return (
+                True,
+                "same slot/hash previously reused cached prompt tokens, but this turn reported cache_n=0",
+            )
+        return (
+            True,
+            (
+                f"same slot/hash previously reused {prior_best_ratio * 100:.0f}% of prompt "
+                f"tokens, but this turn reused only {prompt_cache_hit_ratio * 100:.0f}%"
+            ),
+        )
+    return False, ""

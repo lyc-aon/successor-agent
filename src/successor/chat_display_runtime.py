@@ -252,7 +252,13 @@ class ChatDisplayRuntime:
         )
 
         committed = self.build_message_lines(geometry.body_width, theme)
-        committed_h = len(committed)
+        stream_lines = (
+            self.build_streaming_lines(geometry.body_width, theme)
+            if host._stream is not None
+            else []
+        )
+        all_rows = committed + stream_lines
+        committed_h = len(all_rows)
         viewport = compute_viewport_decision(
             width=width,
             top=top,
@@ -269,15 +275,7 @@ class ChatDisplayRuntime:
         host._last_chat_w = viewport.last_chat_w
         host._last_total_height = viewport.last_total_height
 
-        visible = committed[viewport.start:viewport.end]
-
-        if host._stream is not None and host.scroll_offset == 0:
-            stream_lines = self.build_streaming_lines(viewport.body_width, theme)
-            combined = visible + stream_lines
-            if len(combined) > viewport.chat_height:
-                combined = combined[-viewport.chat_height:]
-        else:
-            combined = visible
+        combined = all_rows[viewport.start:viewport.end]
 
         paint_y = max(top, bottom - len(combined))
         for i, row in enumerate(combined):

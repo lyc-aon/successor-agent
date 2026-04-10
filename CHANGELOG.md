@@ -7,6 +7,44 @@ lives in [`docs/changelog.md`](docs/changelog.md).
 
 - no user-facing notes yet
 
+## v0.1.34 — 2026-04-10
+
+This release tightens one of the last rough edges in the terminal UX:
+prompt recall, wheel scrolling, and live stream rendering now stop
+fighting each other.
+
+### What changed
+
+- replaced shell-style empty-prompt history recall with a dedicated
+  prompt-history browser
+  - `Ctrl+R` and `/history [query]` now open a centered overlay with
+    filter-as-you-type recall, preview, and draft restoration on `Esc`
+  - bare `↑` / `↓` are now pure scroll keys again
+- restored alternate-scroll behavior when `mouse off` is active
+  - Successor now enables DECSET `?1007` when it is not capturing the
+    mouse, and turns it back off when `mouse on` reclaims wheel events
+- made live stream rows part of the scrollable viewport
+  - while the model is thinking or responding, the visible stream rows
+    now contribute to scroll headroom instead of temporarily pinning the
+    viewport harder than the committed transcript
+- added first-class prompt/KV diagnostics on top of the cache-friendly
+  llama.cpp loop
+  - completed stream trace events now record first-token latency,
+    total stream latency, raw provider timings, prompt cache hit ratio,
+    and a conservative suspected-KV-miss flag
+  - `/perf` with `/kv` alias reports the last few completed turns with
+    slot id, stable hash, `cache_n`, `prompt_n`, and prompt-eval timing
+
+### Verification
+
+- `ruff check src tests`
+- `PYTHONPATH=src pytest -q`
+  - `1254 passed in 25.23s`
+- focused interaction coverage:
+  - prompt-history browser open/filter/accept/restore paths
+  - terminal alternate-scroll toggle behavior in `mouse off`
+  - live-stream scroll headroom while the model is still talking
+
 ## v0.1.33 — 2026-04-10
 
 This release hardens the local llama.cpp path around the thing that

@@ -44,12 +44,14 @@ CLEAR_HOME = CSI + "2J" + CSI + "H"
 
 # Alternate scroll (DEC private mode 1007):
 # some terminals map mouse-wheel events in the alternate screen to
-# Up/Down cursor-key sequences instead of normal scrollback. Successor
-# uses bare Up on an empty input buffer for history recall, so that
-# translation makes the wheel look like "load previous prompt". Save
-# and disable the mode for our session, then restore it on exit.
+# Up/Down cursor-key sequences instead of normal scrollback. When
+# Successor is not capturing the mouse, that gives us the closest
+# portable approximation of "native wheel scroll + native selection"
+# inside the alt screen. Save the user's current preference, then
+# switch between on/off as mouse ownership changes, and restore on exit.
 ALT_SCROLL_SAVE = CSI + "?1007s"
 ALT_SCROLL_RESTORE = CSI + "?1007r"
+ALT_SCROLL_ON = CSI + "?1007h"
 ALT_SCROLL_OFF = CSI + "?1007l"
 
 # Bracketed paste mode (DEC mode 2004) — when on, the terminal wraps
@@ -193,10 +195,10 @@ class Terminal:
         alacritty / modern xterm.
         """
         if enabled and not self.mouse_reporting:
-            self.write(MOUSE_ON)
+            self.write(ALT_SCROLL_OFF + MOUSE_ON)
             self.mouse_reporting = True
         elif not enabled and self.mouse_reporting:
-            self.write(MOUSE_OFF)
+            self.write(MOUSE_OFF + ALT_SCROLL_ON)
             self.mouse_reporting = False
 
     def copy_to_clipboard(self, text: str) -> None:
@@ -231,7 +233,7 @@ class Terminal:
         # Enter alt screen, hide cursor, enable bracketed paste, clear.
         out: list[str] = []
         out.append(ALT_SCROLL_SAVE)
-        out.append(ALT_SCROLL_OFF)
+        out.append(ALT_SCROLL_OFF if self.mouse_reporting else ALT_SCROLL_ON)
         if self.alt_screen:
             out.append(ALT_SCREEN_ON)
         out.append(HIDE_CURSOR)

@@ -11,6 +11,42 @@ unit on top of phase 0.
 
 ---
 
+## Unreleased
+
+- no internal notes yet
+
+## v0.1.34, history browser + live stream scroll release (2026-04-10)
+
+- replaced shell-style empty-prompt history recall with a dedicated
+  prompt-history browser
+  - added `Ctrl+R` and `/history [query]` to open a centered overlay
+    with filter-as-you-type recall, preview, and draft restoration
+  - bare `↑` / `↓` are now pure scroll keys again
+- restored alternate-scroll when `mouse off` is active
+  - the terminal session now switches DECSET `?1007` on when Successor
+    is not capturing the mouse, and switches it back off when
+    `mouse on` reclaims wheel events
+- changed the chat viewport so live stream rows count toward scrollable
+  height while the model is still thinking/responding
+  - older committed rows no longer become temporarily unreachable just
+    because the active thinking/typewriter strip consumed the last few
+    visible rows
+- added first-class prompt/KV diagnostics on top of the cache-friendly
+  llama.cpp loop
+  - completed stream trace events now record first-token latency,
+    total stream latency, raw provider timings, prompt cache hit ratio,
+    and a conservative suspected-KV-miss flag
+  - added normalized runtime perf snapshots in
+    `src/successor/context_usage.py` so trace, chat UI, and later
+    tooling all read the same turn-level data
+  - added `/perf` with `/kv` alias in chat for live inspection of the
+    last few completed streams, including slot id, stable hash,
+    `cache_n`, `prompt_n`, and prompt-eval timing
+- verification:
+  - `ruff check src tests`
+  - `PYTHONPATH=src pytest -q`
+    - `1254 passed in 25.23s`
+
 ## v0.1.33, cache-friendly llama.cpp agent-loop release (2026-04-10)
 
 This release turns Successor's local-model loop into something that is

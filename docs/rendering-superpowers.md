@@ -169,10 +169,12 @@ either can't or have to fight their stack to attempt. They split into
    cache (cheap), recompose, diff, commit. No half-drawn frames, no
    scrollback corruption, no input area jumping.
 
-10. **Selectable text that survives an animated UI.** We don't enable
-    mouse mode, so the terminal's native click-drag selection works on
-    every cell. Other harnesses that enable mouse reporting for
-    "scroll wheel support" lose this entirely.
+10. **Selectable text that survives an animated UI.** Mouse capture is
+    optional, not mandatory. In the default `mouse off` mode the
+    terminal keeps native click-drag selection, and alternate-scroll can
+    still drive chat scrolling on terminals that support it. `mouse on`
+    is reserved for cases where in-app clicks are actually worth the
+    trade.
 
 11. **No double-buffering drama.** Two grids, swap each tick, diff
     against last frame, emit minimal cells. Steady-state animation
