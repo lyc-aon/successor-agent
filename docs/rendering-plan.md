@@ -2,7 +2,9 @@
 
 Date: 2026-04-06 (original architecture)
 Status: Foundational design. The harness has shipped many phases on top
-of this plan; see `docs/changelog.md` for the running history.
+of this plan; see `docs/changelog.md` for the running history. For the
+current chat-scene render map and the behavior-preserving extraction
+checklist, see `docs/chat-render-refactor-plan.md`.
 
 ## Purpose
 

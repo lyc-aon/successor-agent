@@ -46,7 +46,6 @@ communicate via a thread-safe queue.
 from __future__ import annotations
 
 import json
-import math
 import os
 import time
 from dataclasses import dataclass, replace
@@ -106,7 +105,6 @@ from .render.cells import (
     ATTR_BOLD,
     ATTR_DIM,
     ATTR_ITALIC,
-    Cell,
     Grid,
     Style,
 )
@@ -123,14 +121,7 @@ from .bash import (
     MutatingCommandRefused,
     RefusedCommand,
     ToolCard,
-    measure_tool_card_height,
-    paint_tool_card,
     resolve_bash_config,
-)
-from .bash.prepared_output import PreparedToolOutput
-from .bash.render import (
-    measure_tool_card_running_height,
-    paint_tool_card_running,
 )
 from .bash.runner import (
     BashRunner,
@@ -199,10 +190,6 @@ from .subagents.prompt import (
     build_spawn_result_display,
     build_spawn_result_payload,
 )
-from .subagents.render import (
-    measure_subagent_card_height,
-    paint_subagent_card,
-)
 from .web import (
     PlaywrightBrowserManager,
     browser_preview_card,
@@ -229,7 +216,31 @@ from .render.markdown import (
     LaidOutSpan,
     PreparedMarkdown,
 )
-from .render.paint import fill_region, paint_box, paint_horizontal_divider, paint_text
+from .render.chat_frame import HitBox, compute_chat_frame
+from .render.chat_header import build_header_plan
+from .render.chat_input import (
+    paint_input as paint_input_surface,
+    paint_search_bar as paint_search_bar_surface,
+)
+from .render.chat_intro import paint_empty_state as paint_empty_state_surface
+from .render.chat_overlays import (
+    paint_arg_mode as paint_arg_mode_overlay,
+    paint_help_overlay as paint_help_overlay_surface,
+    paint_name_mode as paint_name_mode_overlay,
+    paint_no_matches as paint_no_matches_overlay,
+)
+from .render.chat_rows import (
+    RenderedRow,
+    fade_prepainted_rows as fade_prepainted_chat_rows,
+    highlight_spans as highlight_row_spans,
+    paint_chat_row as paint_chat_scene_row,
+    render_md_lines_with_search as render_markdown_rows_with_search,
+    render_subagent_card_rows as render_subagent_chat_card_rows,
+    render_running_tool_card_rows as render_running_chat_card_rows,
+    render_tool_card_rows as render_tool_chat_card_rows,
+)
+from .render.chat_viewport import compute_viewport_decision
+from .render.paint import fill_region, paint_text
 from .render.terminal import Terminal
 from .render.text import ease_out_cubic, hard_wrap, lerp_rgb
 from .render.theme import (
@@ -450,19 +461,7 @@ def density_index(d: Density) -> int:
 # This is cheap (3-5 small tuples per frame).
 
 
-@dataclass(slots=True, frozen=True)
-class _HitBox:
-    x: int
-    y: int
-    w: int
-    h: int
-    action: str  # "theme" | "mode" | "density" | "profile" | "scroll_to_bottom"
-
-    def contains(self, col: int, row: int) -> bool:
-        return (
-            self.x <= col < self.x + self.w
-            and self.y <= row < self.y + self.h
-        )
+_HitBox = HitBox
 
 
 # How many lines to scroll per wheel notch. 3 lines is the conventional
@@ -1349,51 +1348,7 @@ _SUCCESSOR_PREFIX = "successor ▸ "
 _PREFIX_W = len(_USER_PREFIX)  # both prefixes are 6 cells
 
 
-@dataclass(slots=True)
-class _RenderedRow:
-    """A single row ready for the chat painter.
-
-    leading_text:   characters at the very left edge — message prefix on
-                    the first line, blank padding on continuation lines,
-                    or a special leading mark like the blockquote bar.
-    leading_attrs:  attribute bitmask for leading_text (ATTR_BOLD etc.)
-    leading_color_kind: which theme slot to use for leading_text — one
-                    of "fg", "fg_dim", "accent" — resolved at paint time.
-    body_spans:     laid-out markdown spans for the body content
-    base_color:     the message's base body color (resolved at build
-                    time, may be lerped during fade-in)
-    line_tag:       optional row treatment from the markdown layout
-    body_indent:    cells of indent within the body region (after the
-                    leading prefix), used by blockquotes and code blocks
-    prepainted_cells: when non-empty, the painter copies these Cells
-                    directly to the grid at body_x and skips the normal
-                    span flow. Used by tool card messages where the
-                    paint_tool_card primitive has already produced
-                    fully-styled cells in a sub-grid.
-    is_boundary:    when True, this row is a compaction boundary marker.
-                    boundary_meta carries the BoundaryMarker for the
-                    painter to render the divider + central pill.
-    boundary_meta:  attached BoundaryMarker (from agent.log) used by the
-                    painter when is_boundary is True.
-    is_summary:     when True, this row is part of a compaction summary
-                    message — painted with a dim/italic treatment.
-    fade_alpha:     0.0 - 1.0 — when < 1.0, the painter blends the row's
-                    text color toward bg by (1 - fade_alpha). Used by the
-                    fold animation phase. Default 1.0 = fully visible.
-    """
-    leading_text: str = ""
-    leading_attrs: int = 0
-    leading_color_kind: str = "accent"  # "fg" | "fg_dim" | "accent"
-    body_spans: tuple = ()  # tuple of LaidOutSpan
-    base_color: int = 0
-    line_tag: str = ""
-    body_indent: int = 0
-    prepainted_cells: tuple = ()  # tuple of Cell — pre-rendered tool card row
-    is_boundary: bool = False
-    boundary_meta: object | None = None
-    materialize_t: float = 1.0  # for boundary rows: 0-1 draw-in progress
-    is_summary: bool = False
-    fade_alpha: float = 1.0
+_RenderedRow = RenderedRow
 
 
 # ─── Compaction animation ───
@@ -6984,163 +6939,62 @@ class SuccessorChat(App):
             fill_region(grid, 0, 0, cols, rows, style=Style(bg=theme.bg))
             return
 
-        # Layout — bottom-up:
-        #   row N-1               static footer (ctx bar, 1 row)
-        #   rows N-1-input_h..N-2 input area (input_h rows)
-        #   rows title_h..N-2-input_h  chat scroll area
-        #   row 0                 title (1 row)
-        title_h = 1
         input_h = self._input_height(cols)
-        footer_static_h = 1
-        static_y = rows - footer_static_h
-        input_y = static_y - input_h
-        chat_top = title_h
-        chat_bottom = max(chat_top, input_y)
+        layout = compute_chat_frame(rows, cols, input_h)
 
         # ─── Background ───
         fill_region(grid, 0, 0, cols, rows, style=Style(bg=theme.bg))
 
         # ─── Chat scroll area ───
-        self._paint_chat_area(grid, chat_top, chat_bottom, cols, theme)
-
-        # ─── Theme widget (rightmost cell of title row) ───
-        # Shows the theme's identity (icon + name). Keybinding: Ctrl+T.
-        # Click target when mouse mode is on. Background uses the
-        # theme's accent so the pill changes color with the theme.
-        theme_label = f" {self.theme.icon} {self.theme.name} "
-        theme_style = Style(
-            fg=theme.bg,
-            bg=theme.accent,
-            attrs=ATTR_BOLD,
-        )
-        theme_x = max(0, cols - len(theme_label))
-        paint_text(grid, theme_label, theme_x, 0, style=theme_style)
-        self._hit_boxes.append(
-            _HitBox(theme_x, 0, len(theme_label), 1, "theme")
-        )
-
-        # ─── Display mode widget (just left of the theme widget) ───
-        # Three-cell pill showing ☾ for dark or ☀ for light. The two
-        # axes (theme + mode) are independent, so this widget gets its
-        # own pill instead of being squashed into the theme widget.
-        # Keybinding: Alt+D. Click target when mouse mode is on.
-        mode_icon = "\u263e" if self.display_mode == "dark" else "\u2600"
-        mode_label = f" {mode_icon} "
-        mode_style = Style(
-            fg=theme.bg,
-            bg=theme.fg_dim,
-            attrs=ATTR_BOLD,
-        )
-        mode_x = max(0, theme_x - len(mode_label) - 1)
-        paint_text(grid, mode_label, mode_x, 0, style=mode_style)
-        self._hit_boxes.append(
-            _HitBox(mode_x, 0, len(mode_label), 1, "mode")
-        )
-
-        # ─── Density widget (just left of the display mode widget) ───
-        # Different background color so it visually distinguishes from
-        # the theme + mode widgets. Keybindings: Alt+=, Alt+-, Ctrl+].
-        # Click target when mouse mode is on.
-        density_label = f" {self.density.name} "
-        density_style = Style(
-            fg=theme.bg,
-            bg=theme.accent_warm,
-            attrs=ATTR_BOLD,
-        )
-        density_x = max(0, mode_x - len(density_label) - 1)
-        paint_text(grid, density_label, density_x, 0, style=density_style)
-        self._hit_boxes.append(
-            _HitBox(density_x, 0, len(density_label), 1, "density")
-        )
-
-        # ─── Profile widget (just left of the density widget) ───
-        # Dim text on the chat background so it reads as a label, not
-        # an interactive pill — but still clickable when mouse mode is
-        # on. The profile is the persona unit; showing it always lets
-        # the user instantly recognize which mode they're in.
-        # Keybinding: Ctrl+P (cycles to the next registered profile).
-        profile_label = f" {self.profile.name} "
-        profile_style = Style(
-            fg=theme.fg_dim,
-            bg=theme.bg,
-            attrs=ATTR_DIM | ATTR_BOLD,
-        )
-        profile_x = max(0, density_x - len(profile_label) - 1)
-        paint_text(grid, profile_label, profile_x, 0, style=profile_style)
-        self._hit_boxes.append(
-            _HitBox(profile_x, 0, len(profile_label), 1, "profile")
-        )
-
-        # ─── Background-task widget (left of the profile widget) ───
         counts = self._subagent_counts()
-        active_tasks = counts.active
-        if counts.total > 0:
-            if active_tasks > 0:
-                task_label = f" tasks {active_tasks}/{counts.total} "
-                task_style = Style(
-                    fg=theme.bg,
-                    bg=theme.accent_warm,
-                    attrs=ATTR_BOLD,
-                )
-            else:
-                task_label = f" tasks {counts.total} "
-                task_style = Style(
-                    fg=theme.bg,
-                    bg=theme.fg_dim,
-                    attrs=ATTR_BOLD,
-                )
-            task_x = max(0, profile_x - len(task_label) - 1)
-            paint_text(grid, task_label, task_x, 0, style=task_style)
-            self._hit_boxes.append(
-                _HitBox(task_x, 0, len(task_label), 1, "tasks")
-            )
-        else:
-            task_x = profile_x
+        self._paint_chat_area(
+            grid, layout.chat_top, layout.chat_bottom, cols, theme
+        )
 
-        # ─── Title row ───
-        # Prefer a centered title when the header has room. As the
-        # window narrows and the right-hand pills advance left, clamp
-        # the title toward the left instead of letting it sit in an
-        # awkward pseudo-center that collides with the controls.
-        title = " successor · chat "
-        title_style = Style(fg=theme.fg, bg=theme.bg, attrs=ATTR_BOLD)
-        desired_tx = max(2, (cols - len(title)) // 2)
-        max_tx = max(2, task_x - len(title) - 3)
-        tx = min(desired_tx, max_tx)
-        paint_text(grid, title, tx, 0, style=title_style)
-
-        # ─── Scroll indicator (left of the profile widget when scrolled) ───
-        if self.scroll_offset > 0:
-            if self._stream is not None:
-                indicator = f" ↑ {self.scroll_offset} · successor responding · Ctrl+E newest "
-            else:
-                indicator = f" ↑ {self.scroll_offset}/{self._max_scroll()} · End for newest "
-            ix = max(0, task_x - len(indicator))
+        header = build_header_plan(
+            cols=cols,
+            theme=theme,
+            theme_name=self.theme.name,
+            theme_icon=self.theme.icon,
+            display_mode=self.display_mode,
+            density_name=self.density.name,
+            profile_name=self.profile.name,
+            task_total=counts.total,
+            task_active=counts.active,
+            scroll_offset=self.scroll_offset,
+            max_scroll=self._max_scroll(),
+            stream_active=self._stream is not None,
+        )
+        for placement in header.placements:
             paint_text(
                 grid,
-                indicator,
-                ix,
-                0,
-                style=Style(fg=theme.accent_warm, bg=theme.bg, attrs=ATTR_BOLD),
+                placement.text,
+                placement.x,
+                placement.y,
+                style=placement.style,
             )
-            self._hit_boxes.append(
-                _HitBox(ix, 0, len(indicator), 1, "scroll_to_bottom")
-            )
+        self._hit_boxes.extend(header.hitboxes)
 
         # ─── Input area ───
-        if input_y >= 0 and input_y < rows:
-            self._paint_input(grid, input_y, min(input_h, rows - input_y), cols, theme)
+        if layout.input_y >= 0 and layout.input_y < rows:
+            self._paint_input(
+                grid,
+                layout.input_y,
+                min(input_h, rows - layout.input_y),
+                cols,
+                theme,
+            )
 
         # ─── Static footer (ctx bar) ───
-        if 0 <= static_y < rows:
-            self._paint_static_footer(grid, static_y, cols, theme)
+        if 0 <= layout.static_y < rows:
+            self._paint_static_footer(grid, layout.static_y, cols, theme)
 
         # ─── Slash command autocomplete dropdown ───
         # Painted LAST so it overlays the chat area cells just above the
         # input. The chat content underneath is temporarily hidden while
         # the dropdown is visible; closing it (Esc / submit / type a
         # space) restores everything on the next frame's diff.
-        self._paint_autocomplete(grid, theme, input_y)
+        self._paint_autocomplete(grid, theme, layout.input_y)
 
         # ─── Help overlay ───
         # Painted EVEN LATER so it overlays everything else, including
@@ -7179,45 +7033,36 @@ class SuccessorChat(App):
             self._paint_empty_state(grid, top, bottom, width, theme)
             return
 
-        # Density-driven layout. Use _current_density() so content
-        # width smoothly slides during transitions instead of snapping.
-        # Compact uses no cap (the sentinel _DENSITY_NO_CAP degenerates
-        # to "no effective limit" because it's larger than any real
-        # terminal width). Normal/spacious cap to a comfortable reading
-        # width and add gutter cells on each side.
         density = self._current_density()
-        gutter = density.gutter
-        avail = max(1, width - 2 * gutter)
-        avail = min(avail, density.max_content_width)
-        body_width = avail
-        # Center the content column within the available cells so the
-        # extra space (when content is capped) goes to both sides.
-        body_x = max(gutter, (width - body_width) // 2)
-        chat_h = bottom - top
+        geometry = compute_viewport_decision(
+            width=width,
+            top=top,
+            bottom=bottom,
+            density=density,
+            committed_height=0,
+            scroll_offset=self.scroll_offset,
+            auto_scroll=self._auto_scroll,
+            last_total_height=self._last_total_height,
+        )
 
         # Build the flat list of committed-message lines.
-        committed = self._build_message_lines(body_width, theme)
+        committed = self._build_message_lines(geometry.body_width, theme)
         committed_h = len(committed)
-
-        # Auto-anchor: if scrolled up and content grew, advance offset
-        # to keep the same historical view under the user's eyes.
-        if not self._auto_scroll and committed_h > self._last_total_height:
-            delta = committed_h - self._last_total_height
-            self.scroll_offset += delta
-
-        # Update geometry caches for the scroll-key handlers.
-        self._last_chat_h = chat_h
-        self._last_chat_w = body_width
-        self._last_total_height = committed_h
-
-        # Clamp scroll_offset against current geometry.
-        max_off = max(0, committed_h - chat_h)
-        if self.scroll_offset > max_off:
-            self.scroll_offset = max_off
-        if self.scroll_offset < 0:
-            self.scroll_offset = 0
-        if self.scroll_offset == 0:
-            self._auto_scroll = True
+        viewport = compute_viewport_decision(
+            width=width,
+            top=top,
+            bottom=bottom,
+            density=density,
+            committed_height=committed_h,
+            scroll_offset=self.scroll_offset,
+            auto_scroll=self._auto_scroll,
+            last_total_height=self._last_total_height,
+        )
+        self.scroll_offset = viewport.scroll_offset
+        self._auto_scroll = viewport.auto_scroll
+        self._last_chat_h = viewport.last_chat_h
+        self._last_chat_w = viewport.last_chat_w
+        self._last_total_height = viewport.last_total_height
 
         # NB: there's no scroll override during compaction anymore.
         # The boundary + summary now live at the END of self.messages
@@ -7226,16 +7071,14 @@ class SuccessorChat(App):
         # animation plays in view without any forced snap.
 
         # Slice the committed lines for the current scroll position.
-        end = committed_h - self.scroll_offset
-        start = max(0, end - chat_h)
-        visible = committed[start:end]
+        visible = committed[viewport.start:viewport.end]
 
         # Streaming reply — only when anchored at bottom.
         if self._stream is not None and self.scroll_offset == 0:
-            stream_lines = self._build_streaming_lines(body_width, theme)
+            stream_lines = self._build_streaming_lines(viewport.body_width, theme)
             combined = visible + stream_lines
-            if len(combined) > chat_h:
-                combined = combined[-chat_h:]
+            if len(combined) > viewport.chat_height:
+                combined = combined[-viewport.chat_height:]
         else:
             combined = visible
 
@@ -7248,7 +7091,9 @@ class SuccessorChat(App):
             y = paint_y + i
             if y >= bottom:
                 break
-            self._paint_chat_row(grid, body_x, y, body_width, row, theme)
+            self._paint_chat_row(
+                grid, viewport.body_x, y, viewport.body_width, row, theme
+            )
 
         # NB: there is no centered "compacting" overlay anymore. The
         # chat content stays fully visible during compaction so the
@@ -7329,278 +7174,15 @@ class SuccessorChat(App):
         width: int,
         theme: ThemeVariant,
     ) -> None:
-        """Hero portrait on the left, info panel on the right.
-
-        Layout:
-          - When there is enough horizontal room for both, anchor the
-            info panel as a right-hand rail and fit the hero into the
-            remaining left field while preserving aspect ratio.
-          - On narrower terminals, hide the art and center the info
-            panel — the art has no value if it'd collapse below a
-            readable fitted size.
-          - On very short chat areas (< 12 rows), only paint the
-            info panel (the art needs vertical room to read).
-
-        Theme-aware: art paints in theme.accent (subtle hero color),
-        section headers in theme.fg_dim (quiet labels), values in
-        theme.fg (primary), the bottom hint in theme.accent_warm so
-        the user notices the "type / for commands · ? for help" line.
-        """
-        from .render.braille import fit_dimensions
-        from .render.paint import paint_box
-
-        chat_h = bottom - top
-        if chat_h < 6:
-            return
-
-        # Vertical centering: figure out how tall the info panel is,
-        # then offset both art and panel to sit in the middle of the
-        # chat area. Looks intentional rather than top-anchored.
-        panel_lines = self._build_intro_panel_lines()
-        panel_h = len(panel_lines)
-
-        panel_intrinsic_w = 0
-        for label, value, is_header, is_hint in panel_lines:
-            if is_hint:
-                panel_intrinsic_w = max(panel_intrinsic_w, len(label))
-            elif is_header:
-                panel_intrinsic_w = max(panel_intrinsic_w, len(label))
-            elif value:
-                panel_intrinsic_w = max(panel_intrinsic_w, 2 + len(value))
-        panel_intrinsic_w = max(26, panel_intrinsic_w)
-
-        art = self._resolve_intro_art()
-        outer_pad = 3 if width < 96 else (5 if width < 120 else 6)
-        inner_gap = 3 if width < 100 else 6
-        panel_w = min(max(panel_intrinsic_w + 2, 28), max(28, width - 2 * outer_pad))
-        panel_x = max(outer_pad, width - outer_pad - panel_w)
-
-        show_art = False
-        art_lines: list[str] = []
-        art_x = 0
-        art_y = 0
-        if art is not None and chat_h >= 12:
-            art_box_x = outer_pad
-            art_box_w = max(0, panel_x - inner_gap - art_box_x)
-            art_avail_h = max(10, chat_h - (2 if width < 96 else 4))
-            art_fit_w, art_fit_h = fit_dimensions(
-                art.dot_h,
-                art.dot_w,
-                avail_cells_h=art_avail_h,
-                avail_cells_w=art_box_w,
-                pad_cells=0,
-            )
-            show_art = art_fit_w >= 14 and art_fit_h >= 10
-            if show_art:
-                try:
-                    art_lines = art.layout(art_fit_w, art_fit_h)
-                except Exception:  # noqa: BLE001
-                    art_lines = []
-                # Bias the hero toward the left edge of its field so
-                # spare width becomes a real middle gutter rather than
-                # collapsing into text sitting right beside the face.
-                art_left_pad = 2 if width < 96 else 5
-                art_x = art_box_x + max(0, min(art_left_pad, art_box_w - art_fit_w))
-                art_y = top + max(0, (chat_h - len(art_lines)) // 2)
-
-        right_anchor_panel = show_art
-
-        if not show_art:
-            # Info panel only — center it horizontally with mild padding.
-            panel_w = min(60, max(30, width - 8))
-            panel_x = max(2, (width - panel_w) // 2)
-
-        # Vertically center the info panel within the chat area.
-        panel_y_start = top + max(0, (chat_h - panel_h) // 2)
-
-        if show_art and art_lines:
-            shell_left = max(outer_pad - 1, art_x - 3)
-            shell_right = min(width - outer_pad + 1, panel_x + panel_w + 1)
-            shell_top = max(top + 1, min(art_y, panel_y_start) - 1)
-            shell_bottom = min(
-                bottom - 2,
-                max(art_y + len(art_lines) - 1, panel_y_start + panel_h - 1) + 1,
-            )
-            shell_w = shell_right - shell_left + 1
-            shell_h = shell_bottom - shell_top + 1
-            if shell_w >= 12 and shell_h >= 8:
-                shell_border = Style(
-                    fg=lerp_rgb(theme.fg_subtle, theme.accent_warm, 0.20),
-                    bg=theme.bg,
-                    attrs=ATTR_DIM,
-                )
-                shell_fill = Style(
-                    fg=theme.fg,
-                    bg=lerp_rgb(theme.bg, theme.bg_input, 0.72),
-                    attrs=0,
-                )
-                paint_box(
-                    grid,
-                    shell_left,
-                    shell_top,
-                    shell_w,
-                    shell_h,
-                    style=shell_border,
-                    fill_style=shell_fill,
-                    chars=("╭", "╮", "╰", "╯", "┈", "┆"),
-                )
-
-            art_style = Style(
-                fg=theme.accent,
-                bg=lerp_rgb(theme.bg, theme.bg_input, 0.72),
-                attrs=ATTR_BOLD,
-            )
-            for i, line in enumerate(art_lines):
-                ly = art_y + i
-                if ly >= bottom:
-                    break
-                paint_text(grid, line, art_x, ly, style=art_style)
-            self._paint_empty_state_oracle_fx(
-                grid,
-                lines=art_lines,
-                art_x=art_x,
-                art_y=art_y,
-                panel_x=panel_x,
-                theme=theme,
-            )
-
-        # Paint the info panel rows. Each row is (label_text, value_text,
-        # is_header, is_hint) so we can pick the right style per role.
-        for i, (label, value, is_header, is_hint) in enumerate(panel_lines):
-            ly = panel_y_start + i
-            if ly >= bottom or ly < top:
-                continue
-            if is_hint:
-                # In the split hero+rail layout, anchor the hint to the
-                # rail's right edge so the whole panel reads as one
-                # intentional right-hand column. In panel-only mode,
-                # keep the softer centered hint.
-                if right_anchor_panel:
-                    hint_x = panel_x + max(0, panel_w - len(label))
-                else:
-                    hint_x = panel_x + max(0, (panel_w - len(label)) // 2)
-                paint_text(
-                    grid,
-                    label,
-                    hint_x,
-                    ly,
-                    style=Style(
-                        fg=theme.accent_warm,
-                        bg=lerp_rgb(theme.bg, theme.bg_input, 0.72) if right_anchor_panel else theme.bg,
-                        attrs=ATTR_BOLD,
-                    ),
-                )
-                continue
-            if is_header:
-                # Section header: dimmed label. In split layout, right-align
-                # it to the rail edge so the panel really hugs the screen
-                # border instead of reading like a skinny floating column.
-                header_label = label
-                header_x = panel_x
-                if right_anchor_panel:
-                    header_x = panel_x + max(0, panel_w - len(header_label))
-                paint_text(
-                    grid,
-                    header_label,
-                    header_x,
-                    ly,
-                    style=Style(
-                        fg=lerp_rgb(theme.fg_dim, theme.accent_warm, 0.22),
-                        bg=lerp_rgb(theme.bg, theme.bg_input, 0.72) if right_anchor_panel else theme.bg,
-                        attrs=ATTR_DIM | ATTR_BOLD,
-                    ),
-                )
-                continue
-            # Value row: right-align in split layout; otherwise keep the
-            # existing indented panel-only presentation.
-            value_text = value if right_anchor_panel else "  " + value
-            value_x = panel_x
-            if right_anchor_panel:
-                value_x = panel_x + max(0, panel_w - len(value_text))
-            paint_text(
-                grid,
-                value_text,
-                value_x,
-                ly,
-                style=Style(
-                    fg=theme.fg,
-                    bg=lerp_rgb(theme.bg, theme.bg_input, 0.72) if right_anchor_panel else theme.bg,
-                ),
-            )
-
-    def _paint_empty_state_oracle_fx(
-        self,
-        grid: Grid,
-        *,
-        lines: list[str],
-        art_x: int,
-        art_y: int,
-        panel_x: int,
-        theme: ThemeVariant,
-    ) -> None:
-        """Subtle idle motion for the empty-state oracle.
-
-        The base hero stays fixed. We add three low-noise overlays:
-
-        - a slow scan shimmer across the crown
-        - a soft pulse through the chest / pedestal core
-        This keeps the oracle feeling alive without turning the empty
-        state into a second startup animation.
-        """
-        if not lines:
-            return
-
-        art_h = len(lines)
-        art_w = max((len(line) for line in lines), default=0)
-        if art_w <= 0 or art_h <= 0:
-            return
-
-        now = time.monotonic()
-
-        crown_scan_t = (now / 8.0) % 1.0
-        crown_band_y = 0.04 + 0.26 * crown_scan_t
-        crown_style = Style(
-            fg=lerp_rgb(theme.accent, theme.accent_warm, 0.62),
-            bg=lerp_rgb(theme.bg, theme.bg_input, 0.72),
-            attrs=ATTR_BOLD,
+        paint_empty_state_surface(
+            grid,
+            top,
+            bottom,
+            width,
+            theme,
+            panel_lines=self._build_intro_panel_lines(),
+            resolve_intro_art=self._resolve_intro_art,
         )
-
-        pulse = 0.5 + 0.5 * math.sin(now * 1.15)
-        pulse_style = Style(
-            fg=lerp_rgb(theme.accent, theme.fg, 0.18 + 0.28 * pulse),
-            bg=lerp_rgb(theme.bg, theme.bg_input, 0.72),
-            attrs=ATTR_BOLD,
-        )
-
-        for dy, line in enumerate(lines):
-            if not line:
-                continue
-            ny = dy / max(1, art_h - 1)
-            for dx, ch in enumerate(line):
-                if ch in {" ", "⠀"}:
-                    continue
-                nx = dx / max(1, art_w - 1)
-
-                crown_band = crown_band_y + (nx - 0.5) * 0.08
-                if ny <= 0.34 and abs(ny - crown_band) <= 0.035:
-                    paint_text(
-                        grid,
-                        ch,
-                        art_x + dx,
-                        art_y + dy,
-                        style=crown_style,
-                    )
-                    continue
-
-                core_shape = abs(nx - 0.5) * 1.65 + abs(ny - 0.67) * 1.05
-                if pulse > 0.56 and 0.42 <= ny <= 0.92 and core_shape <= 0.27:
-                    paint_text(
-                        grid,
-                        ch,
-                        art_x + dx,
-                        art_y + dy,
-                        style=pulse_style,
-                    )
 
     def _build_intro_panel_lines(self) -> list[tuple[str, str, bool, bool]]:
         """Build the rows for the empty-state info panel.
@@ -7694,288 +7276,16 @@ class SuccessorChat(App):
         row: _RenderedRow,
         theme: ThemeVariant,
     ) -> None:
-        """Render one paint-ready row at (x, y) with `body_width` cells.
-
-        Handles row-level treatments (code block bg, blockquote left
-        border, header rule, horizontal rule) and per-span tag color
-        resolution. Empty rows (no leading, no spans) just leave the
-        background fill from `_paint_chat_area`'s clear pass.
-
-        For tool-card rows (prepainted_cells set), copy cells verbatim
-        to the chat region — bypassing the entire span/leading flow
-        because the bash renderer has already produced fully-styled cells.
-        """
-        # ─── Pre-painted (tool card) row — fast path ───
-        if row.prepainted_cells:
-            for col_offset, cell in enumerate(row.prepainted_cells):
-                cx = x + col_offset
-                if cx >= grid.cols or col_offset >= body_width:
-                    break
-                if cell.wide_tail:
-                    continue
-                grid.set(y, cx, cell)
-            return
-
-        # ─── Boundary divider row — special path ───
-        # This is the permanent visible artifact of a past compaction.
-        # The painter draws a horizontal line + a central pill showing
-        # the compaction stats. The pill carries the BoundaryMarker info.
-        # row.materialize_t controls the partial draw-in animation
-        # during the compaction MATERIALIZE phase.
-        if row.is_boundary:
-            # Subtle continuous pulse on settled boundaries — gives the
-            # divider a "living artifact" feel rather than dead chrome.
-            pulse_phase = self.elapsed if row.materialize_t >= 1.0 else 0.0
-            self._paint_compaction_boundary(
-                grid, x, y, body_width, theme,
-                boundary=row.boundary_meta,
-                materialize_t=row.materialize_t,
-                pulse_phase=pulse_phase,
-            )
-            return
-
-        # ─── Row-level treatments ───
-        line_bg = theme.bg
-        if row.line_tag in ("code_block", "code_lang"):
-            line_bg = theme.bg_input if row.line_tag == "code_block" else theme.bg_footer
-            # Fill the body region with the tinted bg
-            fill_region(
-                grid, x, y, body_width, 1,
-                style=Style(bg=line_bg),
-            )
-        elif row.line_tag == "header_rule":
-            # Thin separator under h1/h2
-            rule_text = "─" * max(0, body_width - _PREFIX_W)
-            paint_text(
-                grid, rule_text, x + _PREFIX_W, y,
-                style=Style(fg=theme.fg_subtle, bg=theme.bg),
-            )
-            return
-        elif row.line_tag == "hr":
-            # Horizontal rule across the full body width
-            rule_text = "─" * max(0, body_width - _PREFIX_W)
-            paint_text(
-                grid, rule_text, x + _PREFIX_W, y,
-                style=Style(fg=theme.fg_dim, bg=theme.bg, attrs=ATTR_BOLD),
-            )
-            return
-        elif row.line_tag == "blockquote":
-            # Will paint a left bar after we've drawn the leading region
-            pass
-
-        # Helper: apply per-row fade_alpha to a foreground color so the
-        # compaction fold animation (and any future per-row dim) is
-        # uniform across leading + body. Pulls alpha toward theme.bg.
-        def _faded(fg: int) -> int:
-            if row.fade_alpha >= 1.0:
-                return fg
-            return lerp_rgb(theme.bg, fg, row.fade_alpha)
-
-        # ─── Leading text (prefix or continuation indent) ───
-        leading_text = row.leading_text
-        if leading_text:
-            leading_color = self._resolve_leading_color(
-                row.leading_color_kind, row.base_color, theme
-            )
-            leading_style = Style(
-                fg=_faded(leading_color),
-                bg=line_bg,
-                attrs=row.leading_attrs,
-            )
-            paint_text(grid, leading_text, x, y, style=leading_style)
-            cx = x + len(leading_text)
-        else:
-            cx = x
-
-        # ─── Blockquote left border ───
-        if row.line_tag == "blockquote":
-            paint_text(
-                grid, "▎", cx, y,
-                style=Style(fg=_faded(theme.accent_warm), bg=line_bg, attrs=ATTR_BOLD),
-            )
-            cx += 1
-            # Skip an extra space after the bar
-            cx += 1
-
-        # ─── Body indent (for blockquotes inside the body) ───
-        cx += row.body_indent
-
-        # ─── Body spans ───
-        for span in row.body_spans:
-            style = self._resolve_span_style(span, row.base_color, line_bg, theme)
-            if row.fade_alpha < 1.0:
-                style = Style(
-                    fg=_faded(style.fg),
-                    bg=style.bg,
-                    attrs=style.attrs,
-                )
-            paint_text(grid, span.text, cx, y, style=style)
-            cx += sum(1 for _ in span.text)  # rough; assumes width-1 chars
-            # NOTE: for full UTF-8 width support we'd use char_width here,
-            # but markdown content is overwhelmingly width-1 in practice.
-
-    def _paint_compaction_boundary(
-        self,
-        grid: Grid,
-        x: int,
-        y: int,
-        body_width: int,
-        theme: ThemeVariant,
-        *,
-        boundary: object | None,
-        materialize_t: float = 1.0,
-        pulse_phase: float = 0.0,
-    ) -> None:
-        """Paint a compaction boundary divider with central pill.
-
-        Layout (full materialize):
-
-            ━━━━━━━━━━━━━━━━━━┤ ▼ summary · 165 → 6 rounds · 96.9% saved ▼ ├━━━━━━━━━━━━
-
-        materialize_t controls the partial draw-in (0.0 → 1.0). At t=0
-        nothing is drawn; at t=1 the divider is fully visible. The line
-        materializes from the center outward (gives a sense of inevitability
-        rather than a directional sweep).
-
-        pulse_phase, when > 0, adds a subtle brightness pulse to the
-        pill — used after the animation completes to make the divider
-        a living artifact rather than dead chrome.
-
-        boundary may be None (e.g. before the BoundaryMarker has been
-        attached), in which case we paint just an unlabeled divider.
-        """
-        if body_width < 12:
-            return
-
-        # The pill text — concise but information-dense
-        if boundary is not None:
-            pill_text = self._format_boundary_pill(boundary)
-        else:
-            pill_text = " compaction "
-
-        # Color: accent_warm — warm, attention-getting but not alarming.
-        # Pulse_phase adds a subtle brightness modulation.
-        base_color = theme.accent_warm
-        if pulse_phase > 0:
-            import math
-            pulse = 0.5 + 0.5 * math.sin(pulse_phase * 2 * math.pi * 0.4)
-            base_color = lerp_rgb(theme.accent_warm, theme.accent, pulse * 0.3)
-
-        line_style = Style(fg=base_color, bg=theme.bg, attrs=ATTR_BOLD)
-        pill_style = Style(fg=theme.bg, bg=base_color, attrs=ATTR_BOLD)
-        bracket_style = Style(fg=base_color, bg=theme.bg, attrs=ATTR_BOLD)
-
-        # Step 1: paint the horizontal line via the primitive (handles
-        # the partial materialize from the center outward)
-        paint_horizontal_divider(
-            grid, x, y, body_width,
-            style=line_style,
-            char="━",
-            t=materialize_t,
+        paint_chat_scene_row(
+            grid,
+            x,
+            y,
+            body_width,
+            row,
+            theme,
+            prefix_width=_PREFIX_W,
+            elapsed=self.elapsed,
         )
-
-        # Step 2: at materialize_t < 0.6 we don't show the pill yet.
-        # The pill appears as the line nears full extent so the user
-        # sees the line draw FIRST and then the metadata snap in.
-        if materialize_t < 0.6 or not pill_text:
-            return
-
-        # Compute pill geometry
-        pill_w = len(pill_text) + 2  # 2 for the bracket characters
-        if pill_w >= body_width - 4:
-            return  # too narrow to show the pill, just leave the line
-        pill_x = x + (body_width - pill_w) // 2
-
-        # Step 3: erase the line under where the pill goes (just the bracket
-        # characters and the pill body), then paint the pill on top.
-        # Bracket characters frame the pill: ┤ ... ├
-        if 0 <= pill_x < grid.cols:
-            grid.set(y, pill_x, Cell("┤", bracket_style))
-        # Pill body — fade in alpha based on materialize_t (0.6 → 1.0)
-        pill_alpha = max(0.0, min(1.0, (materialize_t - 0.6) / 0.4))
-        if pill_alpha < 1.0:
-            faded_bg = lerp_rgb(theme.bg, base_color, pill_alpha)
-            pill_style = Style(fg=theme.bg if pill_alpha > 0.5 else faded_bg,
-                               bg=faded_bg, attrs=ATTR_BOLD)
-        paint_text(
-            grid, pill_text, pill_x + 1, y,
-            style=pill_style,
-        )
-        right_bracket_x = pill_x + 1 + len(pill_text)
-        if 0 <= right_bracket_x < grid.cols:
-            grid.set(y, right_bracket_x, Cell("├", bracket_style))
-
-    @staticmethod
-    def _format_boundary_pill(boundary: object) -> str:
-        """Format the BoundaryMarker as a one-line pill label.
-
-        Examples:
-          " ▼ 161 rounds · 40k → 1k tokens · 96.9% saved ▼ "
-          " ▼ summary · 12 rounds · 6k → 1k · 80% saved ▼ "
-        """
-        # Duck-typed read of BoundaryMarker — we accept anything with
-        # the right attributes so the painter doesn't need to import
-        # from agent.log
-        try:
-            n_rounds = getattr(boundary, "rounds_summarized", 0)
-            pre = getattr(boundary, "pre_compact_tokens", 0)
-            post = getattr(boundary, "post_compact_tokens", 0)
-            reduction = getattr(boundary, "reduction_pct", 0.0)
-        except Exception:
-            return " ▼ compaction ▼ "
-
-        def _fmt_tokens(n: int) -> str:
-            if n >= 1000:
-                return f"{n / 1000:.0f}k"
-            return str(n)
-
-        return (
-            f" ▼ {n_rounds} rounds · {_fmt_tokens(pre)} → "
-            f"{_fmt_tokens(post)} · {reduction:.0f}% saved ▼ "
-        )
-
-    @staticmethod
-    def _resolve_leading_color(kind: str, base_color: int, theme: ThemeVariant) -> int:
-        if kind == "fg":
-            return theme.fg
-        if kind == "fg_dim":
-            return theme.fg_dim
-        return base_color  # "accent" or unknown — use the message's base color
-
-    @staticmethod
-    def _resolve_span_style(
-        span: LaidOutSpan,
-        base_color: int,
-        line_bg: int,
-        theme: ThemeVariant,
-    ) -> Style:
-        """Resolve a span's semantic tag to a concrete Style.
-
-        Tags:
-            ""             — default body text using base_color
-            "code"         — inline code with bg_input tint
-            "link"         — accent_warm + underline (from attrs)
-            "header"       — accent fg + bold
-            "list_marker"  — accent_warm fg
-            "code_lang"    — fg_dim on bg_footer
-            "search_hit"   — accent_warm bg, bg fg (highlight)
-        """
-        attrs = span.attrs
-        if span.tag == "search_hit":
-            return Style(
-                fg=theme.bg, bg=theme.accent_warm, attrs=attrs | ATTR_BOLD
-            )
-        if span.tag == "code":
-            return Style(fg=theme.fg, bg=theme.bg_input, attrs=attrs)
-        if span.tag == "link":
-            return Style(fg=theme.accent_warm, bg=line_bg, attrs=attrs)
-        if span.tag == "header":
-            return Style(fg=theme.accent, bg=line_bg, attrs=attrs)
-        if span.tag == "list_marker":
-            return Style(fg=theme.accent_warm, bg=line_bg, attrs=attrs)
-        if span.tag == "code_lang":
-            return Style(fg=theme.fg_dim, bg=line_bg, attrs=attrs)
-        return Style(fg=base_color, bg=line_bg, attrs=attrs)
 
     # ─── Flat-line builders ───
 
@@ -8230,44 +7540,7 @@ class SuccessorChat(App):
         bg_color: int,
         toward_bg_amount: float,
     ) -> list[_RenderedRow]:
-        """Tint all cells in pre-painted rows toward bg_color by the
-        given amount (0.0 = unchanged, 1.0 = fully bg). Used to fade
-        out tool cards during the compaction fold animation.
-        """
-        if toward_bg_amount <= 0:
-            return rows
-        out: list[_RenderedRow] = []
-        for r in rows:
-            if not r.prepainted_cells:
-                out.append(r)
-                continue
-            new_cells = tuple(
-                Cell(
-                    c.char,
-                    Style(
-                        fg=lerp_rgb(c.style.fg, bg_color, toward_bg_amount),
-                        bg=lerp_rgb(c.style.bg, bg_color, toward_bg_amount),
-                        attrs=c.style.attrs,
-                    ),
-                    wide_tail=c.wide_tail,
-                )
-                for c in r.prepainted_cells
-            )
-            out.append(_RenderedRow(
-                leading_text=r.leading_text,
-                leading_attrs=r.leading_attrs,
-                leading_color_kind=r.leading_color_kind,
-                body_spans=r.body_spans,
-                base_color=r.base_color,
-                line_tag=r.line_tag,
-                body_indent=r.body_indent,
-                prepainted_cells=new_cells,
-                is_boundary=r.is_boundary,
-                boundary_meta=r.boundary_meta,
-                is_summary=r.is_summary,
-                fade_alpha=r.fade_alpha,
-            ))
-        return out
+        return fade_prepainted_chat_rows(rows, bg_color, toward_bg_amount)
 
     def _render_tool_card_rows(
         self,
@@ -8275,93 +7548,7 @@ class SuccessorChat(App):
         body_width: int,
         theme: ThemeVariant,
     ) -> list[_RenderedRow]:
-        """Pre-paint a ToolCard into a sub-grid and convert each row
-        into a _RenderedRow with prepainted_cells set.
-
-        Two paint paths:
-
-          1. RUNNING — msg.running_tool is set. The renderer reads the
-             runner's live stdout/stderr each frame and paints via
-             paint_tool_card_running. The pulsing border + spinner +
-             elapsed-time footer animate every tick. NO caching:
-             every frame is fresh because the underlying state is
-             changing (animations + new output lines).
-
-          2. STATIC — runner has finished (or never had one). Existing
-             cached path: build PreparedToolOutput once, cache the
-             rendered rows by (width, theme), reuse on subsequent
-             paints. Resize / theme swap invalidates.
-        """
-        if msg.subagent_card is not None:
-            return self._render_subagent_card_rows(msg, body_width, theme)
-
-        card = msg.tool_card
-        if card is None:
-            return []
-
-        runner = msg.running_tool
-        if runner is not None:
-            return self._render_running_tool_card_rows(
-                msg, body_width, theme, runner,
-            )
-
-        # Build the PreparedToolOutput once per message. Immutable
-        # (card is frozen dataclass), so it never needs to invalidate.
-        if msg._prepared_tool_output is None:
-            msg._prepared_tool_output = PreparedToolOutput(card)
-        prepared = msg._prepared_tool_output
-
-        # Second-level cache: the final pre-painted row list. Key is
-        # (width, id(theme_variant)) — the variant is resolved freshly
-        # every frame but the object identity stays stable between
-        # theme swaps, so `id()` is a precise cache key. A theme swap
-        # builds a new ThemeVariant and the cache auto-invalidates.
-        cache_key = (body_width, id(theme))
-        if (
-            msg._card_rows_cache_key == cache_key
-            and msg._card_rows_cache is not None
-        ):
-            return msg._card_rows_cache
-
-        # Compute the height the card will need at this width.
-        height = measure_tool_card_height(
-            card, width=body_width, show_output=card.executed,
-            prepared=prepared,
-        )
-        if height <= 0:
-            return []
-
-        # Paint the card into a sub-grid. The sub-grid is exactly the
-        # right size — no clipping, no scroll inside the card.
-        sub = Grid(height, body_width)
-        paint_tool_card(
-            sub, card, x=0, y=0, w=body_width, theme=theme,
-            prepared=prepared,
-        )
-
-        # Snapshot each row of the sub-grid as an immutable tuple of
-        # Cells. The painter just copies these to the chat region.
-        rows: list[_RenderedRow] = []
-        for sy in range(height):
-            cells: list[Cell] = []
-            for sx in range(body_width):
-                cells.append(sub.at(sy, sx))
-            rows.append(
-                _RenderedRow(
-                    leading_text="",
-                    leading_attrs=0,
-                    leading_color_kind="accent",
-                    body_spans=(),
-                    base_color=theme.fg,
-                    line_tag="tool_card",
-                    body_indent=0,
-                    prepainted_cells=tuple(cells),
-                )
-            )
-
-        msg._card_rows_cache_key = cache_key
-        msg._card_rows_cache = rows
-        return rows
+        return render_tool_chat_card_rows(msg, body_width, theme)
 
     def _render_running_tool_card_rows(
         self,
@@ -8370,60 +7557,7 @@ class SuccessorChat(App):
         theme: ThemeVariant,
         runner: BashRunner,
     ) -> list[_RenderedRow]:
-        """Pre-paint a LIVE tool card (running state) into a sub-grid
-        and convert each row into a _RenderedRow.
-
-        No caching here — every frame is a fresh paint because:
-          - the spinner glyph rotates per frame
-          - the border color pulses per frame
-          - new output lines may have arrived since last frame
-          - the elapsed-time counter ticks per frame
-
-        At 30 FPS for one card the cost is dominated by the small
-        sub-grid alloc + the row snapshot loop, which is sub-millisecond
-        for typical card heights (5-15 rows × 80-160 cols).
-        """
-        preview = msg.tool_card
-        if preview is None:
-            return []
-
-        now = time.monotonic()
-        stdout = runner.stdout
-        stderr = runner.stderr
-
-        height = measure_tool_card_running_height(
-            preview, width=body_width,
-            runner_stdout=stdout, runner_stderr=stderr,
-        )
-        if height <= 0:
-            return []
-
-        sub = Grid(height, body_width)
-        paint_tool_card_running(
-            sub, preview, x=0, y=0, w=body_width, theme=theme,
-            runner_stdout=stdout, runner_stderr=stderr,
-            elapsed_s=runner.elapsed(now),
-            now=now,
-        )
-
-        rows: list[_RenderedRow] = []
-        for sy in range(height):
-            cells: list[Cell] = []
-            for sx in range(body_width):
-                cells.append(sub.at(sy, sx))
-            rows.append(
-                _RenderedRow(
-                    leading_text="",
-                    leading_attrs=0,
-                    leading_color_kind="accent",
-                    body_spans=(),
-                    base_color=theme.fg,
-                    line_tag="tool_card",
-                    body_indent=0,
-                    prepainted_cells=tuple(cells),
-                )
-            )
-        return rows
+        return render_running_chat_card_rows(msg, body_width, theme, runner)
 
     def _render_subagent_card_rows(
         self,
@@ -8431,44 +7565,7 @@ class SuccessorChat(App):
         body_width: int,
         theme: ThemeVariant,
     ) -> list[_RenderedRow]:
-        card = msg.subagent_card
-        if card is None:
-            return []
-
-        cache_key = (body_width, id(theme))
-        if (
-            msg._card_rows_cache_key == cache_key
-            and msg._card_rows_cache is not None
-        ):
-            return msg._card_rows_cache
-
-        height = measure_subagent_card_height(card, width=body_width)
-        if height <= 0:
-            return []
-
-        sub = Grid(height, body_width)
-        paint_subagent_card(sub, card, x=0, y=0, w=body_width, theme=theme)
-
-        rows: list[_RenderedRow] = []
-        for sy in range(height):
-            cells: list[Cell] = []
-            for sx in range(body_width):
-                cells.append(sub.at(sy, sx))
-            rows.append(
-                _RenderedRow(
-                    leading_text="",
-                    leading_attrs=0,
-                    leading_color_kind="accent",
-                    body_spans=(),
-                    base_color=theme.fg,
-                    line_tag="tool_card",
-                    body_indent=0,
-                    prepainted_cells=tuple(cells),
-                )
-            )
-        msg._card_rows_cache_key = cache_key
-        msg._card_rows_cache = rows
-        return rows
+        return render_subagent_chat_card_rows(msg, body_width, theme)
 
     def _render_md_lines_with_search(
         self,
@@ -8478,113 +7575,22 @@ class SuccessorChat(App):
         prefix: str,
         base_color: int,
     ) -> list[_RenderedRow]:
-        """Convert markdown lines to _RenderedRows, optionally applying
-        search-match highlights to spans whose text overlaps a match.
-
-        For v0 we use a simple approach: walk through each rendered
-        line's spans, and for each span, check if any chars in its text
-        overlap a match position in the original raw_text. We can't
-        precisely map rendered text back to source positions because
-        markdown reflows; instead we substring-match each span's text
-        against the search query directly. This produces correct
-        highlights for plain text and most paragraphs; code blocks and
-        complex inline syntax may miss highlights at boundary chars.
-        """
-        out: list[_RenderedRow] = []
-        # Simpler heuristic: substring-match each span's text against
-        # the (lowercased) search query. The search_active check is
-        # done by the caller.
         query = self._search_query.lower() if self._search_active else ""
-        focused_msg_idx, focused_start, focused_end = (
-            self._search_matches[self._search_focused]
-            if self._search_active and self._search_matches
-            else (-1, 0, 0)
+        return render_markdown_rows_with_search(
+            md_lines,
+            query,
+            matches,
+            prefix,
+            base_color,
+            prefix_width=_PREFIX_W,
         )
-
-        for line_idx, md_line in enumerate(md_lines):
-            if line_idx == 0:
-                leading = prefix
-                leading_attrs = ATTR_BOLD
-            else:
-                leading = " " * _PREFIX_W
-                leading_attrs = 0
-
-            new_spans: tuple[LaidOutSpan, ...]
-            if query and matches:
-                new_spans = tuple(
-                    self._highlight_spans(md_line.spans, query)
-                )
-            else:
-                new_spans = tuple(md_line.spans)
-
-            out.append(
-                _RenderedRow(
-                    leading_text=leading,
-                    leading_attrs=leading_attrs,
-                    leading_color_kind="accent",
-                    body_spans=new_spans,
-                    base_color=base_color,
-                    line_tag=md_line.line_tag,
-                    body_indent=md_line.indent,
-                )
-            )
-        return out
 
     def _highlight_spans(
         self,
         spans: list[LaidOutSpan],
         query: str,
     ) -> list[LaidOutSpan]:
-        """Walk a list of spans and split them at query matches.
-
-        Each match becomes its own span with the special "search_hit"
-        tag, which the painter renders with a highlighted background.
-        Other span attrs (bold, italic, code, etc.) are preserved on
-        both the matched and unmatched portions.
-        """
-        result: list[LaidOutSpan] = []
-        for span in spans:
-            if not query or span.tag == "code_lang":
-                result.append(span)
-                continue
-            text = span.text
-            text_lower = text.lower()
-            i = 0
-            n = len(text)
-            qlen = len(query)
-            while i < n:
-                idx = text_lower.find(query, i)
-                if idx < 0:
-                    # No more matches in this span
-                    result.append(
-                        LaidOutSpan(
-                            text=text[i:],
-                            attrs=span.attrs,
-                            tag=span.tag,
-                            link=span.link,
-                        )
-                    )
-                    break
-                if idx > i:
-                    result.append(
-                        LaidOutSpan(
-                            text=text[i:idx],
-                            attrs=span.attrs,
-                            tag=span.tag,
-                            link=span.link,
-                        )
-                    )
-                # The matched substring becomes a search_hit span
-                result.append(
-                    LaidOutSpan(
-                        text=text[idx:idx + qlen],
-                        attrs=span.attrs,
-                        tag="search_hit",
-                        link=span.link,
-                    )
-                )
-                i = idx + qlen
-        return result
+        return highlight_row_spans(spans, query)
 
     def _build_streaming_lines(
         self,
@@ -8912,20 +7918,6 @@ class SuccessorChat(App):
         elif isinstance(state, _NoMatches):
             self._paint_no_matches(grid, theme, input_y, state)
 
-    def _blank_dropdown_rows(self, grid: Grid, theme: ThemeVariant, box_y: int, box_h: int) -> None:
-        """Blank the full row width of the rows the dropdown occupies.
-
-        Without this the chat content underneath would leak around the
-        dropdown's left and right edges. Doing this gives every dropdown
-        variant the same clean visual frame.
-        """
-        for blank_y in range(box_y, box_y + box_h):
-            if 0 <= blank_y < grid.rows:
-                fill_region(
-                    grid, 0, blank_y, grid.cols, 1,
-                    style=Style(bg=theme.bg),
-                )
-
     def _paint_name_mode(
         self,
         grid: Grid,
@@ -8933,74 +7925,15 @@ class SuccessorChat(App):
         input_y: int,
         state: _NameMode,
     ) -> None:
-        cols = grid.cols
-
-        # Cap visible rows so the box never exceeds the room above the input.
-        max_visible = max(1, min(len(state.matches), max(3, input_y - 3)))
-        visible = state.matches[:max_visible]
-
-        cmd_col_w = max(len(f"/{c.name}") for c in visible)
-        desc_col_w = max((len(c.description) for c in visible), default=0)
-        hint_col_w = max((len(c.args_hint) for c in visible), default=0)
-
-        inner_w = cmd_col_w + 2 + desc_col_w
-        if hint_col_w > 0:
-            inner_w += 2 + hint_col_w
-        inner_w = max(inner_w, 36)
-        box_w = min(inner_w + 4, cols - 2)
-        box_h = max_visible + 2
-
-        box_x = max(0, PROMPT_WIDTH)
-        box_y = input_y - box_h - 1
-        if box_y < 1:
-            box_y = 1
-            box_h = min(box_h, input_y - box_y - 1)
-            if box_h < 3:
-                return
-
-        self._blank_dropdown_rows(grid, theme, box_y, box_h)
-
-        border_style = Style(fg=theme.accent_warm, bg=theme.bg_input, attrs=ATTR_BOLD)
-        fill_style = Style(fg=theme.fg, bg=theme.bg_input)
-        paint_box(
-            grid, box_x, box_y, box_w, box_h,
-            style=border_style, fill_style=fill_style,
+        self._hit_boxes.extend(
+            paint_name_mode_overlay(
+                grid,
+                theme,
+                input_y,
+                state,
+                prompt_width=PROMPT_WIDTH,
+            )
         )
-
-        item_x = box_x + 2
-        for i, cmd in enumerate(visible):
-            row_y = box_y + 1 + i
-            if row_y >= box_y + box_h - 1:
-                break
-
-            is_selected = i == state.selected
-            row_bg = theme.accent if is_selected else theme.bg_input
-            row_fg = theme.bg if is_selected else theme.fg
-            dim_fg = theme.bg if is_selected else theme.fg_dim
-            subtle_fg = theme.bg if is_selected else theme.fg_subtle
-
-            fill_region(
-                grid, box_x + 1, row_y, box_w - 2, 1,
-                style=Style(bg=row_bg),
-            )
-
-            cmd_text = f"/{cmd.name}"
-            paint_text(grid, cmd_text, item_x, row_y,
-                       style=Style(fg=row_fg, bg=row_bg, attrs=ATTR_BOLD))
-
-            desc_x = item_x + cmd_col_w + 2
-            paint_text(grid, cmd.description, desc_x, row_y,
-                       style=Style(fg=dim_fg, bg=row_bg))
-
-            if cmd.args_hint:
-                hint_x = desc_x + desc_col_w + 2
-                paint_text(grid, cmd.args_hint, hint_x, row_y,
-                           style=Style(fg=subtle_fg, bg=row_bg, attrs=ATTR_DIM))
-
-            # Hit box for clickable rows when mouse mode is on.
-            self._hit_boxes.append(
-                _HitBox(box_x + 1, row_y, box_w - 2, 1, f"slash:{cmd.name}")
-            )
 
     def _paint_arg_mode(
         self,
@@ -9009,86 +7942,15 @@ class SuccessorChat(App):
         input_y: int,
         state: _ArgMode,
     ) -> None:
-        cols = grid.cols
-        cmd = state.command
-
-        max_visible = max(1, min(len(state.matches), max(3, input_y - 4)))
-        visible = state.matches[:max_visible]
-
-        # Header row shows "<cmd> · <arg hint>" so the user knows what
-        # they're picking from. The arg rows below show each option.
-        header = f" /{cmd.name} · {cmd.description} "
-        arg_col_w = max(len(a) for a in visible)
-        inner_w = max(len(header) - 2, arg_col_w + 4)
-        inner_w = max(inner_w, 36)
-        box_w = min(inner_w + 4, cols - 2)
-        # Box height: top border + header row + items + bottom border
-        box_h = 1 + max_visible + 2
-
-        box_x = max(0, PROMPT_WIDTH)
-        box_y = input_y - box_h - 1
-        if box_y < 1:
-            box_y = 1
-            box_h = min(box_h, input_y - box_y - 1)
-            if box_h < 4:
-                return
-
-        self._blank_dropdown_rows(grid, theme, box_y, box_h)
-
-        border_style = Style(fg=theme.accent, bg=theme.bg_input, attrs=ATTR_BOLD)
-        fill_style = Style(fg=theme.fg, bg=theme.bg_input)
-        paint_box(
-            grid, box_x, box_y, box_w, box_h,
-            style=border_style, fill_style=fill_style,
+        self._hit_boxes.extend(
+            paint_arg_mode_overlay(
+                grid,
+                theme,
+                input_y,
+                state,
+                prompt_width=PROMPT_WIDTH,
+            )
         )
-
-        # Header (just below the top border)
-        header_y = box_y + 1
-        if header_y < box_y + box_h - 1:
-            fill_region(
-                grid, box_x + 1, header_y, box_w - 2, 1,
-                style=Style(bg=theme.bg_footer),
-            )
-            paint_text(
-                grid, header, box_x + 2, header_y,
-                style=Style(fg=theme.fg_dim, bg=theme.bg_footer, attrs=ATTR_BOLD),
-            )
-
-        # Item rows (start one row below the header)
-        item_x = box_x + 2
-        first_item_y = box_y + 2
-        for i, arg in enumerate(visible):
-            row_y = first_item_y + i
-            if row_y >= box_y + box_h - 1:
-                break
-
-            is_selected = i == state.selected
-            row_bg = theme.accent if is_selected else theme.bg_input
-            row_fg = theme.bg if is_selected else theme.fg
-            dim_fg = theme.bg if is_selected else theme.fg_dim
-
-            fill_region(
-                grid, box_x + 1, row_y, box_w - 2, 1,
-                style=Style(bg=row_bg),
-            )
-
-            # Highlight the matched prefix in the arg
-            paint_text(
-                grid, arg, item_x, row_y,
-                style=Style(fg=row_fg, bg=row_bg, attrs=ATTR_BOLD),
-            )
-            # Show the partial as a dim suffix to make matching obvious
-            if state.partial:
-                hint_x = item_x + arg_col_w + 2
-                hint_text = f"matched '{state.partial}'"
-                paint_text(
-                    grid, hint_text, hint_x, row_y,
-                    style=Style(fg=dim_fg, bg=row_bg, attrs=ATTR_DIM),
-                )
-
-            self._hit_boxes.append(
-                _HitBox(box_x + 1, row_y, box_w - 2, 1, f"arg:{arg}")
-            )
 
     def _paint_no_matches(
         self,
@@ -9097,182 +7959,24 @@ class SuccessorChat(App):
         input_y: int,
         state: _NoMatches,
     ) -> None:
-        """Informational popover when nothing matches the typed prefix.
-
-        Dimmer styling than the regular dropdown — fg_dim border and
-        text — so it reads as 'FYI, no results' rather than an error.
-        """
-        cols = grid.cols
-
-        # Build the lines we want to display
-        lines: list[str] = [state.text]
-        if state.mode == "name":
-            lines.append("type / alone to see all commands")
-        elif state.mode == "arg" and state.valid_options:
-            valid = ", ".join(state.valid_options)
-            lines.append(f"valid: {valid}")
-
-        inner_w = max(len(line) for line in lines)
-        inner_w = max(inner_w, 32)
-        box_w = min(inner_w + 4, cols - 2)
-        box_h = len(lines) + 2  # top + bottom borders + lines
-
-        box_x = max(0, PROMPT_WIDTH)
-        box_y = input_y - box_h - 1
-        if box_y < 1:
-            return
-
-        self._blank_dropdown_rows(grid, theme, box_y, box_h)
-
-        # Quieter colors than the regular dropdown — this is informational.
-        border_style = Style(fg=theme.fg_dim, bg=theme.bg_input)
-        fill_style = Style(fg=theme.fg_dim, bg=theme.bg_input)
-        paint_box(
-            grid, box_x, box_y, box_w, box_h,
-            style=border_style, fill_style=fill_style,
+        paint_no_matches_overlay(
+            grid,
+            theme,
+            input_y,
+            state,
+            prompt_width=PROMPT_WIDTH,
         )
-
-        for i, text in enumerate(lines):
-            row_y = box_y + 1 + i
-            if row_y >= box_y + box_h - 1:
-                break
-            # First line is the headline; subsequent lines are dimmer.
-            fg = theme.fg_dim if i == 0 else theme.fg_subtle
-            paint_text(
-                grid, text, box_x + 2, row_y,
-                style=Style(fg=fg, bg=theme.bg_input, attrs=ATTR_DIM),
-            )
 
     # ─── Help overlay ───
 
     def _paint_help_overlay(self, grid: Grid, theme: Theme) -> None:
-        """Centered modal showing every keybinding + slash command.
-
-        Faded in over HELP_FADE_IN_S using lerp_rgb on every color so
-        the modal smoothly arrives over the existing UI. Dismissed
-        by any keypress.
-        """
-        rows, cols = grid.rows, grid.cols
-        if rows < 8 or cols < 50:
-            return
-
-        # Compose the section list at paint time so the available-commands
-        # entry stays in sync with the live SLASH_COMMANDS registry. The
-        # static _HELP_SECTIONS supplies keybindings; the dynamic helper
-        # supplies the slash command list.
         sections = _HELP_SECTIONS + (_build_slash_command_help_section(),)
-
-        # ─── Compute box dimensions ───
-        # Two columns: key, description. Pad each column for alignment.
-        key_col_w = max(
-            max(len(key) for key, _ in entries)
-            for _, entries in sections
+        paint_help_overlay_surface(
+            grid,
+            theme,
+            opened_at=self._help_opened_at,
+            sections=sections,
         )
-        desc_col_w = max(
-            max(len(desc) for _, desc in entries)
-            for _, entries in sections
-        )
-        title_text = "successor · keybindings"
-        # Inner content width = key + 3 + desc, plus inner padding (4)
-        inner_w = max(key_col_w + 3 + desc_col_w, len(title_text) + 4)
-        box_w = min(inner_w + 6, cols - 4)
-
-        # Inner content height: 1 for title, 1 for blank, then sections
-        # (1 header row + N entry rows + 1 blank row each), then a
-        # final 1 hint row.
-        sections_h = 0
-        for _, entries in sections:
-            sections_h += 1 + len(entries)  # header + entries (no spacer)
-        inner_h = 1 + 1 + sections_h + 1 + 1  # title, blank, sections, blank, hint
-        box_h = min(inner_h + 2, rows - 2)
-
-        box_x = max(0, (cols - box_w) // 2)
-        box_y = max(0, (rows - box_h) // 2)
-
-        # ─── Fade-in lerp ───
-        elapsed = time.monotonic() - self._help_opened_at
-        fade_t = ease_out_cubic(min(1.0, elapsed / HELP_FADE_IN_S))
-
-        def fade(target: int) -> int:
-            return lerp_rgb(theme.bg, target, fade_t)
-
-        # ─── Backdrop dim — slightly darken the chat behind the modal ───
-        # Skip for v0; the modal's solid bg is enough visual separation.
-
-        # ─── Draw the box ───
-        border_color = fade(theme.accent)
-        border_style = Style(fg=border_color, bg=theme.bg_input, attrs=ATTR_BOLD)
-        fill_style = Style(fg=fade(theme.fg), bg=theme.bg_input)
-        paint_box(
-            grid, box_x, box_y, box_w, box_h,
-            style=border_style, fill_style=fill_style,
-        )
-
-        # ─── Title ───
-        title_y = box_y + 1
-        if title_y < box_y + box_h - 1:
-            tx = box_x + (box_w - len(title_text)) // 2
-            paint_text(
-                grid, title_text, tx, title_y,
-                style=Style(fg=fade(theme.accent), bg=theme.bg_input, attrs=ATTR_BOLD),
-            )
-
-        # ─── Sections ───
-        cur_y = title_y + 2  # blank row after title
-        section_header_color = fade(theme.fg_dim)
-        key_color = fade(theme.accent_warm)
-        desc_color = fade(theme.fg)
-
-        for section_idx, (section_name, entries) in enumerate(sections):
-            if cur_y >= box_y + box_h - 2:
-                break
-            # Section header
-            paint_text(
-                grid, f"  {section_name}",
-                box_x + 2, cur_y,
-                style=Style(
-                    fg=section_header_color,
-                    bg=theme.bg_input,
-                    attrs=ATTR_DIM,
-                ),
-            )
-            cur_y += 1
-
-            for key, desc in entries:
-                if cur_y >= box_y + box_h - 2:
-                    break
-                # Key column (right-aligned to its width)
-                key_padded = key.rjust(key_col_w)
-                paint_text(
-                    grid, key_padded,
-                    box_x + 4, cur_y,
-                    style=Style(fg=key_color, bg=theme.bg_input, attrs=ATTR_BOLD),
-                )
-                # Description column
-                paint_text(
-                    grid, desc,
-                    box_x + 4 + key_col_w + 3, cur_y,
-                    style=Style(fg=desc_color, bg=theme.bg_input),
-                )
-                cur_y += 1
-
-            # No spacer between sections — saves vertical room so the
-            # whole modal fits on default 24-30 row terminals after the
-            # available-commands section was added.
-
-        # ─── Hint row (always at the last interior row) ───
-        hint_y = box_y + box_h - 2
-        if box_y + 1 <= hint_y < box_y + box_h - 1:
-            hint = "press any key to close"
-            hx = box_x + (box_w - len(hint)) // 2
-            paint_text(
-                grid, hint, hx, hint_y,
-                style=Style(
-                    fg=fade(theme.fg_subtle),
-                    bg=theme.bg_input,
-                    attrs=ATTR_DIM,
-                ),
-            )
 
     # ─── Static footer ───
 
@@ -9458,88 +8162,23 @@ class SuccessorChat(App):
             self._paint_search_bar(grid, y, width, theme)
             return
 
-        fill_region(grid, 0, y, width, height, style=Style(bg=theme.bg_input))
-
         all_wrapped = self._input_lines_at_width(width)
         hidden_above = max(0, len(all_wrapped) - height)
         wrapped = all_wrapped[-height:] if hidden_above else all_wrapped
-
-        prompt_style = Style(fg=theme.accent, bg=theme.bg_input, attrs=ATTR_BOLD)
-        paint_text(grid, PROMPT, 0, y, style=prompt_style)
-
-        text_style = Style(fg=theme.fg, bg=theme.bg_input)
-        for i, line in enumerate(wrapped):
-            ly = y + i
-            if ly >= y + height:
-                break
-            paint_text(grid, line, PROMPT_WIDTH, ly, style=text_style)
-
-        # Overflow indicator: when a paste (or long manual input) wraps
-        # to more lines than the 8-row input cap can show, surface a
-        # right-aligned "↑ N more lines" badge on the topmost visible
-        # row so the user knows their content didn't get truncated —
-        # the cursor is at the end and the older lines scrolled up.
-        if hidden_above > 0:
-            badge = f"↑ {hidden_above} more {'line' if hidden_above == 1 else 'lines'}"
-            badge_x = max(PROMPT_WIDTH, width - len(badge) - 1)
-            paint_text(
-                grid,
-                badge,
-                badge_x,
-                y,
-                style=Style(
-                    fg=theme.accent_warm,
-                    bg=theme.bg_input,
-                    attrs=ATTR_DIM | ATTR_ITALIC,
-                ),
-            )
-
-        # Cursor / streaming-status indicator on the last visible line.
-        if self._stream is None:
-            last_line = wrapped[-1] if wrapped else ""
-            last_y = y + min(len(wrapped) - 1, height - 1)
-            cursor_x = min(width - 1, PROMPT_WIDTH + len(last_line))
-
-            # ─── Inline argument ghost text ───
-            # When the user has typed a slash command + space and is
-            # ready for args, show the args_hint as dim text right
-            # after the cursor (Copilot-style ghost text). As they type
-            # the arg, the hint is hidden by their input. Disappears
-            # entirely once the input contains a non-whitespace arg.
-            ghost_text = self._compute_ghost_text()
-            if ghost_text and cursor_x < width:
-                ghost_x = cursor_x
-                # Reserve a cell for the cursor itself if visible.
-                cursor_visible = (int(time.monotonic() * CURSOR_BLINK_HZ * 2) % 2) == 0
-                if cursor_visible:
-                    ghost_x += 1  # ghost starts after the cursor cell
-                avail = max(0, width - ghost_x)
-                if avail > 0:
-                    paint_text(
-                        grid,
-                        ghost_text[:avail],
-                        ghost_x,
-                        last_y,
-                        style=Style(
-                            fg=theme.fg_subtle,
-                            bg=theme.bg_input,
-                            attrs=ATTR_DIM | ATTR_ITALIC,
-                        ),
-                    )
-
-            visible = (int(time.monotonic() * CURSOR_BLINK_HZ * 2) % 2) == 0
-            if visible:
-                cursor_cell = Cell(" ", Style(fg=theme.bg_input, bg=theme.fg))
-                grid.set(last_y, cursor_x, cursor_cell)
-        else:
-            hint = "successor is responding…  Ctrl+G to interrupt"
-            paint_text(
-                grid,
-                hint,
-                PROMPT_WIDTH,
-                y,
-                style=Style(fg=theme.fg_dim, bg=theme.bg_input, attrs=ATTR_DIM),
-            )
+        paint_input_surface(
+            grid,
+            y,
+            height,
+            width,
+            theme,
+            wrapped_lines=wrapped,
+            hidden_above=hidden_above,
+            prompt=PROMPT,
+            prompt_width=PROMPT_WIDTH,
+            cursor_blink_hz=CURSOR_BLINK_HZ,
+            ghost_text=self._compute_ghost_text(),
+            stream_active=self._stream is not None,
+        )
 
     def _paint_search_bar(
         self,
@@ -9548,73 +8187,16 @@ class SuccessorChat(App):
         width: int,
         theme: ThemeVariant,
     ) -> None:
-        """Render the search bar in place of the input area.
-
-        Layout:
-            🔎 query                              N/M  ↑↓ next  Esc close
-        """
-        fill_region(grid, 0, y, width, 1, style=Style(bg=theme.bg_input))
-
-        # Left side: search prompt + query
-        prompt = "🔎 "
-        # If 🔎 is wide on this terminal, fall back to a plain text marker.
-        # We'll just use plain text to avoid width issues:
-        prompt = "search ▸ "
-        prompt_style = Style(
-            fg=theme.accent_warm,
-            bg=theme.bg_input,
-            attrs=ATTR_BOLD,
+        paint_search_bar_surface(
+            grid,
+            y,
+            width,
+            theme,
+            query_text=self._search_query,
+            match_count=len(self._search_matches),
+            focused_index=self._search_focused,
+            cursor_blink_hz=CURSOR_BLINK_HZ,
         )
-        paint_text(grid, prompt, 0, y, style=prompt_style)
-
-        query_text = self._search_query
-        query_style = Style(fg=theme.fg, bg=theme.bg_input)
-        paint_text(grid, query_text, len(prompt), y, style=query_style)
-
-        # Cursor at the end of the query
-        cursor_x = min(width - 1, len(prompt) + len(query_text))
-        cursor_visible = (int(time.monotonic() * CURSOR_BLINK_HZ * 2) % 2) == 0
-        if cursor_visible:
-            grid.set(
-                y, cursor_x,
-                Cell(" ", Style(fg=theme.bg_input, bg=theme.fg)),
-            )
-
-        # Right side: match counter + key hints
-        if self._search_matches:
-            counter = (
-                f" {self._search_focused + 1}/{len(self._search_matches)} "
-            )
-            counter_style = Style(
-                fg=theme.bg,
-                bg=theme.accent_warm,
-                attrs=ATTR_BOLD,
-            )
-        else:
-            if self._search_query:
-                counter = " no matches "
-            else:
-                counter = " type to search "
-            counter_style = Style(
-                fg=theme.fg_dim,
-                bg=theme.bg_input,
-                attrs=ATTR_DIM,
-            )
-
-        hint = "  ↑↓ jump  Esc close"
-        hint_style = Style(fg=theme.fg_subtle, bg=theme.bg_input, attrs=ATTR_DIM)
-
-        right_text = counter + hint
-        right_x = max(len(prompt) + len(query_text) + 2, width - len(right_text))
-
-        # Counter pill (with its bg)
-        counter_x = right_x
-        if 0 <= counter_x < width:
-            paint_text(grid, counter, counter_x, y, style=counter_style)
-        # Hint after the counter
-        hint_x = counter_x + len(counter)
-        if 0 <= hint_x < width:
-            paint_text(grid, hint, hint_x, y, style=hint_style)
 
     def _compute_ghost_text(self) -> str:
         """Inline ghost-text hint shown after the input cursor.

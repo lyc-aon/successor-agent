@@ -705,7 +705,7 @@ pytest
 
 The suite is hermetic. Each test gets its own
 `SUCCESSOR_CONFIG_DIR`, and bash dispatch tests use real shell
-builtins (no mocks). 1218 tests at the time of writing. Run them
+builtins (no mocks). 1227 tests at the time of writing. Run them
 with `pytest -q` for a clean dot view, or `pytest -xvs` to follow
 individual tests.
 
@@ -715,6 +715,9 @@ individual tests.
   the design rules and what the architecture enables. Read this first.
 - [`docs/rendering-plan.md`](docs/rendering-plan.md): original
   architecture notes and the reasoning behind the layer split
+- [`docs/chat-render-refactor-plan.md`](docs/chat-render-refactor-plan.md):
+  the behavior-preserving extraction of chat scene composition out of
+  `chat.py`, plus the verification record for the refactor
 - [`docs/concepts.md`](docs/concepts.md): features the architecture
   can support with small additive changes
 - [`docs/llamacpp-protocol.md`](docs/llamacpp-protocol.md): what we

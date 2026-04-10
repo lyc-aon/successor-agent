@@ -11,6 +11,62 @@ unit on top of phase 0.
 
 ---
 
+## v0.1.29, chat render seam extraction + visual verification harness (2026-04-09)
+
+This pass reduces the risk surface inside `src/successor/chat.py`
+without changing the underlying renderer methodology. The render
+primitives, diff layer, and terminal ownership model stay intact; the
+chat scene composition gets extracted into dedicated render modules with
+new seam tests and explicit visual verification.
+
+### What landed
+
+- `src/successor/render/chat_frame.py`
+  - layout dataclasses and frame partition helpers
+- `src/successor/render/chat_header.py`
+  - header composition and widget placement
+- `src/successor/render/chat_viewport.py`
+  - viewport math, body-width policy, and scroll decisions
+- `src/successor/render/chat_intro.py`
+  - intro hero + info rail painting
+- `src/successor/render/chat_overlays.py`
+  - help overlay and slash-command dropdown painters
+- `src/successor/render/chat_input.py`
+  - input/search/footer painters
+- `src/successor/render/chat_rows.py`
+  - extracted row rendering and card flattening helpers
+- `src/successor/chat.py`
+  - now delegates scene composition into render modules while remaining
+    the controller/runtime owner
+- `tests/test_chat_render_layout.py`
+  - seam coverage for layout and paint routing
+- `tests/test_chat_render_viewport.py`
+  - seam coverage for viewport math and streaming row placement
+- docs
+  - updated `README.md`
+  - updated `docs/chat-render-refactor-plan.md`
+  - updated `docs/changelog.md`
+
+### Verification
+
+- lint:
+  - `ruff check src/successor/chat.py src/successor/render/chat_*.py tests/test_chat_render_layout.py tests/test_chat_render_viewport.py`
+- bytecode:
+  - `PYTHONPATH=src python3 -m compileall src/successor`
+- focused render slice:
+  - `PYTHONPATH=src pytest -q tests/test_snapshot_themes.py tests/test_intro_art.py tests/test_intro_sequence.py tests/test_chat_perf.py tests/test_chat_mouse.py tests/test_chat_paste.py tests/test_compaction_animation.py tests/test_playback.py tests/test_terminal.py tests/test_chat_render_layout.py tests/test_chat_render_viewport.py`
+  - `129 passed in 5.10s`
+- full suite:
+  - `PYTHONPATH=src pytest -q`
+  - `1227 passed in 12.34s`
+- headless human-emulated runtime verification:
+  - drove `?`, `/theme paper`, `/mode light`, `/density spacious`,
+    `/budget`, `/bash printf 'render-check\n'`, and two live model turns
+    through `SuccessorChat.on_key()` + `on_tick()` with `RecordingBundle`
+  - generated intro/help/autocomplete/runtime playback screenshots and
+    visually confirmed bounded artboard layout, centered help modal,
+    input-edge slash palette, and paper/light runtime composition
+
 ## v0.1.28, verification guidance + file-tool recovery nudges (2026-04-09)
 
 This pass hardens the live loop in two places that still caused small
