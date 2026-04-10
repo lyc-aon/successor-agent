@@ -18,6 +18,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ..tool_runner import ToolExecutionResult
+from ..verification_adoption import looks_stateful_runtime_task
 
 
 _VERIFICATION_KEYWORDS = (
@@ -95,6 +96,10 @@ def build_browser_verification_guidance(
 ) -> str:
     """Return a compact execution block for browser-led verification work."""
     visual = _looks_visual(latest_user_text, active_task_text)
+    stateful_runtime = looks_stateful_runtime_task(
+        latest_user_text,
+        active_task_text,
+    )
     lines = ["### Browser verification mode", ""]
     lines.append(
         "- Treat the browser as evidence gathering, not exploration. Open once, inspect if unsure, take the smallest proving action, then read the resulting page state before deciding the next step."
@@ -124,6 +129,13 @@ def build_browser_verification_guidance(
     lines.append(
         "- Run at least one edge or failure-path check that matches the feature under test instead of verifying only the happy path."
     )
+    if stateful_runtime:
+        lines.append(
+            "- This task looks stateful or realtime. If manual browser play is weak, add a tiny deterministic driver, autoplay harness, or player script, then use the browser to observe the driven run instead of relying on hand-play alone."
+        )
+        lines.append(
+            "- Pair that driver with an observable state surface such as a score HUD, runtime log, debug overlay, or state accessor so the main loop can be proved with concrete evidence."
+        )
     if visual and vision_available:
         lines.append(
             "- This task is explicitly visual. Capture a `screenshot` and use `vision` before passing layout, spacing, hierarchy, clipping, or design-polish claims."

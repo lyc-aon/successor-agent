@@ -1247,6 +1247,7 @@ class ChatToolRuntime:
             and self._host._stream is None
         ):
             self._host._pending_continuation = False
+            self._host._maybe_queue_verification_adoption_nudge()
             self._host._begin_agent_turn()
 
     def finalize_runner(

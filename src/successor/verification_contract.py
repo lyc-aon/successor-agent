@@ -209,6 +209,7 @@ def build_verification_execution_guidance(
     ledger: VerificationLedger,
     *,
     subagent_available: bool = False,
+    stateful_runtime: bool = False,
 ) -> str:
     lines = ["### Evidence-bearing verification", ""]
     if not ledger.items:
@@ -236,6 +237,12 @@ def build_verification_execution_guidance(
         "- Mark an item `failed` when the observed evidence contradicts the claim, and record the concise observed outcome.",
         "- Skip the verification contract only for single trivial tasks or purely conversational replies.",
     ])
+    if stateful_runtime:
+        lines.extend([
+            "- This task looks stateful or realtime. Build the evaluator as part of the work instead of treating verification as an afterthought.",
+            "- Prefer a tiny deterministic driver, autoplay harness, or player script over casual manual play when the runtime is fast, noisy, or timing-sensitive.",
+            "- Name that driver explicitly in the verification contract, and pair it with an observable debug surface such as a HUD value, runtime log, or state accessor.",
+        ])
     if subagent_available:
         lines.append(
             '- Before declaring complex browser-heavy or multi-file work done, consider launching a fresh read-only `subagent` with `role="verification"` so a separate pass can try to break it without editing project files.'

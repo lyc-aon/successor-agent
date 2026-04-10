@@ -121,6 +121,9 @@ from .skills import (
 from .tasks import (
     SessionTaskLedger,
 )
+from .verification_adoption import (
+    maybe_build_verification_adoption_nudge,
+)
 from .verification_contract import (
     VerificationLedger,
 )
@@ -1463,6 +1466,8 @@ class SuccessorChat(App):
         self._browser_verification_reason: str = ""
         self._verification_continue_nudged_this_turn: bool = False
         self._verification_continue_nudge: str | None = None
+        self._verification_adoption_nudged_this_turn: bool = False
+        self._verification_adoption_nudge: str | None = None
         self._file_tool_continue_nudged_this_turn: bool = False
         self._file_tool_continue_nudge: str | None = None
         self._subagent_continue_nudged_this_turn: bool = False
@@ -2913,6 +2918,32 @@ class SuccessorChat(App):
                     limit=240,
                 ),
             )
+
+    def _maybe_queue_verification_adoption_nudge(self) -> bool:
+        decision = maybe_build_verification_adoption_nudge(
+            latest_user_text=self._latest_real_user_text(),
+            active_task_text=self._browser_verification_context_text(),
+            ledger=self._verification_ledger,
+            messages=self.messages,
+        )
+        if (
+            not decision.should_nudge
+            or self._verification_adoption_nudged_this_turn
+        ):
+            return False
+        self._verification_adoption_nudged_this_turn = True
+        self._verification_adoption_nudge = decision.text
+        self._trace_event(
+            "verification_adoption_nudge",
+            turn=self._agent_turn,
+            kind=decision.kind,
+            browser_actions=decision.activity.browser_actions,
+            mutation_actions=decision.activity.mutation_actions,
+            verify_updates=decision.activity.verify_updates,
+            coverage_driver=decision.coverage.has_driver,
+            coverage_observability=decision.coverage.has_observability,
+        )
+        return True
 
     def _emit_progress_summary(
         self,

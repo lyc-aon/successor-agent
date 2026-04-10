@@ -446,6 +446,54 @@ def test_browser_verification_mode_injects_visual_guidance(
     assert "failure-path check" in sys_msg["content"]
 
 
+def test_browser_verification_mode_injects_stateful_runtime_guidance(
+    monkeypatch,
+    temp_config_dir: Path,
+) -> None:
+    monkeypatch.setattr(
+        "successor.chat.browser_runtime_status",
+        lambda *_args, **_kwargs: BrowserRuntimeStatus(
+            package_available=True,
+            python_executable="/usr/bin/python3",
+            using_external_runtime=False,
+            channel="chrome",
+            executable_path="",
+            user_data_dir="/tmp/browser",
+        ),
+    )
+    client = _CapturingClient([
+        _StaticStream([
+            StreamEnded(
+                finish_reason="stop",
+                usage=None,
+                timings=None,
+                full_reasoning="",
+                full_content="Done.",
+                tool_calls=(),
+            ),
+        ]),
+    ])
+    chat = SuccessorChat(
+        profile=Profile(
+            name="browser-chat",
+            tools=("browser",),
+        ),
+        client=client,
+    )
+    chat.messages = []
+
+    chat.input_buffer = "Verify the snake game runtime like a human and look for bugs."
+    chat._submit()
+    _pump_until_idle(chat)
+
+    assert len(client.calls) == 1
+    sys_msg = client.calls[0]["messages"][0]
+    assert sys_msg["role"] == "system"
+    assert "Browser verification mode" in sys_msg["content"]
+    assert "deterministic driver, autoplay harness, or player script" in sys_msg["content"]
+    assert "score HUD, runtime log, debug overlay, or state accessor" in sys_msg["content"]
+
+
 def test_native_vision_tool_call_dispatches(monkeypatch, temp_config_dir: Path) -> None:
     monkeypatch.setattr(
         "successor.chat.vision_runtime_status",

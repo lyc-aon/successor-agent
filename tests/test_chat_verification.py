@@ -214,3 +214,64 @@ def test_in_progress_verification_triggers_single_continuation_nudge(
 
     events = _trace_events(temp_config_dir)
     assert any(event["type"] == "verification_continue_nudge" for event in events)
+
+
+def test_stateful_runtime_async_continuation_gets_verification_setup_nudge(
+    temp_config_dir: Path,
+) -> None:
+    target = temp_config_dir / "snake.js"
+    client = _CapturingClient([
+        _StaticStream([
+            StreamEnded(
+                finish_reason="tool_calls",
+                usage=None,
+                timings=None,
+                full_reasoning="",
+                full_content="",
+                tool_calls=({
+                    "id": "write_1",
+                    "name": "write_file",
+                    "arguments": {
+                        "file_path": str(target),
+                        "content": "const score = 0;\nfunction tick() { return score; }\n",
+                    },
+                    "raw_arguments": json.dumps({
+                        "file_path": str(target),
+                        "content": "const score = 0;\nfunction tick() { return score; }\n",
+                    }),
+                },),
+            ),
+        ]),
+        _StaticStream([
+            ContentChunk(text="Continuing."),
+            StreamEnded(
+                finish_reason="stop",
+                usage=None,
+                timings=None,
+                full_reasoning="",
+                full_content="Continuing.",
+                tool_calls=(),
+            ),
+        ]),
+    ])
+    chat = SuccessorChat(
+        profile=Profile(name="agent", tools=("write_file",)),
+        client=client,
+    )
+    chat.messages = []
+
+    chat.input_buffer = "Build a snake game and verify the runtime honestly."
+    chat._submit()
+    _pump_until_idle(chat)
+    chat._trace.close()
+
+    assert target.exists()
+    assert client.call_count == 2
+    second_sys = client.calls[1]["messages"][0]
+    assert second_sys["role"] == "system"
+    assert "Verification Setup Reminder" in second_sys["content"]
+    assert "deterministic driver, autoplay harness, or player script" in second_sys["content"]
+    assert "debug surface, HUD, or state log" in second_sys["content"]
+
+    events = _trace_events(temp_config_dir)
+    assert any(event["type"] == "verification_adoption_nudge" for event in events)

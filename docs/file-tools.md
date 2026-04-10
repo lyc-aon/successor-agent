@@ -96,6 +96,11 @@ File tools solve authoring. Verification is a separate control problem.
 - Use it to track concrete claims plus the exact evidence that should
   prove them: browser interaction, screenshots plus vision, console
   output, runtime logs, or a small verifier/player script.
+- For stateful or realtime work, the runtime now nudges the model to
+  make that proof path explicit early: name the deterministic driver or
+  autoplay harness when hand-play is weak, and pair it with an
+  observable debug surface such as a HUD value, runtime log, or state
+  accessor.
 - Recording bundles persist the latest contract as `assertions.json`
   when the run produced explicit proof state.
 - When the model needs a fresh checker, use `subagent` with

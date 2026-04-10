@@ -11,7 +11,51 @@ unit on top of phase 0.
 
 ---
 
-## Unreleased, repo-aware verification contract + verifier workers (2026-04-10)
+## v0.1.30, verification release: repo-aware proof paths, chat seam cleanup, and stateful-runtime nudges (2026-04-10)
+
+This release packages the 2026-04-10 verification and chat-runtime work
+into a single cut. The headline change is not "fewer turns." It is
+stronger proof discipline for local-model runs:
+
+- repo-aware verification hints after native file mutations
+- stricter read-only verifier workers
+- display/controller/runtime seam extraction out of `chat.py`
+- new stateful-runtime nudges that push games and other realtime tasks
+  toward deterministic drivers plus visible debug surfaces instead of
+  endless manual browser poking
+
+The new stateful verifier-adoption layer currently improves behavior but
+does not fully solve it yet. A live supervised snake-game run on the
+local model showed the right direction:
+
+- the runtime issued `verification_adoption_nudge` twice
+- the model adopted `verify`
+- the session settled cleanly with no refused tools
+- but the model still overused manual browser checks and did not
+  synthesize a deterministic driver on its own
+
+That remaining gap is now explicit and recorded, rather than hidden.
+
+### Release verification
+
+- lint:
+  - `ruff check src tests`
+- full suite:
+  - `PYTHONPATH=src pytest -q`
+  - `1243 passed in 12.39s`
+- live supervised E2E:
+  - scenario bundle:
+    - `~/.local/share/successor/e2e/stateful_verify_snake_adoption/`
+  - reviewer:
+    - `~/.local/share/successor/e2e/stateful_verify_snake_adoption/playback.html`
+  - final screenshot:
+    - `~/.local/share/successor/e2e/stateful_verify_snake_adoption/workspace/screenshot_debug18.png`
+  - observed trace counts:
+    - `verification_adoption_nudge = 2`
+    - `verification_contract_updated = 1`
+    - `browser tool spawns = 92`
+
+### Included slice: repo-aware verification contract + verifier workers
 
 This pass hardens the post-file-tools workflow so the model sees the
 workspace verification contract directly in the prompt, gets immediate
@@ -88,7 +132,7 @@ one-shot theater.
   - `PYTHONPATH=src pytest -q`
   - `1236 passed in 12.47s`
 
-## Unreleased, chat display-runtime seam extraction + live streaming visual verification (2026-04-10)
+### Included slice: chat display-runtime seam extraction + live streaming visual verification
 
 This pass continues the `chat.py` cleanup by pulling the display-facing
 row-builder and footer cluster out of `src/successor/chat.py` while
@@ -138,7 +182,7 @@ keeping the existing `SuccessorChat` wrapper surface intact.
   - captured browser-rendered screenshots in:
     - `/tmp/successor-chat-display-browser-verify-20260410`
 
-## Unreleased, chat agent-loop seam extraction + live browser-grounded verification (2026-04-10)
+### Included slice: chat agent-loop seam extraction + live browser-grounded verification
 
 This pass continues the post-`v0.1.29` cleanup by pulling the submit /
 turn / stream controller cluster out of `src/successor/chat.py` while
@@ -189,7 +233,7 @@ keeping the existing `SuccessorChat` method surface intact.
   - independently re-verified search, filters, create, close/reopen,
     and theme + data persistence with Playwright
 
-## Unreleased, chat runtime seam extraction + live headless E2E verification (2026-04-10)
+### Included slice: chat runtime seam extraction + live headless E2E verification
 
 This pass continues the post-`v0.1.29` cleanup by pulling the native
 tool/runtime orchestration out of `src/successor/chat.py` while keeping

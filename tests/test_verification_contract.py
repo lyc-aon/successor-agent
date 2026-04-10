@@ -94,12 +94,18 @@ def test_verification_helpers_render_contract_and_summary() -> None:
     assert "<verification-contract>" in tool_result
     assert "<active-claim>No runtime errors</active-claim>" in tool_result
 
-    guidance = build_verification_execution_guidance(ledger, subagent_available=True)
+    guidance = build_verification_execution_guidance(
+        ledger,
+        subagent_available=True,
+        stateful_runtime=True,
+    )
     assert "Evidence-bearing verification" in guidance
     assert "debug logs" in guidance
     assert "before/after state delta" in guidance
     assert "adversarial or failure-path probe" in guidance
     assert 'role="verification"' in guidance
+    assert "deterministic driver" in guidance
+    assert "HUD value" in guidance
 
     nudge = build_verification_continue_nudge(ledger)
     assert "still marked `in_progress`" in nudge

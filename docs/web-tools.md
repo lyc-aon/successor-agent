@@ -153,6 +153,21 @@ That guidance pushes the model toward a tighter proving loop:
 - check `console_errors` after steps that might trigger runtime issues
 - stop once the requested behavior is actually proven or falsified
 
+For stateful or realtime tasks such as games, canvas loops, drag/drop
+surfaces, or timing-sensitive animations, the controller now goes
+further than generic browser QA guidance. After real work has begun, it
+can issue a bounded reminder to refresh `verify` so the proof path names:
+
+- a deterministic driver, autoplay harness, or player script when
+  casual hand-play is weak evidence
+- an observable debug surface such as a HUD value, runtime log, debug
+  overlay, or state accessor
+
+This is intentionally narrow. It does not force a giant testing
+framework. It just keeps the model from drifting into endless
+"click around and hope" verification on tasks where the runtime should
+really be measured.
+
 If the task is explicitly visual and the profile has `vision`
 available, the guidance also tells the model to use `screenshot` plus
 `vision` before passing layout, clipping, spacing, contrast, or design

@@ -47,6 +47,7 @@ from .verification_contract import (
     build_verification_execution_guidance,
     build_verification_prompt_section,
 )
+from .verification_adoption import maybe_build_verification_adoption_nudge
 from .verification_hints import build_repo_verification_guidance
 from .web.verification import build_browser_verification_guidance
 
@@ -640,6 +641,8 @@ class ChatAgentLoop:
         self._host._browser_verification_reason = ""
         self._host._verification_continue_nudged_this_turn = False
         self._host._verification_continue_nudge = None
+        self._host._verification_adoption_nudged_this_turn = False
+        self._host._verification_adoption_nudge = None
         self._host._file_tool_continue_nudged_this_turn = False
         self._host._file_tool_continue_nudge = None
         self._host._subagent_continue_nudged_this_turn = False
@@ -679,6 +682,15 @@ class ChatAgentLoop:
 
         enabled_tools = self._host._enabled_tools_for_turn()
         enabled_skills = self._host._enabled_skills_for_turn(enabled_tools)
+        latest_user_text = self._host._latest_real_user_text()
+        active_task_text = self._host._browser_verification_context_text()
+        adoption_decision = maybe_build_verification_adoption_nudge(
+            latest_user_text=latest_user_text,
+            active_task_text=active_task_text,
+            ledger=self._host._verification_ledger,
+            messages=self._host.messages,
+        )
+        stateful_runtime = adoption_decision.stateful_runtime
 
         sys_prompt = self._host.system_prompt
         task_execution_guidance = ""
@@ -695,6 +707,7 @@ class ChatAgentLoop:
             verification_execution_guidance = build_verification_execution_guidance(
                 self._host._verification_ledger,
                 subagent_available="subagent" in enabled_tools,
+                stateful_runtime=stateful_runtime,
             )
             verification_section = build_verification_prompt_section(
                 self._host._verification_ledger
@@ -706,8 +719,8 @@ class ChatAgentLoop:
             runbook_section = build_runbook_prompt_section(self._host._runbook)
         if self._host._browser_verification_active and "browser" in enabled_tools:
             browser_verification_guidance = build_browser_verification_guidance(
-                latest_user_text=self._host._latest_real_user_text(),
-                active_task_text=self._host._browser_verification_context_text(),
+                latest_user_text=latest_user_text,
+                active_task_text=active_task_text,
                 vision_available="vision" in enabled_tools,
                 browser_verifier_available=(
                     "skill" in enabled_tools
@@ -823,6 +836,13 @@ class ChatAgentLoop:
                 f"{self._host._verification_continue_nudge}"
             )
             self._host._verification_continue_nudge = None
+        if self._host._verification_adoption_nudge:
+            sys_prompt = (
+                f"{sys_prompt}\n\n"
+                f"## Verification Setup Reminder\n\n"
+                f"{self._host._verification_adoption_nudge}"
+            )
+            self._host._verification_adoption_nudge = None
         if self._host._file_tool_continue_nudge:
             sys_prompt = (
                 f"{sys_prompt}\n\n"
@@ -1064,6 +1084,7 @@ class ChatAgentLoop:
                 )
 
                 if any_ran and self._host._agent_turn > 0:
+                    self._host._maybe_queue_verification_adoption_nudge()
                     if self._host._running_tools:
                         self._host._trace_event(
                             "continuation_pending",

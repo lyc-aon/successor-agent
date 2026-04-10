@@ -522,6 +522,14 @@ model into ceremony. It is there to make the final-mile proof compact and
 legible: what claim is being checked, what evidence should prove it, and
 what was actually observed.
 
+For stateful or realtime work like games, canvas loops, timing-sensitive
+animations, or fast browser interactions, the runtime now pushes the
+model one step further: set up the proof path early, name a deterministic
+driver or autoplay harness when manual play is weak, and pair it with an
+observable debug surface such as a HUD value, runtime log, or state
+accessor. The goal is not fewer turns for their own sake. The goal is
+fewer fake finishes and stronger runtime proof.
+
 For genuinely iterative runs, Successor can also keep a runbook: a
 small session-local contract for the objective, success definition,
 baseline status, active hypothesis, and stable evaluator steps. This is
