@@ -5,22 +5,41 @@ lives in [`docs/changelog.md`](docs/changelog.md).
 
 ## Unreleased
 
-This documentation pass aligns the public project story with how
-Successor is actually meant to be used: long-running local-model loops
-are acceptable when they stay productive, inspectable, and grounded in
-runtime evidence. Turn count by itself is not the optimization target.
-The real targets are output quality, proof quality, and workflow
-compression, especially in browser-heavy final-mile verification.
+- no user-facing notes yet
 
-- refreshed README and public notes so the repo explicitly frames
-  `task`, `verify`, verifier workers, recordings, and high turn budgets
-  as workflow tools for local GPU-backed runs rather than one-shot
-  benchmark tricks
-- clarified that `max_agent_turns` is a safety ceiling, not the
-  primary definition of efficiency
-- tightened the public wording around final-mile verification so the
-  browser/runtime path is described as evidence gathering, not just UI
-  exploration
+## v0.1.33 — 2026-04-10
+
+This release hardens the local llama.cpp path around the thing that
+actually matters for long runs: cache reuse.
+
+### What changed
+
+- split prompt assembly into a stable system prefix plus a volatile
+  tail-only runtime context so ordinary per-turn reminders and ledger
+  updates stop breaking the cache-critical front of the prompt
+- added a canonical outbound request envelope so `/budget`, the fill
+  bar, and autocompact all read from the same request shape the
+  provider actually sees
+- made llama.cpp caching explicit by sending `cache_prompt=true` and
+  carrying preferred slot ids when slot support is available
+- reserved the foreground chat's slot and routed subagents onto
+  non-foreground slots when the provider exposes them
+- refreshed the public docs to describe the cache-friendly local-model
+  path and shipped the new chat refactor verification docs
+
+### Verification
+
+- `ruff check src tests`
+- `PYTHONPATH=src pytest -q`
+  - `1256 passed in 25.00s`
+- live supervised build + runtime verification against a real local app:
+  - stable system hash stayed fixed across ordinary turns
+  - volatile tail state changed independently
+  - the model self-corrected a real runtime logger bug
+  - independent Playwright verification passed for the fixed app
+  - remaining known gap: browser `type` still struggles on some custom
+    input controls and can over-retry selector variants before falling
+    back
 
 ## v0.1.28 — 2026-04-09
 

@@ -865,33 +865,20 @@ class ChatDisplayRuntime:
         theme: ThemeVariant,
     ) -> None:
         host = self._host
-        if host._cached_token_counter is not None:
-            try:
-                used = host._total_tokens()
-            except Exception:
-                used = host._fallback_token_count()
-        elif host._last_usage and "total_tokens" in host._last_usage:
-            used = int(host._last_usage["total_tokens"])
-        else:
+        try:
+            snapshot = host._context_usage_snapshot()
+            used = snapshot.used_tokens
+            window = snapshot.window
+            pct = snapshot.fill_pct
+            state = snapshot.state
+        except Exception:
             used = host._fallback_token_count()
-
-        window = host._resolve_context_window()
-        used = max(0, min(used, window))
-        pct = used / window if window > 0 else 0.0
+            window = host._resolve_context_window()
+            pct = used / window if window > 0 else 0.0
+            budget = host._agent_budget()
+            state = budget.state(used)
 
         fill_region(grid, 0, y, width, 1, style=Style(bg=theme.bg_footer))
-
-        autocompact_at = window - max(4_000, window // 32)
-        warning_at = window - max(8_000, window // 16)
-        blocking_at = window - max(1_000, window // 128)
-        if used >= blocking_at:
-            state = "blocking"
-        elif used >= autocompact_at:
-            state = "autocompact"
-        elif used >= warning_at:
-            state = "warning"
-        else:
-            state = "ok"
 
         pulse = 0.0
         if state in ("autocompact", "blocking"):

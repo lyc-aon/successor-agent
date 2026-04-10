@@ -119,6 +119,7 @@ class OpenAICompatClient:
     """
 
     provider_type = "openai_compat"
+    supports_tokenize_endpoint = False
 
     def __init__(
         self,
@@ -150,6 +151,10 @@ class OpenAICompatClient:
             return self.base_url
         return f"{self.base_url}/v1"
 
+    def count_text_tokens(self, text: str) -> int | None:
+        """OpenAI-compatible servers do not expose a universal tokenizer API."""
+        return None
+
     def stream_chat(
         self,
         messages: Iterable[dict],
@@ -158,6 +163,7 @@ class OpenAICompatClient:
         temperature: float | None = None,
         timeout: float | None = None,
         extra: dict | None = None,
+        tools: list[dict] | None = None,
     ) -> ChatStream:
         """Open a streaming chat completion.
 
@@ -170,15 +176,25 @@ class OpenAICompatClient:
         """
         body: dict = {
             "model": self.model,
-            "messages": [
-                {"role": m["role"], "content": m["content"]} for m in messages
-            ],
             "stream": True,
             "max_tokens": max_tokens if max_tokens is not None else self.default_max_tokens,
             "temperature": (
                 temperature if temperature is not None else self.default_temperature
             ),
         }
+        serialized_messages: list[dict] = []
+        for m in messages:
+            entry: dict = {"role": m["role"], "content": m.get("content", "") or ""}
+            if "tool_calls" in m and m["tool_calls"]:
+                entry["tool_calls"] = m["tool_calls"]
+            if "tool_call_id" in m and m["tool_call_id"]:
+                entry["tool_call_id"] = m["tool_call_id"]
+            if "name" in m and m["name"]:
+                entry["name"] = m["name"]
+            serialized_messages.append(entry)
+        body["messages"] = serialized_messages
+        if tools:
+            body["tools"] = tools
         if extra:
             body.update(extra)
 

@@ -872,14 +872,11 @@ def test_execution_discipline_injected_when_tools_enabled(
     assert "Task-ledger discipline" in sys_msg["content"]
     assert "Evidence-bearing verification" in sys_msg["content"]
     assert "Experimental run discipline" in sys_msg["content"]
-    assert "No current task ledger." in sys_msg["content"]
-    assert "No current verification contract." in sys_msg["content"]
-    assert "No current runbook." in sys_msg["content"]
+    assert "No current task ledger." not in sys_msg["content"]
+    assert "No current verification contract." not in sys_msg["content"]
+    assert "No current runbook." not in sys_msg["content"]
     assert "Working with local files" in sys_msg["content"]
     assert sys_msg["content"].index("Task-ledger discipline") < sys_msg["content"].index("Working with local files")
-    assert sys_msg["content"].index("## Current Session Tasks") < sys_msg["content"].index("Working with local files")
-    assert sys_msg["content"].index("## Current Verification Contract") < sys_msg["content"].index("Working with local files")
-    assert sys_msg["content"].index("## Current Runbook") < sys_msg["content"].index("Working with local files")
 
 
 def test_live_stream_never_exposes_bash_block_mid_stream(

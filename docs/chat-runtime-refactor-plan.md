@@ -124,17 +124,14 @@ behavior pattern worth keeping in mind:
 That is not a refactor bug, but it is useful signal for the next loop
 hardening pass.
 
-## Next Safe Extraction
+## Follow-on
 
-The highest-value remaining cluster in `chat.py` is the agent-turn /
-stream controller layer:
+The next safe extraction named here was completed in the follow-up pass
+documented at:
 
-- `_submit`
-- `_begin_agent_turn`
-- `_build_api_messages_native`
-- `_pump_stream`
-- `_format_stream_error`
+- `docs/chat-agent-loop-refactor-plan.md`
+- `docs/chat-display-runtime-refactor-plan.md`
 
-That should be the next extraction if we continue reducing `chat.py`.
-The runtime seam is now clean enough that the next pass can focus on the
-agent loop rather than tool execution.
+Those follow-up passes moved the agent-turn / stream controller layer
+and the display/runtime row-builder layer out of `chat.py` while
+preserving the same `SuccessorChat` method surface.

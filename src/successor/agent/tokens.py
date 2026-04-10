@@ -1,39 +1,23 @@
-"""Token counting — llama.cpp /tokenize endpoint with char heuristic fallback.
+"""Token counting with provider-tokenizer support and heuristic fallback.
 
-llama.cpp's HTTP server exposes `POST /tokenize` which returns the
-exact tokens for any text input. This is the gold-standard count for
-budget tracking — much better than the chars/4 heuristic free-code
-uses, because llama.cpp can call the actual model's tokenizer.
+Preferred path: ask the provider for exact text-token counts when it
+offers that capability (llama.cpp does via `/tokenize`).
 
-Probed shape (llama.cpp build b1-ecd99d6, 2026-04-07):
-    POST /tokenize
-    Content-Type: application/json
-    Body: {"content": "hello world"}
-    →
-    {"tokens": [14556, 1814]}
+Fallback path: if the provider cannot count text exactly, or the exact
+path fails repeatedly, use a conservative chars/token heuristic. The
+TokenCounter caches per-string counts in an LRU so the loop can ask
+freely. Across model swaps, the cache should be cleared (`counter.clear()`).
 
-We don't need the actual token IDs — just the count. So we extract
-`len(response["tokens"])`.
-
-The TokenCounter caches per-string counts in an LRU so the loop can
-ask freely. Cache invalidation isn't needed because the same string
-always tokenizes to the same count for a given model. Across model
-swaps, the cache should be cleared (`counter.clear()`).
-
-Fallback path: if /tokenize is unreachable (server down, network
-error, timeout), fall back to a char heuristic. The heuristic is
-calibrated against Qwen3.5's actual tokenization: ~3.5 chars/token
-for English code-mixed content. We use 3.5 conservatively to
-slightly OVERESTIMATE so the budget tracker triggers compaction
-sooner rather than too late.
+The heuristic is calibrated against Qwen3.5's actual tokenization:
+~3.5 chars/token for English code-mixed content. We use 3.5
+conservatively to slightly OVERESTIMATE so the budget tracker
+triggers compaction sooner rather than too late.
 """
 
 from __future__ import annotations
 
-import json
 import math
 import urllib.error
-import urllib.request
 from collections import OrderedDict
 from typing import Protocol
 
@@ -55,20 +39,18 @@ HEURISTIC_CHARS_PER_TOKEN: float = 3.5
 # total memory is well under 1MB.
 DEFAULT_CACHE_SIZE: int = 16_384
 
-# Per-call timeout for the /tokenize endpoint. Should be short — if
-# the server is hanging, fall back to the heuristic.
-TOKENIZE_TIMEOUT_S: float = 2.0
-
-
 # ─── Provider protocol ───
 #
 # We don't depend directly on LlamaCppClient — accept anything that
-# offers a `tokenize_url` attribute. Lets tests substitute a fake.
+# offers a compatible counting hook. Lets tests substitute a fake.
 
 
 class TokenizerEndpoint(Protocol):
-    """Anything with a base_url that exposes /tokenize."""
+    """Optional provider-side tokenizer capability."""
     base_url: str
+
+    def count_text_tokens(self, text: str) -> int | None:
+        ...
 
 
 # ─── The counter ───
@@ -78,8 +60,8 @@ class TokenCounter:
     """Counts tokens for strings, messages, rounds, and full message logs.
 
     Two paths:
-      1. /tokenize endpoint when an endpoint is configured (accurate)
-      2. char heuristic when no endpoint or endpoint unreachable
+      1. provider tokenizer when the provider exposes one (accurate)
+      2. char heuristic when no exact tokenizer or tokenizer failure
 
     Per-string LRU cache so the loop can call this freely without
     re-paying the HTTP round-trip on every iteration.
@@ -98,8 +80,8 @@ class TokenCounter:
         max_endpoint_failures: int = 3,
     ) -> None:
         """
-        endpoint:               an object with `base_url` exposing /tokenize.
-                                Pass None to force heuristic-only counting.
+        endpoint:               provider-side tokenizer capability. Pass
+                                None to force heuristic-only counting.
         cache_size:             LRU cache size for per-string counts.
         max_endpoint_failures:  after this many consecutive HTTP errors,
                                 stop trying the endpoint and fall back
@@ -108,7 +90,7 @@ class TokenCounter:
         self.endpoint = endpoint
         self._cache: OrderedDict[str, int] = OrderedDict()
         self._cache_size = cache_size
-        self._use_endpoint = endpoint is not None
+        self._use_endpoint = self._endpoint_available(endpoint)
         self._endpoint_failures = 0
         self._max_endpoint_failures = max_endpoint_failures
 
@@ -191,38 +173,32 @@ class TokenCounter:
         differ across tokenizers."""
         self._cache.clear()
         self._endpoint_failures = 0
-        self._use_endpoint = self.endpoint is not None
+        self._use_endpoint = self._endpoint_available(self.endpoint)
 
     def cache_size(self) -> int:
         return len(self._cache)
 
+    def counting_method(self) -> str:
+        if self._use_endpoint and self.endpoint is not None:
+            return "provider_tokenizer"
+        return "heuristic"
+
     # ─── Internal counting paths ───
 
     def _count_via_endpoint(self, text: str) -> int | None:
-        """POST to /tokenize and return the count, or None on failure."""
+        """Ask the provider to count the text, or None on failure."""
         if self.endpoint is None:
             return None
-        # llama.cpp's /tokenize lives at the server root, NOT under /v1.
-        # Strip a trailing /v1 if the user configured base_url that way
-        # so we don't end up POSTing to /v1/tokenize (404).
-        root = self.endpoint.base_url.rstrip("/")
-        if root.endswith("/v1"):
-            root = root[:-3]
-        url = root + "/tokenize"
-        body = json.dumps({"content": text}).encode("utf-8")
-        req = urllib.request.Request(
-            url,
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
         try:
-            with urllib.request.urlopen(req, timeout=TOKENIZE_TIMEOUT_S) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-            tokens = payload.get("tokens", [])
+            counted = self.endpoint.count_text_tokens(text)
+            if not isinstance(counted, int) or counted < 0:
+                self._endpoint_failures += 1
+                if self._endpoint_failures >= self._max_endpoint_failures:
+                    self._use_endpoint = False
+                return None
             self._endpoint_failures = 0  # success — reset failure counter
-            return len(tokens)
-        except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
+            return counted
+        except (AttributeError, urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
             # Network error, server down, malformed response — bail to heuristic
             self._endpoint_failures += 1
             if self._endpoint_failures >= self._max_endpoint_failures:
@@ -233,3 +209,12 @@ class TokenCounter:
     def _count_via_heuristic(text: str) -> int:
         """Char-based fallback. Conservative — slightly overestimates."""
         return max(1, math.ceil(len(text) / HEURISTIC_CHARS_PER_TOKEN))
+
+    @staticmethod
+    def _endpoint_available(endpoint: TokenizerEndpoint | None) -> bool:
+        if endpoint is None or not callable(getattr(endpoint, "count_text_tokens", None)):
+            return False
+        advertised = getattr(endpoint, "supports_tokenize_endpoint", None)
+        if advertised is None:
+            return True
+        return bool(advertised)

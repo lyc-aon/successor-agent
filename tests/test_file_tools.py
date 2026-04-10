@@ -550,5 +550,9 @@ def test_file_tool_guard_failure_becomes_continuation_nudge(
     assert len(client.calls) == 2
     second_sys = client.calls[1]["messages"][0]
     assert second_sys["role"] == "system"
-    assert "File Tool Recovery Reminder" in second_sys["content"]
-    assert "Do not use `sed`" in second_sys["content"]
+    assert "File Tool Recovery Reminder" not in second_sys["content"]
+    second_tail = client.calls[1]["messages"][-1]
+    assert second_tail["role"] == "user"
+    assert "[internal harness runtime context]" in second_tail["content"]
+    assert "File Tool Recovery Reminder" in second_tail["content"]
+    assert "Do not use `sed`" in second_tail["content"]

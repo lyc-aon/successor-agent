@@ -11,6 +11,102 @@ unit on top of phase 0.
 
 ---
 
+## v0.1.33, cache-friendly llama.cpp agent-loop release (2026-04-10)
+
+This release turns Successor's local-model loop into something that is
+KV-cache-friendly by design instead of by luck.
+
+The core change is architectural: the request builder now keeps the
+cache-critical system prefix stable across ordinary turns, moves
+volatile ledger/reminder state to a tail context message, and makes the
+llama.cpp cache/slot path explicit instead of relying on server
+defaults. The budget UI, fill bar, and autocompact gate also now read
+from the same canonical outbound request envelope, so context reporting
+tracks what the harness actually sends.
+
+### What landed
+
+- `src/successor/chat_agent_loop.py`
+  - splits prompt assembly into a stable system bundle and volatile
+    tail-only runtime sections
+  - caches the stable rendered prompt on the chat instance
+  - records stable/volatile hashes and cache metadata in trace events
+  - keeps one-turn reminders, ledger/runtime nudges, and other
+    per-turn state out of the cache-critical front of the prompt
+- `src/successor/context_usage.py`
+  - new canonical request-envelope layer used for both prompt assembly
+    accounting and runtime budget reporting
+  - tracks stable-system hash, volatile-tail hash, cache-break reasons,
+    slot id, and prompt-cache preference per turn
+- `src/successor/providers/llama.py`
+  - explicitly sends `cache_prompt=true`
+  - supports preferred `id_slot` when llama.cpp exposes slot support
+  - adds exact `/tokenize` support for llama-backed token accounting
+- `src/successor/chat.py`
+  - applies provider cache preferences on live client/profile changes
+  - reserves a foreground slot for the parent chat when slot-aware
+    background scheduling is available
+  - aligns post-compact cache-warmer behavior with the deferred-turn
+    resume path
+- `src/successor/subagents/manager.py`
+  - routes child chats onto non-foreground slots when available
+  - claims and releases child slot affinity explicitly
+- `src/successor/tasks.py`
+  - splits stable task primer guidance from volatile execution state
+- `src/successor/verification_contract.py`
+  - splits stable verification primer guidance from volatile runtime
+    verification state
+- `src/successor/runbook.py`
+  - splits stable experiment/runbook primer guidance from volatile
+    attempt/runtime state
+- `src/successor/providers/openai_compat.py`
+  - preserves tool-call fields and `tools=` handling so the generic
+    OpenAI-compatible path stays coherent with the new request envelope
+- docs
+  - adds:
+    - `docs/chat-agent-loop-refactor-plan.md`
+    - `docs/chat-display-runtime-refactor-plan.md`
+  - updates:
+    - `docs/chat-runtime-refactor-plan.md`
+    - `README.md`
+    - `CHANGELOG.md`
+
+### Release verification
+
+- lint:
+  - `ruff check src tests`
+- full suite:
+  - `PYTHONPATH=src pytest -q`
+  - `1256 passed in 25.00s`
+- live supervised E2E:
+  - workspace:
+    - `/home/lycaon/Desktop/successor-kv-cache-e2e-20260410`
+  - trace:
+    - `/home/lycaon/.config/successor/logs/20260410-142431-p898945.jsonl`
+  - app:
+    - `/home/lycaon/Desktop/successor-kv-cache-e2e-20260410/command-cascade.html`
+  - screenshots:
+    - `/tmp/command-cascade-initial.png`
+    - `/tmp/command-cascade-autoplay.png`
+  - observed cache behavior:
+    - stable system hash remained `e13605d528a0`
+    - volatile tail hash changed independently across turns
+    - llama requests carried `cache_prompt=true`
+    - foreground chat stayed on slot `0`
+  - observed runtime behavior:
+    - the model adopted `task` and `verify`
+    - the model authored the app with native file tools
+    - the model found and fixed a real runtime logger bug on its own
+    - independent Playwright verification passed for:
+      - start screen load
+      - start-game transition
+      - correct-command scoring
+      - autoplay/debug flow
+  - remaining limitation surfaced by the run:
+    - browser `type` still failed on a custom input control and the
+      supervised loop spent too long retrying selector variants instead
+      of pivoting immediately to a deterministic fallback
+
 ## v0.1.32, llama.cpp continuation-prefill hotfix (2026-04-10)
 
 This hotfix fixes a concrete local-model failure in the agent loop:

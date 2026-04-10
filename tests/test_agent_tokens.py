@@ -121,6 +121,9 @@ class _MockEndpoint:
     def __init__(self, base_url: str = "http://mock") -> None:
         self.base_url = base_url
 
+    def count_text_tokens(self, text: str) -> int | None:  # noqa: ARG002
+        return None
+
 
 def test_count_falls_back_to_heuristic_when_endpoint_unreachable(monkeypatch) -> None:
     """Endpoint with bad URL should hit network error → fall back to heuristic

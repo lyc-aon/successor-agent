@@ -209,15 +209,16 @@ def test_in_progress_verification_triggers_single_continuation_nudge(
     assert chat._agent_turn == 0
     third_sys = client.calls[2]["messages"][0]
     assert third_sys["role"] == "system"
-    assert "Browser Verification Reminder" in third_sys["content"]
-    assert "Score increments after a correct answer" in third_sys["content"]
+    assert "Browser Verification Reminder" not in third_sys["content"]
     third_tail = client.calls[2]["messages"][-1]
     assert third_tail["role"] == "user"
-    assert "[internal harness continuation]" in third_tail["content"]
+    assert "[internal harness runtime context]" in third_tail["content"]
+    assert "Browser Verification Reminder" in third_tail["content"]
+    assert "Score increments after a correct answer" in third_tail["content"]
 
     events = _trace_events(temp_config_dir)
     assert any(event["type"] == "verification_continue_nudge" for event in events)
-    assert any(event["type"] == "assistant_prefill_guard_applied" for event in events)
+    assert not any(event["type"] == "assistant_prefill_guard_applied" for event in events)
 
 
 def test_stateful_runtime_async_continuation_gets_verification_setup_nudge(
@@ -273,9 +274,13 @@ def test_stateful_runtime_async_continuation_gets_verification_setup_nudge(
     assert client.call_count == 2
     second_sys = client.calls[1]["messages"][0]
     assert second_sys["role"] == "system"
-    assert "Verification Setup Reminder" in second_sys["content"]
-    assert "deterministic driver, autoplay harness, or player script" in second_sys["content"]
-    assert "debug surface, HUD, or state log" in second_sys["content"]
+    assert "Verification Setup Reminder" not in second_sys["content"]
+    second_tail = client.calls[1]["messages"][-1]
+    assert second_tail["role"] == "user"
+    assert "[internal harness runtime context]" in second_tail["content"]
+    assert "Verification Setup Reminder" in second_tail["content"]
+    assert "deterministic driver, autoplay harness, or player script" in second_tail["content"]
+    assert "debug surface, HUD, or state log" in second_tail["content"]
 
     events = _trace_events(temp_config_dir)
     assert any(event["type"] == "verification_adoption_nudge" for event in events)

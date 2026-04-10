@@ -8,11 +8,18 @@ core agent loop behavior and the API-history assembly helpers it uses.
 
 from __future__ import annotations
 
+import hashlib
 import json
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from .agent.bash_stream import BashStreamDetector
 from .bash import ToolCard, resolve_bash_config
+from .context_usage import (
+    PromptSection,
+    TurnRequestEnvelope,
+    join_prompt_sections,
+)
 from .file_tools import note_non_read_tool_call
 from .profiles import DEFAULT_MAX_AGENT_TURNS, PROFILE_REGISTRY, get_profile
 from .providers.llama import (
@@ -24,6 +31,7 @@ from .providers.llama import (
 )
 from .render.theme import all_themes, get_theme
 from .runbook import (
+    build_runbook_execution_primer,
     build_runbook_execution_guidance,
     build_runbook_prompt_section,
 )
@@ -36,6 +44,7 @@ from .subagents.cards import SubagentToolCard
 from .task_adoption import maybe_build_task_adoption_nudge
 from .tasks import (
     build_task_continue_nudge,
+    build_task_execution_primer,
     build_task_execution_guidance,
     build_task_prompt_section,
 )
@@ -45,6 +54,7 @@ from .tools_registry import (
 )
 from .verification_contract import (
     build_verification_continue_nudge,
+    build_verification_execution_primer,
     build_verification_execution_guidance,
     build_verification_prompt_section,
 )
@@ -58,6 +68,32 @@ _INTERNAL_CONTINUATION_PREFILL = (
     "Continue from the current conversation state and follow the latest "
     "system reminders. This is not a new user request."
 )
+_INTERNAL_RUNTIME_CONTEXT_PREFIX = (
+    "[internal harness runtime context]\n"
+    "This is harness-supplied working context for the current turn, not "
+    "a new user request."
+)
+_STABLE_SECTION_REASON_LABELS = {
+    "base": "system prompt",
+    "working_directory": "working directory guidance",
+    "repo_verification": "repository verification guidance",
+    "execution_discipline": "execution discipline",
+    "task_primer": "task-ledger primer",
+    "verification_primer": "verification primer",
+    "runbook_primer": "runbook primer",
+    "parallel_tool_calls": "parallel tool-call guidance",
+    "tool_guidance": "tool guidance",
+    "skill_hints": "skill hints",
+    "skill_discovery": "skill discovery",
+}
+
+
+@dataclass(slots=True)
+class _PreparedTurnRequest:
+    envelope: TurnRequestEnvelope
+    task_adoption_decision: Any
+    stable_prompt_key: tuple[tuple[str, str], ...]
+    stable_prompt_cache_hit: bool
 
 
 def _message_has_tool_artifact(msg: Any) -> bool:
@@ -139,6 +175,49 @@ def _find_last_user_excerpt(api_messages: list[dict[str, Any]]) -> str:
         if isinstance(content, str) and content.strip():
             return _trace_clip_text(content, limit=320)
     return ""
+
+
+def _hash_fragments(*parts: str) -> str:
+    digest = hashlib.sha1()
+    for part in parts:
+        if not part:
+            continue
+        digest.update(part.encode("utf-8", errors="replace"))
+        digest.update(b"\x1f")
+    return digest.hexdigest()[:12]
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _format_runtime_tail_context(sections: list[PromptSection]) -> str:
+    body = join_prompt_sections(sections)
+    if not body:
+        return ""
+    return f"{_INTERNAL_RUNTIME_CONTEXT_PREFIX}\n\n{body}"
+
+
+def _append_runtime_tail_context(
+    api_messages: list[dict[str, Any]],
+    context_text: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    if not context_text.strip():
+        return api_messages, False
+    merged = list(api_messages)
+    if (
+        merged
+        and merged[-1].get("role") == "user"
+        and "tool_calls" not in merged[-1]
+    ):
+        existing = str(merged[-1].get("content") or "")
+        merged[-1]["content"] = (
+            existing.rstrip() + "\n\n" + context_text
+            if existing.strip() else context_text
+        )
+        return merged, True
+    merged.append({"role": "user", "content": context_text})
+    return merged, True
 
 
 def _append_internal_continuation_prefill(
@@ -676,6 +755,518 @@ class ChatAgentLoop:
         self._host._autocompact_attempted_this_turn = False
         self._host._begin_agent_turn()
 
+    def build_turn_request_envelope_preview(
+        self,
+        *,
+        turn_number: int | None = None,
+    ) -> TurnRequestEnvelope:
+        preview_turn = turn_number if turn_number is not None else max(1, self._host._agent_turn + 1)
+        prepared = self._prepare_turn_request(
+            turn_number=preview_turn,
+            consume_one_shot_nudges=False,
+        )
+        return prepared.envelope
+
+    def _stable_prompt_cache_break_reasons(
+        self,
+        previous_key: tuple[tuple[str, str], ...] | None,
+        current_key: tuple[tuple[str, str], ...],
+    ) -> tuple[str, ...]:
+        if previous_key is None or previous_key == current_key:
+            return ()
+        previous = dict(previous_key)
+        current = dict(current_key)
+        changed: list[str] = []
+        for key in sorted(set(previous) | set(current)):
+            if previous.get(key) == current.get(key):
+                continue
+            changed.append(
+                _STABLE_SECTION_REASON_LABELS.get(
+                    key,
+                    key.replace("_", " "),
+                )
+            )
+        return tuple(changed)
+
+    def _stable_system_prompt_bundle(
+        self,
+        *,
+        enabled_tools: list[str],
+        enabled_skills: list[Any],
+    ) -> tuple[tuple[tuple[str, str], ...], tuple[PromptSection, ...], str, bool]:
+        sections: list[PromptSection] = [
+            PromptSection(
+                key="base",
+                label="Base Prompt",
+                content=self._host.system_prompt,
+            )
+        ]
+        capabilities = self._host._detect_client_runtime_capabilities()
+        effective_cwd = ""
+        repo_verification_guidance = ""
+        if enabled_tools and (
+            "bash" in enabled_tools
+            or any(name in {"read_file", "write_file", "edit_file"} for name in enabled_tools)
+        ):
+            effective_cwd = self._host._tool_working_directory()
+            sections.append(
+                PromptSection(
+                    key="working_directory",
+                    label="Working Directory",
+                    content=(
+                        "## Working directory\n\n"
+                        f"Native file tools and bash both resolve relative paths "
+                        f"from `cwd={effective_cwd}`. If the user asks for a file "
+                        f"in a specific location (like `~/Desktop/foo.html`), use "
+                        f"the absolute path — do not assume your cwd is what the "
+                        f"user had in mind.\n\n"
+                        f"## Working with tool results\n\n"
+                        f"Before making each tool call, scan the conversation "
+                        f"history above and check what you have ALREADY done. "
+                        f"A tool result with no stdout means the command "
+                        f"succeeded — that is normal for writes, redirects, "
+                        f"`mkdir`, `touch`, `chmod`, and most mutating "
+                        f"commands. NEVER re-issue a tool call that already "
+                        f"appears earlier in the conversation; instead, take "
+                        f"the next step toward the user's goal, or respond "
+                        f"with plain text if you are done. Plain text "
+                        f"(no tool call) is how you finish the task and "
+                        f"return control to the user."
+                    ),
+                )
+            )
+            repo_verification_guidance = build_repo_verification_guidance(
+                effective_cwd,
+            )
+            if repo_verification_guidance:
+                sections.append(
+                    PromptSection(
+                        key="repo_verification",
+                        label="Repository Verification",
+                        content=repo_verification_guidance,
+                    )
+                )
+        if enabled_tools:
+            sections.append(
+                PromptSection(
+                    key="execution_discipline",
+                    label="Execution Discipline",
+                    content=(
+                        "## Execution discipline\n\n"
+                        "Use tools whenever they materially improve correctness, "
+                        "completeness, grounding, or verification. Do not stop "
+                        "early when another tool call would materially improve the "
+                        "result. If you say you will inspect, edit, run, verify, or "
+                        "check something, make the corresponding tool call in the "
+                        "SAME response instead of promising future action. If a tool "
+                        "returns partial, empty, or unhelpful results, change "
+                        "strategy instead of blindly repeating the same call. Keep "
+                        "working until the task is complete AND verified, then end "
+                        "with plain text. Before reporting completion, verify that "
+                        "the changed behavior actually works, and report failing "
+                        "checks faithfully instead of implying success."
+                    ),
+                )
+            )
+            if "task" in enabled_tools:
+                sections.append(
+                    PromptSection(
+                        key="task_primer",
+                        label="Task Primer",
+                        content=build_task_execution_primer(),
+                    )
+                )
+            if "verify" in enabled_tools:
+                sections.append(
+                    PromptSection(
+                        key="verification_primer",
+                        label="Verification Primer",
+                        content=build_verification_execution_primer(
+                            subagent_available="subagent" in enabled_tools,
+                            stateful_runtime=False,
+                        ),
+                    )
+                )
+            if "runbook" in enabled_tools:
+                sections.append(
+                    PromptSection(
+                        key="runbook_primer",
+                        label="Runbook Primer",
+                        content=build_runbook_execution_primer(),
+                    )
+                )
+            if bool(getattr(capabilities, "supports_parallel_tool_calls", False)):
+                sections.append(
+                    PromptSection(
+                        key="parallel_tool_calls",
+                        label="Parallel Tool Calls",
+                        content=(
+                            "## Parallel tool calls\n\n"
+                            "When multiple tool calls are independent and the "
+                            "result of one does not determine the arguments of "
+                            "another, emit them in the SAME assistant turn instead "
+                            "of serializing them one-by-one. This is especially "
+                            "useful for parallel read-only inspection such as "
+                            "multiple `read_file` calls, read-only `bash` checks, "
+                            "or separate `holonet` lookups. Keep dependent steps, "
+                            "writes, browser interaction sequences, and any "
+                            "read-after-write verification serialized."
+                        ),
+                    )
+                )
+        tool_guidance = build_model_tool_guidance(enabled_tools)
+        if tool_guidance:
+            sections.append(
+                PromptSection(
+                    key="tool_guidance",
+                    label="Tool Guidance",
+                    content=tool_guidance,
+                )
+            )
+        skill_hints = build_skill_hint_section(enabled_skills)
+        if skill_hints:
+            sections.append(
+                PromptSection(
+                    key="skill_hints",
+                    label="Skill Hints",
+                    content=skill_hints,
+                )
+            )
+        skill_discovery = build_skill_discovery_section(
+            enabled_skills,
+            context_window_tokens=self._host._resolve_context_window(),
+        )
+        if skill_discovery:
+            sections.append(
+                PromptSection(
+                    key="skill_discovery",
+                    label="Skill Discovery",
+                    content=skill_discovery,
+                )
+            )
+
+        key = tuple((section.key, section.content) for section in sections)
+        cached_hit = (
+            self._host._stable_prompt_cache_key == key
+            and bool(self._host._stable_prompt_cache_sections)
+            and self._host._stable_prompt_cache_prompt
+        )
+        if cached_hit:
+            return (
+                key,
+                self._host._stable_prompt_cache_sections,
+                self._host._stable_prompt_cache_prompt,
+                True,
+            )
+        prompt = join_prompt_sections(sections)
+        frozen_sections = tuple(sections)
+        self._host._stable_prompt_cache_key = key
+        self._host._stable_prompt_cache_sections = frozen_sections
+        self._host._stable_prompt_cache_prompt = prompt
+        return key, frozen_sections, prompt, False
+
+    def _volatile_turn_sections(
+        self,
+        *,
+        enabled_tools: list[str],
+        enabled_skills: list[Any],
+        latest_user_text: str,
+        active_task_text: str,
+        task_adoption_decision: Any,
+        adoption_decision: Any,
+        consume_one_shot_nudges: bool,
+    ) -> list[PromptSection]:
+        sections: list[PromptSection] = []
+        stateful_runtime = adoption_decision.stateful_runtime
+
+        if "task" in enabled_tools and self._host._task_ledger.items:
+            sections.append(
+                PromptSection(
+                    key="task_runtime",
+                    label="Task Runtime Context",
+                    content=build_task_execution_guidance(self._host._task_ledger),
+                    cache_break=True,
+                    reason="task ledger state changes as work progresses",
+                )
+            )
+            sections.append(
+                PromptSection(
+                    key="task_ledger",
+                    label="Task Ledger",
+                    content=build_task_prompt_section(self._host._task_ledger),
+                    cache_break=True,
+                    reason="task ledger state changes as work progresses",
+                )
+            )
+
+        if "verify" in enabled_tools and (
+            self._host._verification_ledger.items or stateful_runtime
+        ):
+            sections.append(
+                PromptSection(
+                    key="verification_runtime",
+                    label="Verification Runtime Context",
+                    content=build_verification_execution_guidance(
+                        self._host._verification_ledger,
+                        subagent_available="subagent" in enabled_tools,
+                        stateful_runtime=stateful_runtime,
+                    ),
+                    cache_break=True,
+                    reason="verification state and runtime evidence needs evolve per turn",
+                )
+            )
+            if self._host._verification_ledger.items:
+                sections.append(
+                    PromptSection(
+                        key="verification_ledger",
+                        label="Verification Ledger",
+                        content=build_verification_prompt_section(
+                            self._host._verification_ledger
+                        ),
+                        cache_break=True,
+                        reason="verification state and runtime evidence needs evolve per turn",
+                    )
+                )
+
+        if "runbook" in enabled_tools and self._host._runbook.state is not None:
+            sections.append(
+                PromptSection(
+                    key="runbook_runtime",
+                    label="Runbook Runtime Context",
+                    content=build_runbook_execution_guidance(self._host._runbook),
+                    cache_break=True,
+                    reason="runbook baseline and hypothesis state evolve per turn",
+                )
+            )
+            sections.append(
+                PromptSection(
+                    key="runbook",
+                    label="Runbook",
+                    content=build_runbook_prompt_section(self._host._runbook),
+                    cache_break=True,
+                    reason="runbook baseline and hypothesis state evolve per turn",
+                )
+            )
+
+        if self._host._browser_verification_active and "browser" in enabled_tools:
+            browser_verification_guidance = build_browser_verification_guidance(
+                latest_user_text=latest_user_text,
+                active_task_text=active_task_text,
+                vision_available="vision" in enabled_tools,
+                browser_verifier_available=(
+                    "skill" in enabled_tools
+                    and any(skill.name == "browser-verifier" for skill in enabled_skills)
+                ),
+                browser_verifier_loaded=self._host._skill_already_loaded("browser-verifier"),
+            )
+            if browser_verification_guidance:
+                sections.append(
+                    PromptSection(
+                        key="browser_runtime",
+                        label="Browser Runtime Context",
+                        content=browser_verification_guidance,
+                        cache_break=True,
+                        reason="browser-verification mode follows the current task state",
+                    )
+                )
+
+        if task_adoption_decision.should_nudge and any(
+            name in enabled_tools for name in ("task", "runbook", "verify")
+        ):
+            sections.append(
+                PromptSection(
+                    key="planning_reminder",
+                    label="Planning Reminder",
+                    content=(
+                        "## Planning Reminder\n\n"
+                        f"{task_adoption_decision.text}"
+                    ),
+                    cache_break=True,
+                    reason="planning nudges are turn-local adoption hints",
+                )
+            )
+
+        task_continue_nudge = self._host._task_continue_nudge
+        if task_continue_nudge:
+            sections.append(
+                PromptSection(
+                    key="continuation_reminder",
+                    label="Continuation Reminder",
+                    content=(
+                        "## Continuation Reminder\n\n"
+                        f"{task_continue_nudge}"
+                    ),
+                    cache_break=True,
+                    reason="continuation nudges are one-shot turn reminders",
+                )
+            )
+            if consume_one_shot_nudges:
+                self._host._task_continue_nudge = None
+        verification_continue_nudge = self._host._verification_continue_nudge
+        if verification_continue_nudge:
+            sections.append(
+                PromptSection(
+                    key="browser_verification_reminder",
+                    label="Browser Verification Reminder",
+                    content=(
+                        "## Browser Verification Reminder\n\n"
+                        f"{verification_continue_nudge}"
+                    ),
+                    cache_break=True,
+                    reason="verification nudges are one-shot turn reminders",
+                )
+            )
+            if consume_one_shot_nudges:
+                self._host._verification_continue_nudge = None
+        verification_adoption_nudge = self._host._verification_adoption_nudge
+        if verification_adoption_nudge:
+            sections.append(
+                PromptSection(
+                    key="verification_setup_reminder",
+                    label="Verification Setup Reminder",
+                    content=(
+                        "## Verification Setup Reminder\n\n"
+                        f"{verification_adoption_nudge}"
+                    ),
+                    cache_break=True,
+                    reason="verification adoption nudges are one-shot turn reminders",
+                )
+            )
+            if consume_one_shot_nudges:
+                self._host._verification_adoption_nudge = None
+        file_tool_continue_nudge = self._host._file_tool_continue_nudge
+        if file_tool_continue_nudge:
+            sections.append(
+                PromptSection(
+                    key="file_tool_recovery_reminder",
+                    label="File Tool Recovery Reminder",
+                    content=(
+                        "## File Tool Recovery Reminder\n\n"
+                        f"{file_tool_continue_nudge}"
+                    ),
+                    cache_break=True,
+                    reason="file-tool recovery nudges are one-shot turn reminders",
+                )
+            )
+            if consume_one_shot_nudges:
+                self._host._file_tool_continue_nudge = None
+        subagent_continue_nudge = self._host._subagent_continue_nudge
+        if subagent_continue_nudge:
+            sections.append(
+                PromptSection(
+                    key="background_task_reminder",
+                    label="Background Task Reminder",
+                    content=(
+                        "## Background Task Reminder\n\n"
+                        f"{subagent_continue_nudge}"
+                    ),
+                    cache_break=True,
+                    reason="subagent reminders are one-shot turn reminders",
+                )
+            )
+            if consume_one_shot_nudges:
+                self._host._subagent_continue_nudge = None
+        return sections
+
+    def _prepare_turn_request(
+        self,
+        *,
+        turn_number: int,
+        consume_one_shot_nudges: bool,
+    ) -> _PreparedTurnRequest:
+        enabled_tools = self._host._enabled_tools_for_turn()
+        enabled_skills = self._host._enabled_skills_for_turn(enabled_tools)
+        latest_user_text = self._host._latest_real_user_text()
+        active_task_text = self._host._browser_verification_context_text()
+        task_adoption_decision = maybe_build_task_adoption_nudge(
+            latest_user_text=latest_user_text,
+            active_task_text=active_task_text,
+            ledger=self._host._task_ledger,
+            runbook=self._host._runbook,
+            messages=self._host.messages,
+        )
+        adoption_decision = maybe_build_verification_adoption_nudge(
+            latest_user_text=latest_user_text,
+            active_task_text=active_task_text,
+            ledger=self._host._verification_ledger,
+            messages=self._host.messages,
+        )
+        stable_prompt_key, stable_sections, system_prompt, stable_prompt_cache_hit = (
+            self._stable_system_prompt_bundle(
+                enabled_tools=enabled_tools,
+                enabled_skills=enabled_skills,
+            )
+        )
+        volatile_sections = self._volatile_turn_sections(
+            enabled_tools=enabled_tools,
+            enabled_skills=enabled_skills,
+            latest_user_text=latest_user_text,
+            active_task_text=active_task_text,
+            task_adoption_decision=task_adoption_decision,
+            adoption_decision=adoption_decision,
+            consume_one_shot_nudges=consume_one_shot_nudges,
+        )
+
+        api_messages_list = self._host._build_api_messages_native(system_prompt)
+        request_messages_list = api_messages_list
+        volatile_context_text = _format_runtime_tail_context(volatile_sections)
+        volatile_tail_applied = False
+        if volatile_context_text:
+            request_messages_list, volatile_tail_applied = _append_runtime_tail_context(
+                request_messages_list,
+                volatile_context_text,
+            )
+        continuation_prefill_applied = False
+        if turn_number > 1 and not volatile_tail_applied:
+            request_messages_list, continuation_prefill_applied = (
+                _append_internal_continuation_prefill(api_messages_list)
+            )
+        tool_schemas = tuple(build_native_tool_schemas(enabled_tools))
+        stable_system_hash = _hash_fragments(
+            system_prompt,
+            _canonical_json(tool_schemas),
+        )
+        volatile_tail_hash = _hash_fragments(volatile_context_text) if volatile_context_text else ""
+        cache_break_reasons = ()
+        if consume_one_shot_nudges:
+            cache_break_reasons = self._stable_prompt_cache_break_reasons(
+                self._host._last_sent_stable_prompt_key,
+                stable_prompt_key,
+            )
+        request_slot_id = getattr(self._host.client, "preferred_slot_id", None)
+        if not isinstance(request_slot_id, int):
+            request_slot_id = None
+        request_cache_prompt = getattr(self._host.client, "use_prompt_cache", None)
+        if not isinstance(request_cache_prompt, bool):
+            request_cache_prompt = None
+        envelope = TurnRequestEnvelope(
+            turn=turn_number,
+            system_sections=stable_sections,
+            system_prompt=system_prompt,
+            api_messages=tuple(api_messages_list),
+            request_messages=tuple(request_messages_list),
+            tool_schemas=tool_schemas,
+            enabled_tools=tuple(enabled_tools),
+            enabled_skills=tuple(skill.name for skill in enabled_skills),
+            volatile_sections=tuple(volatile_sections),
+            continuation_prefill_applied=continuation_prefill_applied,
+            volatile_tail_applied=volatile_tail_applied,
+            browser_verification_active=self._host._browser_verification_active,
+            browser_verification_reason=self._host._browser_verification_reason,
+            last_user_excerpt=_find_last_user_excerpt(api_messages_list),
+            stable_system_hash=stable_system_hash,
+            volatile_tail_hash=volatile_tail_hash,
+            cache_break_reasons=cache_break_reasons,
+            request_slot_id=request_slot_id,
+            request_cache_prompt=request_cache_prompt,
+        )
+        return _PreparedTurnRequest(
+            envelope=envelope,
+            task_adoption_decision=task_adoption_decision,
+            stable_prompt_key=stable_prompt_key,
+            stable_prompt_cache_hit=stable_prompt_cache_hit,
+        )
+
     def begin_agent_turn(self) -> None:
         """Open a new stream for the next turn of the agent loop."""
         if self._host._check_and_maybe_defer_for_autocompact():
@@ -705,247 +1296,64 @@ class ChatAgentLoop:
             return
 
         self._host._refresh_browser_verification_mode()
-
-        enabled_tools = self._host._enabled_tools_for_turn()
-        enabled_skills = self._host._enabled_skills_for_turn(enabled_tools)
-        latest_user_text = self._host._latest_real_user_text()
-        active_task_text = self._host._browser_verification_context_text()
-        task_adoption_decision = maybe_build_task_adoption_nudge(
-            latest_user_text=latest_user_text,
-            active_task_text=active_task_text,
-            ledger=self._host._task_ledger,
-            runbook=self._host._runbook,
-            messages=self._host.messages,
+        prepared = self._prepare_turn_request(
+            turn_number=self._host._agent_turn,
+            consume_one_shot_nudges=True,
         )
-        adoption_decision = maybe_build_verification_adoption_nudge(
-            latest_user_text=latest_user_text,
-            active_task_text=active_task_text,
-            ledger=self._host._verification_ledger,
-            messages=self._host.messages,
-        )
-        stateful_runtime = adoption_decision.stateful_runtime
+        envelope = prepared.envelope
 
-        sys_prompt = self._host.system_prompt
-        task_execution_guidance = ""
-        task_section = ""
-        verification_execution_guidance = ""
-        verification_section = ""
-        runbook_execution_guidance = ""
-        runbook_section = ""
-        browser_verification_guidance = ""
-        if "task" in enabled_tools:
-            task_execution_guidance = build_task_execution_guidance(self._host._task_ledger)
-            task_section = build_task_prompt_section(self._host._task_ledger)
-        if "verify" in enabled_tools:
-            verification_execution_guidance = build_verification_execution_guidance(
-                self._host._verification_ledger,
-                subagent_available="subagent" in enabled_tools,
-                stateful_runtime=stateful_runtime,
-            )
-            verification_section = build_verification_prompt_section(
-                self._host._verification_ledger
-            )
-        if "runbook" in enabled_tools:
-            runbook_execution_guidance = build_runbook_execution_guidance(
-                self._host._runbook
-            )
-            runbook_section = build_runbook_prompt_section(self._host._runbook)
-        if self._host._browser_verification_active and "browser" in enabled_tools:
-            browser_verification_guidance = build_browser_verification_guidance(
-                latest_user_text=latest_user_text,
-                active_task_text=active_task_text,
-                vision_available="vision" in enabled_tools,
-                browser_verifier_available=(
-                    "skill" in enabled_tools
-                    and any(skill.name == "browser-verifier" for skill in enabled_skills)
-                ),
-                browser_verifier_loaded=self._host._skill_already_loaded("browser-verifier"),
-            )
-        if enabled_tools and (
-            "bash" in enabled_tools
-            or any(name in {"read_file", "write_file", "edit_file"} for name in enabled_tools)
+        if prepared.task_adoption_decision.should_nudge and any(
+            name in envelope.enabled_tools
+            for name in ("task", "runbook", "verify")
         ):
-            effective_cwd = self._host._tool_working_directory()
-            sys_prompt = (
-                f"{sys_prompt}\n\n"
-                f"## Working directory\n\n"
-                f"Native file tools and bash both resolve relative paths "
-                f"from `cwd={effective_cwd}`. If the user asks for a file "
-                f"in a specific location (like `~/Desktop/foo.html`), use "
-                f"the absolute path — do not assume your cwd is what the "
-                f"user had in mind.\n\n"
-                f"## Working with tool results\n\n"
-                f"Before making each tool call, scan the conversation "
-                f"history above and check what you have ALREADY done. "
-                f"A tool result with no stdout means the command "
-                f"succeeded — that is normal for writes, redirects, "
-                f"`mkdir`, `touch`, `chmod`, and most mutating "
-                f"commands. NEVER re-issue a tool call that already "
-                f"appears earlier in the conversation; instead, take "
-                f"the next step toward the user's goal, or respond "
-                f"with plain text if you are done. Plain text "
-                f"(no tool call) is how you finish the task and "
-                f"return control to the user."
-            )
-            repo_verification_guidance = build_repo_verification_guidance(
-                effective_cwd,
-            )
-            if repo_verification_guidance:
-                sys_prompt = f"{sys_prompt}\n\n{repo_verification_guidance}"
-        if enabled_tools:
-            execution_parts = [
-                "Use tools whenever they materially improve correctness, "
-                "completeness, grounding, or verification. Do not stop "
-                "early when another tool call would materially improve the "
-                "result. If you say you will inspect, edit, run, verify, or "
-                "check something, make the corresponding tool call in the "
-                "SAME response instead of promising future action. If a tool "
-                "returns partial, empty, or unhelpful results, change "
-                "strategy instead of blindly repeating the same call. Keep "
-                "working until the task is complete AND verified, then end "
-                "with plain text. Before reporting completion, verify that "
-                "the changed behavior actually works, and report failing "
-                "checks faithfully instead of implying success.",
-            ]
-            if task_execution_guidance:
-                execution_parts.append(task_execution_guidance)
-            if verification_execution_guidance:
-                execution_parts.append(verification_execution_guidance)
-            if runbook_execution_guidance:
-                execution_parts.append(runbook_execution_guidance)
-            if browser_verification_guidance:
-                execution_parts.append(browser_verification_guidance)
-            sys_prompt = (
-                f"{sys_prompt}\n\n"
-                f"## Execution discipline\n\n"
-                f"{execution_parts[0]}"
-            )
-            if len(execution_parts) > 1:
-                sys_prompt = f"{sys_prompt}\n\n" + "\n\n".join(execution_parts[1:])
-            if task_section:
-                sys_prompt = f"{sys_prompt}\n\n{task_section}"
-            if verification_section:
-                sys_prompt = f"{sys_prompt}\n\n{verification_section}"
-            if runbook_section:
-                sys_prompt = f"{sys_prompt}\n\n{runbook_section}"
-            if task_adoption_decision.should_nudge and any(
-                name in enabled_tools
-                for name in ("task", "runbook", "verify")
-            ):
-                if task_adoption_decision.kind != self._host._task_adoption_last_kind:
-                    self._host._trace_event(
-                        "task_adoption_nudge",
-                        turn=self._host._agent_turn,
-                        kind=task_adoption_decision.kind,
-                        long_horizon=task_adoption_decision.long_horizon,
-                        stateful_runtime=task_adoption_decision.stateful_runtime,
-                        recommend_runbook=task_adoption_decision.recommend_runbook,
-                        browser_actions=task_adoption_decision.activity.browser_actions,
-                        mutation_actions=task_adoption_decision.activity.mutation_actions,
-                        verify_updates=task_adoption_decision.activity.verify_updates,
-                    )
-                    self._host._task_adoption_last_kind = task_adoption_decision.kind
-                sys_prompt = (
-                    f"{sys_prompt}\n\n"
-                    f"## Planning Reminder\n\n"
-                    f"{task_adoption_decision.text}"
+            if prepared.task_adoption_decision.kind != self._host._task_adoption_last_kind:
+                self._host._trace_event(
+                    "task_adoption_nudge",
+                    turn=self._host._agent_turn,
+                    kind=prepared.task_adoption_decision.kind,
+                    long_horizon=prepared.task_adoption_decision.long_horizon,
+                    stateful_runtime=prepared.task_adoption_decision.stateful_runtime,
+                    recommend_runbook=prepared.task_adoption_decision.recommend_runbook,
+                    browser_actions=prepared.task_adoption_decision.activity.browser_actions,
+                    mutation_actions=prepared.task_adoption_decision.activity.mutation_actions,
+                    verify_updates=prepared.task_adoption_decision.activity.verify_updates,
                 )
-            capabilities = self._host._detect_client_runtime_capabilities()
-            if bool(getattr(capabilities, "supports_parallel_tool_calls", False)):
-                sys_prompt = (
-                    f"{sys_prompt}\n\n"
-                    f"## Parallel tool calls\n\n"
-                    f"When multiple tool calls are independent and the "
-                    f"result of one does not determine the arguments of "
-                    f"another, emit them in the SAME assistant turn instead "
-                    f"of serializing them one-by-one. This is especially "
-                    f"useful for parallel read-only inspection such as "
-                    f"multiple `read_file` calls, read-only `bash` checks, "
-                    f"or separate `holonet` lookups. Keep dependent steps, "
-                    f"writes, browser interaction sequences, and any "
-                    f"read-after-write verification serialized."
-                )
-        tool_guidance = build_model_tool_guidance(enabled_tools)
-        if tool_guidance:
-            sys_prompt = f"{sys_prompt}\n\n{tool_guidance}"
-        skill_hints = build_skill_hint_section(enabled_skills)
-        if skill_hints:
-            sys_prompt = f"{sys_prompt}\n\n{skill_hints}"
-        skill_discovery = build_skill_discovery_section(
-            enabled_skills,
-            context_window_tokens=self._host._resolve_context_window(),
-        )
-        if skill_discovery:
-            sys_prompt = f"{sys_prompt}\n\n{skill_discovery}"
-        if self._host._task_continue_nudge:
-            sys_prompt = (
-                f"{sys_prompt}\n\n"
-                f"## Continuation Reminder\n\n"
-                f"{self._host._task_continue_nudge}"
-            )
-            self._host._task_continue_nudge = None
-        if self._host._verification_continue_nudge:
-            sys_prompt = (
-                f"{sys_prompt}\n\n"
-                f"## Browser Verification Reminder\n\n"
-                f"{self._host._verification_continue_nudge}"
-            )
-            self._host._verification_continue_nudge = None
-        if self._host._verification_adoption_nudge:
-            sys_prompt = (
-                f"{sys_prompt}\n\n"
-                f"## Verification Setup Reminder\n\n"
-                f"{self._host._verification_adoption_nudge}"
-            )
-            self._host._verification_adoption_nudge = None
-        if self._host._file_tool_continue_nudge:
-            sys_prompt = (
-                f"{sys_prompt}\n\n"
-                f"## File Tool Recovery Reminder\n\n"
-                f"{self._host._file_tool_continue_nudge}"
-            )
-            self._host._file_tool_continue_nudge = None
-        if self._host._subagent_continue_nudge:
-            sys_prompt = (
-                f"{sys_prompt}\n\n"
-                f"## Background Task Reminder\n\n"
-                f"{self._host._subagent_continue_nudge}"
-            )
-            self._host._subagent_continue_nudge = None
+                self._host._task_adoption_last_kind = prepared.task_adoption_decision.kind
 
-        api_messages = self._host._build_api_messages_native(sys_prompt)
-        native_tool_schemas = build_native_tool_schemas(enabled_tools)
         self._host._trace_event(
             "agent_turn_begin",
-            turn=self._host._agent_turn,
-            continuation=(self._host._agent_turn > 1),
-            enabled_tools=enabled_tools,
-            enabled_skills=[skill.name for skill in enabled_skills],
-            browser_verification_active=self._host._browser_verification_active,
-            browser_verification_reason=self._host._browser_verification_reason,
-            api_message_count=len(api_messages),
-            last_user_excerpt=_find_last_user_excerpt(api_messages),
+            turn=envelope.turn,
+            continuation=(envelope.turn > 1),
+            enabled_tools=list(envelope.enabled_tools),
+            enabled_skills=list(envelope.enabled_skills),
+            browser_verification_active=envelope.browser_verification_active,
+            browser_verification_reason=envelope.browser_verification_reason,
+            api_message_count=len(envelope.api_messages),
+            request_message_count=len(envelope.request_messages),
+            last_user_excerpt=envelope.last_user_excerpt,
+            stable_system_hash=envelope.stable_system_hash,
+            volatile_tail_hash=envelope.volatile_tail_hash,
+            volatile_tail_applied=envelope.volatile_tail_applied,
+            stable_prompt_cache_hit=prepared.stable_prompt_cache_hit,
+            cache_break_reasons=list(envelope.cache_break_reasons),
+            request_slot_id=envelope.request_slot_id,
+            request_cache_prompt=envelope.request_cache_prompt,
         )
-        request_messages = api_messages
-        if self._host._agent_turn > 1:
-            request_messages, applied = _append_internal_continuation_prefill(
-                api_messages
+        if envelope.continuation_prefill_applied:
+            self._host._trace_event(
+                "assistant_prefill_guard_applied",
+                turn=envelope.turn,
+                prior_last_role="assistant",
             )
-            if applied:
-                self._host._trace_event(
-                    "assistant_prefill_guard_applied",
-                    turn=self._host._agent_turn,
-                    prior_last_role="assistant",
-                )
         try:
-            if native_tool_schemas:
+            if envelope.tool_schemas:
                 self._host._stream = self._host.client.stream_chat(
-                    messages=request_messages,
-                    tools=native_tool_schemas,
+                    messages=list(envelope.request_messages),
+                    tools=list(envelope.tool_schemas),
                 )
             else:
                 self._host._stream = self._host.client.stream_chat(
-                    messages=request_messages
+                    messages=list(envelope.request_messages)
                 )
         except Exception as exc:
             self._host._trace_event(
@@ -954,14 +1362,19 @@ class ChatAgentLoop:
                 error=f"{type(exc).__name__}: {exc}",
             )
             raise
+        self._host._last_sent_stable_prompt_key = prepared.stable_prompt_key
+        self._host._remember_active_request_usage(envelope)
         self._host._trace_event(
             "stream_opened",
-            turn=self._host._agent_turn,
-            tool_schema_names=enabled_tools if native_tool_schemas else [],
+            turn=envelope.turn,
+            tool_schema_names=list(envelope.enabled_tools) if envelope.tool_schemas else [],
+            stable_system_hash=envelope.stable_system_hash,
+            request_slot_id=envelope.request_slot_id,
+            request_cache_prompt=envelope.request_cache_prompt,
         )
         self._host._stream_content = []
         self._host._stream_reasoning_chars = 0
-        if "bash" in enabled_tools:
+        if "bash" in envelope.enabled_tools:
             self._host._stream_bash_detector = BashStreamDetector()
         else:
             self._host._stream_bash_detector = None
@@ -1127,6 +1540,7 @@ class ChatAgentLoop:
                         )
                     )
                 self._host._last_usage = ev.usage
+                self._host._finalize_active_request_usage(ev.usage)
                 self._host._stream = None
                 self._host._stream_content = []
                 self._host._stream_reasoning_chars = 0
@@ -1230,6 +1644,7 @@ class ChatAgentLoop:
                 else:
                     msg = self.format_stream_error(ev.message)
                 self._append(self._message("successor", msg, synthetic=True))
+                self._host._finalize_active_request_usage(None)
                 self._host._stream = None
                 self._host._stream_content = []
                 self._host._stream_reasoning_chars = 0

@@ -86,6 +86,7 @@ class ChatProvider(Protocol):
         temperature: float | None = ...,
         timeout: float | None = ...,
         extra: dict | None = ...,
+        tools: list[dict] | None = ...,
     ) -> ChatStream:
         ...
 

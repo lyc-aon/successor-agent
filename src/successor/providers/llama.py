@@ -480,6 +480,7 @@ class LlamaCppClient:
     """
 
     provider_type = "llamacpp"
+    supports_tokenize_endpoint = True
 
     def __init__(
         self,
@@ -497,6 +498,10 @@ class LlamaCppClient:
         self.default_temperature = default_temperature
         self.default_timeout = default_timeout
         self.connect_timeout = connect_timeout
+        # Request-level defaults used to keep llama.cpp prompt reuse
+        # explicit instead of relying on server heuristics.
+        self.use_prompt_cache: bool = True
+        self.preferred_slot_id: int | None = None
 
     def _api_root(self) -> str:
         """Return the base URL with `/v1` ensured exactly once.
@@ -578,7 +583,10 @@ class LlamaCppClient:
             "temperature": (
                 temperature if temperature is not None else self.default_temperature
             ),
+            "cache_prompt": bool(self.use_prompt_cache),
         }
+        if isinstance(self.preferred_slot_id, int) and self.preferred_slot_id >= 0:
+            body["id_slot"] = self.preferred_slot_id
         if tools:
             body["tools"] = tools
         if extra:
@@ -615,6 +623,24 @@ class LlamaCppClient:
         if root.endswith("/v1"):
             root = root[:-3]
         return root
+
+    def count_text_tokens(self, text: str) -> int | None:
+        """Return exact token count via llama.cpp's `/tokenize` endpoint."""
+        req = urllib.request.Request(
+            f"{self._server_root()}/tokenize",
+            data=json.dumps({"content": text}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=2.0) as resp:
+                payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+        except Exception:
+            return None
+        tokens = payload.get("tokens")
+        if isinstance(tokens, list):
+            return len(tokens)
+        return None
 
     def _detect_props(self) -> dict | None:
         """Fetch and cache llama.cpp's /props payload."""

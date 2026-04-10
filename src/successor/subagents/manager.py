@@ -152,6 +152,7 @@ class _TaskState:
     thread: threading.Thread | None = None
     child_chat: object | None = None
     notified: bool = False
+    slot_id: int | None = None
 
     def snapshot(self) -> SubagentTaskSnapshot:
         return SubagentTaskSnapshot(
@@ -180,6 +181,7 @@ class SubagentManager:
         self,
         *,
         max_model_tasks: int = 1,
+        slot_ids: tuple[int, ...] = (),
         transcript_dir: Path | None = None,
         client_factory: Callable[[Profile], object] | None = None,
         settle_sleep_s: float = 0.05,
@@ -191,25 +193,38 @@ class SubagentManager:
         self._max_model_tasks = max(1, int(max_model_tasks))
         self._semaphore = threading.Semaphore(self._max_model_tasks)
         self._pending_max_model_tasks: int | None = None
+        self._slot_ids = self._normalize_slot_ids(slot_ids)
+        self._pending_slot_ids: tuple[int, ...] | None = None
+        self._claimed_slot_ids: set[int] = set()
         self._transcript_dir = transcript_dir or _default_transcript_dir()
         self._client_factory = client_factory or _default_client_factory
         self._settle_sleep_s = settle_sleep_s
 
-    def reconfigure(self, *, max_model_tasks: int) -> bool:
+    def reconfigure(
+        self,
+        *,
+        max_model_tasks: int,
+        slot_ids: tuple[int, ...] | None = None,
+    ) -> bool:
         """Update queue width once the manager is idle.
 
         Returns True when the new width was applied, False when active
         work made the change unsafe to apply in-place.
         """
         requested = max(1, int(max_model_tasks))
+        requested_slots = (
+            self._normalize_slot_ids(slot_ids)
+            if slot_ids is not None else None
+        )
         with self._lock:
             if any(
                 task.thread is not None and task.thread.is_alive()
                 for task in self._tasks.values()
             ):
                 self._pending_max_model_tasks = requested
+                self._pending_slot_ids = requested_slots
                 return False
-            self._apply_queue_width_locked(requested)
+            self._apply_queue_width_locked(requested, slot_ids=requested_slots)
             return True
 
     def spawn_fork(
@@ -337,6 +352,7 @@ class SubagentManager:
 
     def _run_task(self, task: _TaskState) -> None:
         acquired = False
+        claimed_slot_id: int | None = None
         try:
             while not task.stop.is_set():
                 if self._semaphore.acquire(timeout=0.1):
@@ -346,14 +362,22 @@ class SubagentManager:
                 self._finish_cancelled(task, "cancelled before start")
                 return
 
+            with self._lock:
+                claimed_slot_id = self._claim_slot_id_locked()
+                task.slot_id = claimed_slot_id
             self._update_task(task.task_id, status="running", started_at=time.monotonic())
 
             from ..chat import SuccessorChat, _Message
 
             child_profile = self._build_child_profile(task)
+            child_client = self._client_factory(child_profile)
+            self._configure_child_client_cache_affinity(
+                child_client,
+                slot_id=claimed_slot_id,
+            )
             child = SuccessorChat(
                 profile=child_profile,
-                client=self._client_factory(child_profile),
+                client=child_client,
             )
             child.messages = [
                 _Message(
@@ -439,16 +463,26 @@ class SubagentManager:
             current_thread = threading.current_thread()
             with self._lock:
                 task.child_chat = None
+                self._release_slot_id_locked(claimed_slot_id)
             if acquired:
                 self._semaphore.release()
             self._apply_pending_queue_width_if_idle(
                 exclude_thread=current_thread,
             )
 
-    def _apply_queue_width_locked(self, max_model_tasks: int) -> None:
+    def _apply_queue_width_locked(
+        self,
+        max_model_tasks: int,
+        *,
+        slot_ids: tuple[int, ...] | None = None,
+    ) -> None:
         self._max_model_tasks = max(1, int(max_model_tasks))
         self._semaphore = threading.Semaphore(self._max_model_tasks)
         self._pending_max_model_tasks = None
+        self._pending_slot_ids = None
+        if slot_ids is not None:
+            self._slot_ids = slot_ids
+        self._claimed_slot_ids.clear()
 
     def _apply_pending_queue_width_if_idle(
         self,
@@ -457,7 +491,8 @@ class SubagentManager:
     ) -> None:
         with self._lock:
             pending = self._pending_max_model_tasks
-            if pending is None:
+            pending_slots = self._pending_slot_ids
+            if pending is None and pending_slots is None:
                 return
             if any(
                 task.thread is not None
@@ -466,7 +501,50 @@ class SubagentManager:
                 for task in self._tasks.values()
             ):
                 return
-            self._apply_queue_width_locked(pending)
+            self._apply_queue_width_locked(
+                pending if pending is not None else self._max_model_tasks,
+                slot_ids=pending_slots,
+            )
+
+    @staticmethod
+    def _normalize_slot_ids(slot_ids: tuple[int, ...] | list[int] | None) -> tuple[int, ...]:
+        if not slot_ids:
+            return ()
+        normalized: list[int] = []
+        seen: set[int] = set()
+        for raw in slot_ids:
+            try:
+                slot = int(raw)
+            except Exception:
+                continue
+            if slot < 0 or slot in seen:
+                continue
+            seen.add(slot)
+            normalized.append(slot)
+        return tuple(normalized)
+
+    def _claim_slot_id_locked(self) -> int | None:
+        for slot_id in self._slot_ids:
+            if slot_id in self._claimed_slot_ids:
+                continue
+            self._claimed_slot_ids.add(slot_id)
+            return slot_id
+        return None
+
+    def _release_slot_id_locked(self, slot_id: int | None) -> None:
+        if slot_id is None:
+            return
+        self._claimed_slot_ids.discard(slot_id)
+
+    @staticmethod
+    def _configure_child_client_cache_affinity(client: object, *, slot_id: int | None) -> None:
+        if getattr(client, "provider_type", "") != "llamacpp":
+            return
+        try:
+            setattr(client, "use_prompt_cache", True)
+            setattr(client, "preferred_slot_id", slot_id)
+        except Exception:
+            return
 
     def _finish_completed(self, task: _TaskState, child: object) -> None:
         messages = getattr(child, "messages", [])

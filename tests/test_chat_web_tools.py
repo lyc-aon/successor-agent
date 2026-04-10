@@ -369,8 +369,12 @@ def test_browser_verification_intervention_becomes_continuation_nudge(
     assert len(client.calls) == 2
     second_sys = client.calls[1]["messages"][0]
     assert second_sys["role"] == "system"
-    assert "Browser Verification Reminder" in second_sys["content"]
-    assert "Visible controls:" in second_sys["content"]
+    assert "Browser Verification Reminder" not in second_sys["content"]
+    second_tail = client.calls[1]["messages"][-1]
+    assert second_tail["role"] == "user"
+    assert "[internal harness runtime context]" in second_tail["content"]
+    assert "Browser Verification Reminder" in second_tail["content"]
+    assert "Visible controls:" in second_tail["content"]
     assert any(
         msg.synthetic and "browser actions stalled on the same page state" in msg.raw_text
         for msg in chat.messages
@@ -436,14 +440,18 @@ def test_browser_verification_mode_injects_visual_guidance(
     assert len(client.calls) == 1
     sys_msg = client.calls[0]["messages"][0]
     assert sys_msg["role"] == "system"
-    assert "Browser verification mode" in sys_msg["content"]
-    assert "browser-verifier" in sys_msg["content"]
-    assert "screenshot" in sys_msg["content"]
-    assert "vision" in sys_msg["content"]
-    assert "externally managed" in sys_msg["content"]
-    assert "`verify` tool" in sys_msg["content"]
-    assert "before/after state delta" in sys_msg["content"]
-    assert "failure-path check" in sys_msg["content"]
+    assert "Browser verification mode" not in sys_msg["content"]
+    runtime_tail = client.calls[0]["messages"][-1]
+    assert runtime_tail["role"] == "user"
+    assert "[internal harness runtime context]" in runtime_tail["content"]
+    assert "Browser verification mode" in runtime_tail["content"]
+    assert "browser-verifier" in runtime_tail["content"]
+    assert "screenshot" in runtime_tail["content"]
+    assert "vision" in runtime_tail["content"]
+    assert "externally managed" in runtime_tail["content"]
+    assert "`verify` tool" in runtime_tail["content"]
+    assert "before/after state delta" in runtime_tail["content"]
+    assert "failure-path check" in runtime_tail["content"]
 
 
 def test_browser_verification_mode_injects_stateful_runtime_guidance(
@@ -489,9 +497,13 @@ def test_browser_verification_mode_injects_stateful_runtime_guidance(
     assert len(client.calls) == 1
     sys_msg = client.calls[0]["messages"][0]
     assert sys_msg["role"] == "system"
-    assert "Browser verification mode" in sys_msg["content"]
-    assert "deterministic driver, autoplay harness, or player script" in sys_msg["content"]
-    assert "score HUD, runtime log, debug overlay, or state accessor" in sys_msg["content"]
+    assert "Browser verification mode" not in sys_msg["content"]
+    runtime_tail = client.calls[0]["messages"][-1]
+    assert runtime_tail["role"] == "user"
+    assert "[internal harness runtime context]" in runtime_tail["content"]
+    assert "Browser verification mode" in runtime_tail["content"]
+    assert "deterministic driver, autoplay harness, or player script" in runtime_tail["content"]
+    assert "score HUD, runtime log, debug overlay, or state accessor" in runtime_tail["content"]
 
 
 def test_native_vision_tool_call_dispatches(monkeypatch, temp_config_dir: Path) -> None:

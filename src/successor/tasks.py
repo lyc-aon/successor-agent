@@ -176,23 +176,33 @@ def build_task_prompt_section(ledger: SessionTaskLedger) -> str:
     return "\n".join(lines)
 
 
-def build_task_execution_guidance(ledger: SessionTaskLedger) -> str:
+def build_task_execution_primer() -> str:
     lines = ["### Task-ledger discipline", ""]
+    lines.extend([
+        "- For multi-step work, create or update the session task ledger before the first substantive mutation, process-management step, or verification loop.",
+        "- If the request clearly requires 3 or more distinct actions, includes build + verify + fix phases, or will span several turns, a `task` call is usually the first substantive step after you understand the request.",
+        "- Mark one task `in_progress` BEFORE you begin substantive work, and keep at most one task `in_progress` while actively working.",
+        "- Do not jump straight into a large `write_file` payload, multi-command bash sequence, or repeated browser flow before the ledger exists.",
+        "- If you already know the next substantive tool action, update the ledger and make that tool call in the SAME response.",
+        "- Mark tasks completed immediately after finishing them; do not batch completions later.",
+        "- Skip the task ledger only for single trivial tasks or purely conversational replies.",
+    ])
+    return "\n".join(lines)
+
+
+def build_task_execution_guidance(ledger: SessionTaskLedger) -> str:
     if not ledger.items:
-        lines.extend([
-            "- For multi-step work, create or update the session task ledger before the first substantive mutation, process-management step, or verification loop.",
-            "- If the request clearly requires 3 or more distinct actions, includes build + verify + fix phases, or will span several turns, a `task` call is usually the first substantive step after you understand the request.",
-        ])
+        return build_task_execution_primer()
+    lines = ["### Task-ledger discipline", ""]
+    active = ledger.in_progress_task()
+    if active is not None:
+        lines.append(
+            f"- A session task is already `in_progress`: `{active.active_form}`. Keep the ledger authoritative as you continue from the current state."
+        )
     else:
-        active = ledger.in_progress_task()
-        if active is not None:
-            lines.append(
-                f"- A session task is already `in_progress`: `{active.active_form}`. Keep the ledger authoritative as you continue from the current state."
-            )
-        else:
-            lines.append(
-                "- A session task ledger already exists. Update it before you resume substantive work so it reflects the current plan."
-            )
+        lines.append(
+            "- A session task ledger already exists. Update it before you resume substantive work so it reflects the current plan."
+        )
     lines.extend([
         "- Mark one task `in_progress` BEFORE you begin substantive work, and keep at most one task `in_progress` while actively working.",
         "- Do not jump straight into a large `write_file` payload, multi-command bash sequence, or repeated browser flow before the ledger exists.",

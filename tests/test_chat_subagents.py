@@ -320,8 +320,12 @@ def test_completed_subagent_can_trigger_bounded_followup_nudge(
     assert len(client.calls) == 1
     system = client.calls[0]["messages"][0]
     assert system["role"] == "system"
-    assert "Background Task Reminder" in system["content"]
-    assert "found a stale selector" in system["content"]
+    assert "Background Task Reminder" not in system["content"]
+    runtime_tail = client.calls[0]["messages"][-1]
+    assert runtime_tail["role"] == "user"
+    assert "[internal harness runtime context]" in runtime_tail["content"]
+    assert "Background Task Reminder" in runtime_tail["content"]
+    assert "found a stale selector" in runtime_tail["content"]
 
 
 def test_config_command_refused_while_subagent_running(temp_config_dir: Path) -> None:

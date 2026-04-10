@@ -431,35 +431,44 @@ def build_runbook_prompt_section(runbook: SessionRunbook) -> str:
     return "\n".join(lines)
 
 
-def build_runbook_execution_guidance(runbook: SessionRunbook) -> str:
+def build_runbook_execution_primer() -> str:
     lines = ["### Experimental run discipline", ""]
+    lines.extend([
+        "- For long iterative implementation work, create a runbook early with objective, evaluator steps, baseline status, and one active hypothesis.",
+        "- A runbook is especially useful when the work will involve multiple edit -> run -> verify loops.",
+        "- After a bounded cluster of edits, run the evaluator before continuing with more speculative changes.",
+        "- Record a concise attempt entry after meaningful evaluator results: hypothesis, outcome, and keep/discard decision.",
+        "- Prefer append-only experiment memory over retrying failed ideas blindly.",
+        "- Do not mark a hypothesis as successful from source inspection alone; use evaluator and verification evidence.",
+    ])
+    return "\n".join(lines)
+
+
+def build_runbook_execution_guidance(runbook: SessionRunbook) -> str:
     state = runbook.state
     if state is None:
-        lines.extend([
-            "- For long iterative implementation work, create a runbook early with objective, evaluator steps, baseline status, and one active hypothesis.",
-            "- A runbook is especially useful when the work will involve multiple edit -> run -> verify loops.",
-        ])
+        return build_runbook_execution_primer()
+    lines = ["### Experimental run discipline", ""]
+    if state.baseline_missing():
+        lines.append(
+            "- The current runbook says the baseline is `missing`. Capture baseline evidence before major new edits."
+        )
+    elif state.baseline_status == "stale":
+        lines.append(
+            "- The current runbook says the baseline is `stale`. Refresh it before trusting new comparisons."
+        )
+    if state.active_hypothesis:
+        lines.append(
+            f"- The active hypothesis is `{state.active_hypothesis}`. Prefer bounded work that directly tests it."
+        )
     else:
-        if state.baseline_missing():
-            lines.append(
-                "- The current runbook says the baseline is `missing`. Capture baseline evidence before major new edits."
-            )
-        elif state.baseline_status == "stale":
-            lines.append(
-                "- The current runbook says the baseline is `stale`. Refresh it before trusting new comparisons."
-            )
-        if state.active_hypothesis:
-            lines.append(
-                f"- The active hypothesis is `{state.active_hypothesis}`. Prefer bounded work that directly tests it."
-            )
-        else:
-            lines.append(
-                "- The runbook has no active hypothesis. Set one before the next major attempt."
-            )
-        if state.evaluator:
-            lines.append(
-                "- Reuse the existing evaluator steps instead of inventing new ad hoc checks unless the task genuinely changed."
-            )
+        lines.append(
+            "- The runbook has no active hypothesis. Set one before the next major attempt."
+        )
+    if state.evaluator:
+        lines.append(
+            "- Reuse the existing evaluator steps instead of inventing new ad hoc checks unless the task genuinely changed."
+        )
     lines.extend([
         "- After a bounded cluster of edits, run the evaluator before continuing with more speculative changes.",
         "- Record a concise attempt entry after meaningful evaluator results: hypothesis, outcome, and keep/discard decision.",

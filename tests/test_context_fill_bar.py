@@ -39,9 +39,21 @@ def _footer_line(chat: SuccessorChat, *, rows: int = 20, cols: int = 120) -> str
 
 def _stuff_chat_to_pct(chat: SuccessorChat, target_pct: float) -> int:
     window = chat.profile.provider.get("context_window", 262_144)
-    target_chars = int(window * target_pct * 3.5)
-    chat.messages = [_Message("user", "x" * target_chars)]
-    return target_chars
+    target_tokens = max(1, int(window * target_pct))
+    low = 0
+    high = max(1024, target_tokens * 8)
+    best = high
+    while low <= high:
+        mid = (low + high) // 2
+        chat.messages = [_Message("user", "x" * mid)]
+        used = chat._context_usage_snapshot().used_tokens
+        if used >= target_tokens:
+            best = mid
+            high = mid - 1
+        else:
+            low = mid + 1
+    chat.messages = [_Message("user", "x" * best)]
+    return best
 
 
 # ─── Threshold state transitions ───

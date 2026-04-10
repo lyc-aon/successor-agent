@@ -61,6 +61,17 @@ from .chat_agent_loop import (
 from .chat_display_runtime import ChatDisplayRuntime
 from .chat_tool_runtime import ChatToolRuntime
 from .config import load_chat_config, save_chat_config
+from .context_usage import (
+    ContextUsageSnapshot,
+    PromptSection,
+    RequestTokenEstimate,
+    TurnRequestEnvelope,
+    build_context_usage_snapshot,
+    estimate_live_output_tokens,
+    estimate_request_input_tokens,
+    normalize_usage_payload,
+    update_calibration_factor,
+)
 from .file_tools import (
     FileReadTracker,
     FileReadStateEntry,
@@ -1279,6 +1290,13 @@ class SuccessorChat(App):
         else:
             self.client = LlamaCppClient()
 
+        self._foreground_slot_id: int | None = None
+        self._stable_prompt_cache_key: tuple[object, ...] | None = None
+        self._stable_prompt_cache_sections: tuple[PromptSection, ...] = ()
+        self._stable_prompt_cache_prompt: str = ""
+        self._last_sent_stable_prompt_key: tuple[object, ...] | None = None
+        self._apply_provider_cache_preferences()
+
         # ─── System prompt ───
         # Comes from the profile. Used in _submit when building the
         # api_messages payload. Profiles can ship their own system
@@ -1440,9 +1458,10 @@ class SuccessorChat(App):
         # Accumulators that the renderer reads from each frame.
         self._stream_content: list[str] = []
         self._stream_reasoning_chars: int = 0
-        # Best-effort approximate token count for status display
-        # (chars / 4, since average tokens are ~3-4 chars).
+        # Raw provider-reported usage payload from the most recent
+        # completed stream, kept for diagnostics and normalization.
         self._last_usage: dict | None = None
+        self._last_usage_telemetry = None  # UsageTelemetry | None
         # Bash detector for the current stream — when bash is in
         # profile.tools, _submit creates one of these and _pump_stream
         # feeds ContentChunk text to it. After StreamEnded, we drain
@@ -1591,25 +1610,23 @@ class SuccessorChat(App):
             max_model_tasks=self.profile.subagents.effective_max_model_tasks(
                 self.client
             ),
+            slot_ids=self._subagent_slot_ids(),
         )
 
-        # Chat-level cached total token count for the static footer.
-        # Without this cache the footer walks every message via the
-        # TokenCounter every frame — at 200K context that's 1 fps.
-        # With it, the footer is O(1) in steady state.
+        # Canonical context-usage tracking.
         #
-        # Cache key: (id(self.messages), len(self.messages))
-        #   - id catches wholesale list reassignment (test fixtures
-        #     replacing messages with a same-length list, /from_agent_log
-        #     swapping post-compact, etc) because each new list gets a
-        #     fresh CPython id
-        #   - len catches in-place appends (the same list grows)
-        # Together they cover every mutation pattern the chat does.
-        # The only thing they MISS is in-place text edits to an existing
-        # message at the same index, which the chat never does because
-        # raw_text is set at construction and never mutated.
-        self._cached_total_tokens: int | None = None
-        self._cached_total_tokens_key: tuple[int, int] = (-1, -1)
+        # `_cached_context_usage_snapshot` is the idle/preview snapshot
+        # used by the footer and /budget when no stream is active.
+        # `_active_request_*` pins the exact envelope that was sent for
+        # the in-flight stream so the footer can layer live output on
+        # top of the right prompt estimate instead of rebuilding from
+        # mutable chat state mid-stream.
+        self._cached_context_usage_snapshot: ContextUsageSnapshot | None = None
+        self._cached_context_usage_key: tuple[Any, ...] | None = None
+        self._active_request_envelope: TurnRequestEnvelope | None = None
+        self._active_request_estimate: RequestTokenEstimate | None = None
+        self._last_request_estimate: RequestTokenEstimate | None = None
+        self._context_usage_calibration: float = 1.0
         self._agent_loop = ChatAgentLoop(
             self,
             _Message,
@@ -2347,6 +2364,8 @@ class SuccessorChat(App):
                 pass
         else:
             self.client = LlamaCppClient()
+        self._apply_provider_cache_preferences()
+        self._reset_client_dependent_caches()
 
         # Queue-width changes apply once the manager is idle. If
         # background tasks are active, keep the old scheduler shape
@@ -2355,6 +2374,7 @@ class SuccessorChat(App):
             max_model_tasks=new_profile.subagents.effective_max_model_tasks(
                 self.client
             ),
+            slot_ids=self._subagent_slot_ids(),
         )
 
         # Persist the new active profile name to chat.json so the next
@@ -2771,6 +2791,46 @@ class SuccessorChat(App):
             return detect()
         except Exception:
             return None
+
+    def _preferred_foreground_slot_id(self) -> int | None:
+        if getattr(self.client, "provider_type", "") != "llamacpp":
+            return None
+        capabilities = self._detect_client_runtime_capabilities()
+        total_slots = getattr(capabilities, "total_slots", None)
+        if isinstance(total_slots, int) and total_slots > 0:
+            return 0
+        return None
+
+    def _subagent_slot_ids(self) -> tuple[int, ...]:
+        if getattr(self.client, "provider_type", "") != "llamacpp":
+            return ()
+        capabilities = self._detect_client_runtime_capabilities()
+        total_slots = getattr(capabilities, "total_slots", None)
+        if not isinstance(total_slots, int) or total_slots <= 1:
+            return ()
+        lanes = self.profile.subagents.effective_max_model_tasks(self.client)
+        background_slots = max(0, min(total_slots - 1, lanes))
+        return tuple(range(1, 1 + background_slots))
+
+    def _apply_provider_cache_preferences(self) -> None:
+        self._foreground_slot_id = self._preferred_foreground_slot_id()
+        if getattr(self.client, "provider_type", "") == "llamacpp":
+            try:
+                setattr(self.client, "use_prompt_cache", True)
+                setattr(self.client, "preferred_slot_id", self._foreground_slot_id)
+            except Exception:
+                pass
+
+    def _reset_client_dependent_caches(self) -> None:
+        self._cached_token_counter = None
+        self._cached_context_usage_snapshot = None
+        self._cached_context_usage_key = None
+        if hasattr(self, "_cached_resolved_window"):
+            delattr(self, "_cached_resolved_window")
+        self._stable_prompt_cache_key = None
+        self._stable_prompt_cache_sections = ()
+        self._stable_prompt_cache_prompt = ""
+        self._last_sent_stable_prompt_key = None
 
     def _tool_working_directory(self) -> str:
         bash_cfg = resolve_bash_config(self.profile)
@@ -3511,137 +3571,181 @@ class SuccessorChat(App):
             blocking_buffer=blocking_buf,
         )
 
-    # ─── Token count caching ───
+    # ─── Context usage snapshots ───
     #
-    # The static footer needs the total token count for its fill bar +
-    # threshold badges. Computing this naively (walk every message,
-    # tokenize body, sum) is O(N) per frame and at 200K context that's
-    # ~1000ms — drops the chat to 1 fps.
+    # The footer, /budget, and autocompact gate all need the SAME
+    # answer: what would the next request actually cost, and how close
+    # is that to the active context window? We cache that answer here.
     #
-    # Two layers of caching to make this O(1) in the steady state:
-    #
-    #   _Message._token_count    per-message cache, computed once on
-    #                            first access (text is invariant for
-    #                            the message's lifetime — raw_text is
-    #                            set at construction and never mutated)
-    #
-    #   self._cached_total_tokens  chat-level cache of the SUM, set
-    #                              by _total_tokens() on first read
-    #                              after a mutation, invalidated by
-    #                              _invalidate_token_cache() at every
-    #                              self.messages mutation site
-    #
-    # The mutation sites are: _submit (user message append), _pump_stream
-    # (assistant commit), _handle_burn_cmd (synthetic injection),
-    # _from_agent_log (compaction swap), _handle_compact_cmd (snapshot+
-    # swap), and the few synthetic-message appends scattered through the
-    # slash command handlers. All audited and wired.
+    # While a stream is in flight we pin the exact outbound envelope
+    # used to open it, then layer live output tokens on top of that
+    # cached input estimate. When idle we build a preview envelope for
+    # the next turn and cache the resulting snapshot by chat state.
 
     def _invalidate_token_cache(self) -> None:
-        """Mark the chat-level total token cache as stale.
+        """Mark the cached idle preview snapshot as stale."""
+        self._cached_context_usage_snapshot = None
+        self._cached_context_usage_key = None
 
-        Optional explicit-invalidation hook — most call sites don't
-        need to call this because `_total_tokens()` auto-detects
-        mutations via (id, len) of self.messages. Use it only when
-        you mutate a message's content in-place (which we don't
-        currently do).
-        """
-        self._cached_total_tokens = None
-        self._cached_total_tokens_key = (-1, -1)
+    def _next_turn_number_for_usage_preview(self) -> int:
+        if self._stream is not None:
+            return max(1, self._agent_turn)
+        return max(1, self._agent_turn + 1)
 
-    def _token_count_for_message(self, msg: "_Message") -> int:
-        """Return (and lazy-compute) the token count for a single
-        chat _Message. Includes the standard 4-token role overhead.
+    def _context_usage_cache_key(self, *, turn: int) -> tuple[Any, ...]:
+        return (
+            id(self.messages),
+            len(self.messages),
+            turn,
+            self.profile.name,
+            tuple(self.profile.tools or ()),
+            tuple(self.profile.skills or ()),
+            self.profile.subagents.enabled,
+            self.profile.subagents.notify_on_finish,
+            self._browser_verification_active,
+            self._browser_verification_reason,
+            self._task_continue_nudge or "",
+            self._verification_continue_nudge or "",
+            self._verification_adoption_nudge or "",
+            self._file_tool_continue_nudge or "",
+            self._subagent_continue_nudge or "",
+        )
 
-        Per-message counts are cached on the _Message itself in the
-        `_token_count` slot. The cache is invariant because raw_text
-        and tool_card are set at construction and never mutated.
-        """
-        if msg._token_count is not None:
-            return msg._token_count
-        # Determine the text payload for this message
-        artifact = _message_tool_artifact(msg)
-        if isinstance(artifact, ToolCard):
-            card = artifact
-            text = f"$ {card.raw_command}"
-            if card.output:
-                text += "\n" + card.output
-        elif isinstance(artifact, SubagentToolCard):
-            text = artifact.spawn_result
-        else:
-            text = msg.raw_text
-        # Use the agent counter when available (accurate via /tokenize),
-        # otherwise the char-count heuristic
-        if self._cached_token_counter is not None:
-            n = self._cached_token_counter.count(text) + 4
-        else:
-            n = max(1, len(text) // 4) + 4
-        msg._token_count = n
-        return n
+    def _remember_active_request_usage(self, envelope: TurnRequestEnvelope) -> None:
+        estimate = estimate_request_input_tokens(
+            envelope,
+            self._agent_token_counter(),
+            calibration_factor=self._context_usage_calibration,
+        )
+        self._active_request_envelope = envelope
+        self._active_request_estimate = estimate
+        self._invalidate_token_cache()
+
+    def _finalize_active_request_usage(self, raw_usage: dict | None) -> None:
+        self._last_request_estimate = self._active_request_estimate
+        telemetry = normalize_usage_payload(raw_usage)
+        if telemetry is not None:
+            self._last_usage_telemetry = telemetry
+        if (
+            telemetry is not None
+            and self._active_request_estimate is not None
+            and telemetry.input_tokens is not None
+        ):
+            self._context_usage_calibration = update_calibration_factor(
+                self._context_usage_calibration,
+                estimated_input_tokens_raw=self._active_request_estimate.input_tokens_raw,
+                actual_input_tokens=telemetry.input_tokens,
+            )
+        self._active_request_envelope = None
+        self._active_request_estimate = None
+        self._invalidate_token_cache()
+
+    def _context_usage_snapshot(self) -> ContextUsageSnapshot:
+        budget = self._agent_budget()
+        if self._stream is not None and self._active_request_estimate is not None:
+            live_output_tokens = estimate_live_output_tokens(
+                reasoning_chars=self._stream_reasoning_chars,
+                content_text="".join(self._stream_content),
+            )
+            return build_context_usage_snapshot(
+                self._active_request_estimate,
+                budget=budget,
+                turn=self._active_request_envelope.turn if self._active_request_envelope else max(1, self._agent_turn),
+                source="active_request",
+                output_tokens=live_output_tokens,
+                last_actual_usage=self._last_usage_telemetry,
+            )
+
+        turn = self._next_turn_number_for_usage_preview()
+        key = self._context_usage_cache_key(turn=turn)
+        if (
+            self._cached_context_usage_snapshot is not None
+            and self._cached_context_usage_key == key
+        ):
+            return self._cached_context_usage_snapshot
+
+        envelope = self._agent_loop.build_turn_request_envelope_preview(
+            turn_number=turn,
+        )
+        estimate = estimate_request_input_tokens(
+            envelope,
+            self._agent_token_counter(),
+            calibration_factor=self._context_usage_calibration,
+        )
+        snapshot = build_context_usage_snapshot(
+            estimate,
+            budget=budget,
+            turn=envelope.turn,
+            source="next_request",
+            last_actual_usage=self._last_usage_telemetry,
+        )
+        self._cached_context_usage_snapshot = snapshot
+        self._cached_context_usage_key = key
+        return snapshot
 
     def _total_tokens(self) -> int:
-        """Return the (cached) total token count of self.messages.
-
-        After the first read following a mutation, this is O(1).
-        Cache invalidation is automatic via (id, len) of self.messages
-        — appends, wholesale replacements (even same-length ones), and
-        truncations all bump at least one of the two values.
-
-        Streaming buffer is added on top via a cheap char-count
-        heuristic so the bar grows during streaming without paying the
-        endpoint cost on every frame.
-        """
-        cur_key = (id(self.messages), len(self.messages))
-        if (
-            self._cached_total_tokens is not None
-            and self._cached_total_tokens_key == cur_key
-        ):
-            committed_total = self._cached_total_tokens
-        else:
-            # Recompute from scratch (per-message counts hit the
-            # _token_count cache on _Message after the first walk)
-            if self._cached_token_counter is not None and self.system_prompt:
-                sys_tokens = self._cached_token_counter.count(self.system_prompt) + 4
-            elif self.system_prompt:
-                sys_tokens = max(1, len(self.system_prompt) // 4) + 4
-            else:
-                sys_tokens = 0
-            total = sys_tokens
-            for msg in self.messages:
-                total += self._token_count_for_message(msg)
-            self._cached_total_tokens = total
-            self._cached_total_tokens_key = cur_key
-            committed_total = total
-
-        # Streaming buffer — char heuristic for speed (the streaming
-        # buffer text changes every frame so caching is impossible
-        # anyway, and accuracy isn't critical for a live indicator).
-        streaming_delta = 0
-        if self._stream is not None and self._stream_content:
-            stream_text = "".join(self._stream_content)
-            streaming_delta = max(0, len(stream_text) // 4)
-
-        return committed_total + streaming_delta
+        """Return the canonical used-token count for the footer."""
+        return self._context_usage_snapshot().used_tokens
 
     # ─── /budget ───
 
     def _handle_budget_cmd(self) -> None:
         log = self._to_agent_log()
-        counter = self._agent_token_counter()
-        budget = self._agent_budget()
-        used = counter.count_log(log)
-        state = budget.state(used)
-        fill = budget.fill_pct(used) * 100
-        headroom = budget.headroom(used)
-        msg = (
-            f"context: {used:,} / {budget.window:,} tokens · "
-            f"{fill:.1f}% full · {headroom:,} headroom · state: {state}\n"
-            f"thresholds: warn @ {budget.warning_at:,} · "
-            f"autocompact @ {budget.autocompact_at:,} · "
-            f"blocking @ {budget.blocking_at:,}\n"
-            f"rounds: {log.round_count} · "
-            f"messages (excl synthetic): {log.total_messages()}"
-        )
+        snapshot = self._context_usage_snapshot()
+        lines = [
+            (
+                f"context: {snapshot.used_tokens:,} / {snapshot.window:,} tokens · "
+                f"{snapshot.fill_pct * 100:.1f}% full · {snapshot.headroom:,} headroom · "
+                f"state: {snapshot.state}"
+            ),
+            (
+                f"turn {snapshot.turn} · source: {snapshot.source.replace('_', ' ')} · "
+                f"projected input: {snapshot.input_tokens:,} · "
+                f"live output: {snapshot.output_tokens:,}"
+            ),
+            (
+                f"estimator: {snapshot.method} ({snapshot.confidence}) · "
+                f"calibration: {snapshot.calibration_factor:.2f}x"
+            ),
+            (
+                f"thresholds: warn @ {snapshot.warning_at:,} · "
+                f"autocompact @ {snapshot.autocompact_at:,} · "
+                f"blocking @ {snapshot.blocking_at:,}"
+            ),
+            (
+                f"rounds: {log.round_count} · "
+                f"messages (excl synthetic): {log.total_messages()}"
+            ),
+        ]
+        if snapshot.last_actual_usage is not None:
+            actual = snapshot.last_actual_usage
+            lines.append(
+                "last provider usage: "
+                f"input={actual.input_tokens if actual.input_tokens is not None else '?'} · "
+                f"output={actual.output_tokens if actual.output_tokens is not None else '?'} · "
+                f"total={actual.total_tokens if actual.total_tokens is not None else '?'}"
+            )
+            if (
+                self._last_request_estimate is not None
+                and actual.input_tokens is not None
+            ):
+                delta = actual.input_tokens - self._last_request_estimate.input_tokens
+                lines.append(
+                    "last estimate delta: "
+                    f"{delta:+,} tokens "
+                    f"(estimate {self._last_request_estimate.input_tokens:,} → "
+                    f"actual {actual.input_tokens:,})"
+                )
+        if snapshot.breakdown:
+            top_entries = sorted(
+                snapshot.breakdown,
+                key=lambda entry: entry.tokens,
+                reverse=True,
+            )[:8]
+            lines.append("breakdown:")
+            for entry in top_entries:
+                lines.append(f"  {entry.label}: {entry.tokens:,}")
+        msg = "\n".join(lines)
         self.messages.append(_Message("successor", msg, synthetic=True))
 
     # ─── /burn ───
@@ -3702,9 +3806,7 @@ class SuccessorChat(App):
         # Report — use the running added_tokens directly instead of
         # rebuilding the agent log and re-walking
         budget = self._agent_budget()
-        # Force a recompute via the chat cache (which now uses pre-filled
-        # per-message counts so it's fast)
-        self._cached_total_tokens = None
+        self._invalidate_token_cache()
         new_total = self._total_tokens()
         fill = budget.fill_pct(new_total) * 100
         self.messages.append(_Message(
@@ -3799,18 +3901,18 @@ class SuccessorChat(App):
         if self._autocompact_attempted_this_turn:
             return False
 
-        # Rule 4 + 5 require building the budget and counting tokens.
-        # These are cheap (cached) so the common-case "no compact
-        # needed" path adds essentially zero overhead per turn.
+        # Rule 4 + 5 require building the budget and the projected
+        # next-request usage snapshot. This is cached off the exact
+        # outbound envelope, so the gate sees the same number the
+        # footer and /budget report.
         from .agent.compact import MIN_ROUNDS_TO_COMPACT
         counter = self._agent_token_counter()
         log = self._to_agent_log()
         if log.round_count < MIN_ROUNDS_TO_COMPACT:
             return False
 
-        budget = self._agent_budget()
-        used = counter.count_log(log)
-        if not budget.should_autocompact(used):
+        snapshot = self._context_usage_snapshot()
+        if not self._agent_budget().should_autocompact(snapshot.input_tokens):
             return False
 
         # All gates passed — fire compaction. Mirrors `_handle_compact_cmd`
@@ -3985,37 +4087,49 @@ class SuccessorChat(App):
         if was_pending_resume:
             self._begin_agent_turn()
 
-        # Fire cache pre-warming for the post-compact prefix. This
-        # populates llama.cpp's KV cache so the next user message
-        # is near-instant instead of paying ~40s of cache miss.
-        # Runs in parallel with the materialize/reveal/toast animation.
-        # Auto-canceled by _submit when the user types a message.
-        try:
-            post_compact_messages = result.new_log.api_messages()
-            if post_compact_messages:
-                # llama.cpp's chat completion endpoint rejects prompts
-                # that end on an assistant message when thinking mode
-                # is enabled (HTTP 400: "Assistant response prefill is
-                # incompatible with enable_thinking"). The post-compact
-                # log ends on the last kept assistant turn, so we
-                # append a synthetic user message to make the prompt
-                # valid. The cache match against this prepended user
-                # message will fail when the REAL user sends their
-                # next message, but that's fine — the cache match for
-                # everything BEFORE that synthetic message (which is
-                # the post-compact prefix proper) is what we want.
-                warmer_messages = list(post_compact_messages)
-                if warmer_messages and warmer_messages[-1].get("role") == "assistant":
-                    warmer_messages.append({"role": "user", "content": "."})
-                self._cache_warmer = _CacheWarmer(
-                    messages=warmer_messages,
-                    client=self.client,
-                )
-                self._cache_warmer.start()
-        except Exception:
-            # Warming is best-effort — never block the chat on a
-            # warmer construction failure
-            self._cache_warmer = None
+        # Fire cache pre-warming only when the chat will go idle after
+        # compaction. In the deferred-resume path the next real agent
+        # request opens immediately, so a separate warmer would just
+        # compete for the same local slots without helping latency.
+        if not was_pending_resume:
+            try:
+                post_compact_messages = result.new_log.api_messages()
+                if post_compact_messages:
+                    # llama.cpp's chat completion endpoint rejects prompts
+                    # that end on an assistant message when thinking mode
+                    # is enabled (HTTP 400: "Assistant response prefill is
+                    # incompatible with enable_thinking"). The post-compact
+                    # log ends on the last kept assistant turn, so we
+                    # append a synthetic user message to make the prompt
+                    # valid. The cache match against this prepended user
+                    # message will fail when the REAL user sends their
+                    # next message, but that's fine — the cache match for
+                    # everything BEFORE that synthetic message (which is
+                    # the post-compact prefix proper) is what we want.
+                    warmer_messages = list(post_compact_messages)
+                    if warmer_messages and warmer_messages[-1].get("role") == "assistant":
+                        warmer_messages.append({"role": "user", "content": "."})
+                    self._cache_warmer = _CacheWarmer(
+                        messages=warmer_messages,
+                        client=self.client,
+                    )
+                    self._cache_warmer.start()
+                    self._trace_event(
+                        "cache_warmer_started",
+                        reason="post_compaction_idle_window",
+                        message_count=len(warmer_messages),
+                        slot_id=getattr(self.client, "preferred_slot_id", None),
+                    )
+            except Exception:
+                # Warming is best-effort — never block the chat on a
+                # warmer construction failure
+                self._cache_warmer = None
+        else:
+            self._trace_event(
+                "cache_warmer_skipped",
+                reason="post_compaction_deferred_resume",
+                slot_id=getattr(self.client, "preferred_slot_id", None),
+            )
 
     def _pump_stream(self) -> None:
         self._agent_loop.pump_stream()

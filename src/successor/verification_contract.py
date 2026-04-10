@@ -205,28 +205,58 @@ def build_verification_prompt_section(ledger: VerificationLedger) -> str:
     return "\n".join(lines)
 
 
+def build_verification_execution_primer(
+    *,
+    subagent_available: bool = False,
+    stateful_runtime: bool = False,
+) -> str:
+    lines = ["### Evidence-bearing verification", ""]
+    lines.extend([
+        "- For interactive, stateful, or browser-facing work, create or update a compact verification contract early.",
+        "- Each item should name the claim to prove and the concrete evidence that will prove it.",
+        "- Prefer executable evidence: browser interactions, screenshots plus vision, console/runtime checks, command output, or a tiny verifier/player script.",
+        "- For interactive claims, capture a specific before/after state delta. Name the exact score, count, label, panel state, URL, or visible text that should change, then prove that it changed.",
+        "- If direct manual checking is weak, repetitive, or impossible, add a temporary structured debug surface or debug logs that expose the exact state transitions you need to prove.",
+        "- Prefer debug logs that answer concrete questions like input received, state changed, animation advanced, collision fired, or persistence wrote.",
+        "- For non-trivial work, run at least one adversarial or failure-path probe instead of verifying only the happy path.",
+        "- Do not mark an item `passed` from source inspection alone. Update it only after the real evidence exists.",
+        "- Mark an item `failed` when the observed evidence contradicts the claim, and record the concise observed outcome.",
+        "- Skip the verification contract only for single trivial tasks or purely conversational replies.",
+    ])
+    if stateful_runtime:
+        lines.extend([
+            "- This task looks stateful or realtime. Build the evaluator as part of the work instead of treating verification as an afterthought.",
+            "- Prefer a tiny deterministic driver, autoplay harness, or player script over casual manual play when the runtime is fast, noisy, or timing-sensitive.",
+            "- Name that driver explicitly in the verification contract, and pair it with an observable debug surface such as a HUD value, runtime log, or state accessor.",
+        ])
+    if subagent_available:
+        lines.append(
+            '- Before declaring complex browser-heavy or multi-file work done, consider launching a fresh read-only `subagent` with `role="verification"` so a separate pass can try to break it without editing project files.'
+        )
+    return "\n".join(lines)
+
+
 def build_verification_execution_guidance(
     ledger: VerificationLedger,
     *,
     subagent_available: bool = False,
     stateful_runtime: bool = False,
 ) -> str:
-    lines = ["### Evidence-bearing verification", ""]
     if not ledger.items:
-        lines.extend([
-            "- For interactive, stateful, or browser-facing work, create or update a compact verification contract early.",
-            "- Each item should name the claim to prove and the concrete evidence that will prove it.",
-        ])
+        return build_verification_execution_primer(
+            subagent_available=subagent_available,
+            stateful_runtime=stateful_runtime,
+        )
+    lines = ["### Evidence-bearing verification", ""]
+    active = ledger.in_progress_item()
+    if active is not None:
+        lines.append(
+            f"- A verification item is already `in_progress`: `{active.claim}`. Keep gathering evidence until it can honestly become `passed` or `failed`."
+        )
     else:
-        active = ledger.in_progress_item()
-        if active is not None:
-            lines.append(
-                f"- A verification item is already `in_progress`: `{active.claim}`. Keep gathering evidence until it can honestly become `passed` or `failed`."
-            )
-        else:
-            lines.append(
-                "- A verification contract already exists. Update it as new evidence arrives so it stays authoritative."
-            )
+        lines.append(
+            "- A verification contract already exists. Update it as new evidence arrives so it stays authoritative."
+        )
     lines.extend([
         "- Prefer executable evidence: browser interactions, screenshots plus vision, console/runtime checks, command output, or a tiny verifier/player script.",
         "- For interactive claims, capture a specific before/after state delta. Name the exact score, count, label, panel state, URL, or visible text that should change, then prove that it changed.",

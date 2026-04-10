@@ -143,11 +143,44 @@ def test_long_horizon_request_gets_planning_reminder_before_work(
     assert client.call_count == 1
     first_sys = client.calls[0]["messages"][0]
     assert first_sys["role"] == "system"
-    assert "Planning Reminder" in first_sys["content"]
-    assert "call `task` with 3-6 coarse steps" in first_sys["content"]
+    assert "Planning Reminder" not in first_sys["content"]
+    runtime_tail = client.calls[0]["messages"][-1]
+    assert runtime_tail["role"] == "user"
+    assert "[internal harness runtime context]" in runtime_tail["content"]
+    assert "Planning Reminder" in runtime_tail["content"]
+    assert "call `task` with 3-6 coarse steps" in runtime_tail["content"]
 
     events = _trace_events(temp_config_dir)
     assert any(event["type"] == "task_adoption_nudge" for event in events)
+
+
+def test_runtime_nudges_change_tail_without_changing_stable_system_hash(
+    temp_config_dir: Path,
+) -> None:
+    chat = SuccessorChat(
+        profile=Profile(name="agent", tools=("bash",)),
+        client=_CapturingClient([]),
+    )
+    chat.messages = []
+    chat.input_buffer = "inspect it"
+
+    baseline = chat._agent_loop.build_turn_request_envelope_preview(turn_number=2)
+    chat._task_continue_nudge = "Continue the active task before you stop."
+    nudged = chat._agent_loop.build_turn_request_envelope_preview(turn_number=2)
+
+    assert baseline.system_prompt == nudged.system_prompt
+    assert baseline.stable_system_hash == nudged.stable_system_hash
+    assert baseline.volatile_tail_applied is False
+    assert baseline.volatile_tail_hash == ""
+    assert nudged.volatile_tail_applied is True
+    assert nudged.volatile_tail_hash
+    assert nudged.request_messages[-1]["role"] == "user"
+    assert "[internal harness runtime context]" in str(
+        nudged.request_messages[-1]["content"] or ""
+    )
+    assert "Continue the active task before you stop." in str(
+        nudged.request_messages[-1]["content"] or ""
+    )
 
 
 def test_in_progress_task_triggers_single_continuation_nudge(
@@ -239,15 +272,16 @@ def test_in_progress_task_triggers_single_continuation_nudge(
     assert any(m.raw_text == "All done." for m in chat.messages if m.role == "successor")
     third_sys = client.calls[2]["messages"][0]
     assert third_sys["role"] == "system"
-    assert "Continuation Reminder" in third_sys["content"]
-    assert "implementing task ledger" in third_sys["content"]
+    assert "Continuation Reminder" not in third_sys["content"]
     third_tail = client.calls[2]["messages"][-1]
     assert third_tail["role"] == "user"
-    assert "[internal harness continuation]" in third_tail["content"]
+    assert "[internal harness runtime context]" in third_tail["content"]
+    assert "Continuation Reminder" in third_tail["content"]
+    assert "implementing task ledger" in third_tail["content"]
 
     events = _trace_events(temp_config_dir)
     assert any(event["type"] == "task_continue_nudge" for event in events)
-    assert any(event["type"] == "assistant_prefill_guard_applied" for event in events)
+    assert not any(event["type"] == "assistant_prefill_guard_applied" for event in events)
 
 
 def test_reasoning_only_task_continuation_keeps_placeholder_out_of_api_history(
@@ -335,7 +369,9 @@ def test_reasoning_only_task_continuation_keeps_placeholder_out_of_api_history(
 
     assert client.call_count == 4
     third_messages = client.calls[2]["messages"]
-    assert third_messages[-1]["role"] == "tool"
+    assert third_messages[-2]["role"] == "tool"
+    assert third_messages[-1]["role"] == "user"
+    assert "[internal harness runtime context]" in third_messages[-1]["content"]
     assert not any(
         "(no answer — model produced only reasoning)" in str(message.get("content") or "")
         for message in third_messages

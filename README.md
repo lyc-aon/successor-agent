@@ -346,6 +346,15 @@ autocompactor without spending real model time. `/compact` fires the
 summarizer manually if you want to reset the window before a long
 turn.
 
+For llama.cpp specifically, the request builder is now cache-friendly
+by design. Successor keeps the system-prefix bytes stable across normal
+turns, moves volatile ledger/runtime nudges to a tail context message,
+explicitly requests prompt caching from the provider, and reserves one
+foreground slot for the parent chat when slot-aware scheduling is
+available. The same canonical outbound envelope now drives `/budget`,
+the context fill bar, and the autocompact gate, so the UI tracks the
+real request shape instead of a separate estimate path.
+
 ## What it does
 
 Successor streams chat against local or hosted models. Live preview

@@ -26,6 +26,7 @@ from successor.providers import (
     PROVIDER_REGISTRY,
     make_provider,
 )
+from successor.providers import llama as llama_module
 
 
 # ─── Protocol conformance ───
@@ -167,6 +168,46 @@ def test_factory_drops_unknown_keys() -> None:
     })
     # Construction succeeded; the unknown keys were silently ignored.
     assert provider.model == "local"
+
+
+def test_llamacpp_stream_chat_enables_prompt_cache_by_default(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeChatStream:
+        def __init__(self, *, url, body, timeout, connect_timeout) -> None:
+            captured["url"] = url
+            captured["body"] = body
+            captured["timeout"] = timeout
+            captured["connect_timeout"] = connect_timeout
+
+    monkeypatch.setattr(llama_module, "ChatStream", _FakeChatStream)
+
+    client = LlamaCppClient(base_url="http://localhost:8080", model="local")
+    client.stream_chat(messages=[{"role": "user", "content": "hello"}])
+
+    body = captured["body"]
+    assert isinstance(body, dict)
+    assert body["cache_prompt"] is True
+    assert "id_slot" not in body
+
+
+def test_llamacpp_stream_chat_includes_preferred_slot_id(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeChatStream:
+        def __init__(self, *, url, body, timeout, connect_timeout) -> None:
+            captured["body"] = body
+
+    monkeypatch.setattr(llama_module, "ChatStream", _FakeChatStream)
+
+    client = LlamaCppClient(base_url="http://localhost:8080", model="local")
+    client.preferred_slot_id = 2
+    client.stream_chat(messages=[{"role": "user", "content": "hello"}])
+
+    body = captured["body"]
+    assert isinstance(body, dict)
+    assert body["cache_prompt"] is True
+    assert body["id_slot"] == 2
 
 
 # ─── Error paths ───

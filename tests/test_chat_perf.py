@@ -103,27 +103,34 @@ def test_huge_log_does_not_collapse(temp_config_dir: Path) -> None:
 
 
 def test_total_tokens_cache_hits_on_unchanged_messages(temp_config_dir: Path) -> None:
-    """Calling _total_tokens twice with no mutation should hit cache."""
+    """Calling _total_tokens twice with no mutation should hit the
+    cached request-usage snapshot."""
     chat = _make_chat_with_n_messages(100)
     n1 = chat._total_tokens()
-    # Mark it stale-only-by-id by reassigning the SAME list (id stays)
-    # — but no, we want to verify the cache hit. Read it twice.
+    snapshot_1 = chat._cached_context_usage_snapshot
     n2 = chat._total_tokens()
+    snapshot_2 = chat._cached_context_usage_snapshot
     assert n1 == n2
-    # The cached_total_tokens slot should be set
-    assert chat._cached_total_tokens is not None
-    assert chat._cached_total_tokens_key[1] == 100  # len=100
+    assert snapshot_1 is not None
+    assert snapshot_1 is snapshot_2
+    assert chat._cached_context_usage_key is not None
+    assert chat._cached_context_usage_key[1] == 100  # len=100
 
 
 def test_total_tokens_cache_invalidates_on_append(temp_config_dir: Path) -> None:
-    """Appending a message should auto-invalidate via len change."""
+    """Appending a message should invalidate the cached usage snapshot."""
     chat = _make_chat_with_n_messages(50)
     n1 = chat._total_tokens()
+    snapshot_1 = chat._cached_context_usage_snapshot
     new_msg = _Message("user", "new content here")
     new_msg._token_count = 10
     chat.messages.append(new_msg)
     n2 = chat._total_tokens()
-    assert n2 == n1 + 10
+    assert n2 > n1
+    assert chat._cached_context_usage_snapshot is not None
+    assert chat._cached_context_usage_snapshot is not snapshot_1
+    assert chat._cached_context_usage_key is not None
+    assert chat._cached_context_usage_key[1] == 51
 
 
 def test_total_tokens_cache_invalidates_on_replacement(temp_config_dir: Path) -> None:
@@ -147,18 +154,21 @@ def test_total_tokens_cache_invalidates_on_replacement(temp_config_dir: Path) ->
     assert n2 >= 999
 
 
-def test_per_message_token_count_cached_on_first_access(temp_config_dir: Path) -> None:
-    """The first read populates _token_count, subsequent reads hit it."""
+def test_usage_snapshot_cache_invalidates_on_same_len_replacement(
+    temp_config_dir: Path,
+) -> None:
+    """Replacing the message list with a same-length list must still
+    invalidate the cached preview because the request body changed."""
     chat = SuccessorChat()
     chat._cached_token_counter = TokenCounter()  # heuristic only
-    msg = _Message("user", "hello world this is a test")
-    assert msg._token_count is None
-    n1 = chat._token_count_for_message(msg)
-    assert msg._token_count is not None
-    assert msg._token_count == n1
-    # Second call returns the cached value (verified via mock counter)
-    n2 = chat._token_count_for_message(msg)
-    assert n2 == n1
+    chat.messages = [_Message("user", "first body")]
+    n1 = chat._total_tokens()
+    snapshot_1 = chat._cached_context_usage_snapshot
+    chat.messages = [_Message("user", "second body with different content")]
+    n2 = chat._total_tokens()
+    assert n2 != n1
+    assert chat._cached_context_usage_snapshot is not None
+    assert chat._cached_context_usage_snapshot is not snapshot_1
 
 
 def test_token_counter_default_cache_size_holds_large_log(temp_config_dir: Path) -> None:
