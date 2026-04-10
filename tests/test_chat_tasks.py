@@ -111,6 +111,45 @@ def test_task_tool_is_enabled_for_agentic_turns(temp_config_dir: Path) -> None:
     assert names == ["bash", "task", "verify", "runbook"]
 
 
+def test_long_horizon_request_gets_planning_reminder_before_work(
+    temp_config_dir: Path,
+) -> None:
+    client = _CapturingClient([
+        _StaticStream([
+            ContentChunk(text="Starting with a plan."),
+            StreamEnded(
+                finish_reason="stop",
+                usage=None,
+                timings=None,
+                full_reasoning="",
+                full_content="Starting with a plan.",
+                tool_calls=(),
+            ),
+        ]),
+    ])
+    chat = SuccessorChat(
+        profile=Profile(name="agent", tools=("bash",)),
+        client=client,
+    )
+
+    chat.input_buffer = (
+        "Build a browser bullet-hell typing game, verify the runtime "
+        "honestly, iterate for several turns, and record the session."
+    )
+    chat._submit()
+    _pump_until_idle(chat)
+    chat._trace.close()
+
+    assert client.call_count == 1
+    first_sys = client.calls[0]["messages"][0]
+    assert first_sys["role"] == "system"
+    assert "Planning Reminder" in first_sys["content"]
+    assert "call `task` with 3-6 coarse steps" in first_sys["content"]
+
+    events = _trace_events(temp_config_dir)
+    assert any(event["type"] == "task_adoption_nudge" for event in events)
+
+
 def test_in_progress_task_triggers_single_continuation_nudge(
     temp_config_dir: Path,
 ) -> None:

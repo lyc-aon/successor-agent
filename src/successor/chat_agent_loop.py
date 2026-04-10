@@ -33,6 +33,7 @@ from .skills import (
     build_skill_hint_section,
 )
 from .subagents.cards import SubagentToolCard
+from .task_adoption import maybe_build_task_adoption_nudge
 from .tasks import (
     build_task_continue_nudge,
     build_task_execution_guidance,
@@ -635,6 +636,7 @@ class ChatAgentLoop:
         self._append(self._message("user", text))
         self._host._scroll_to_bottom()
         self._host._agent_turn = 0
+        self._host._task_adoption_last_kind = ""
         self._host._task_continue_nudged_this_turn = False
         self._host._task_continue_nudge = None
         self._host._browser_verification_active = False
@@ -684,6 +686,13 @@ class ChatAgentLoop:
         enabled_skills = self._host._enabled_skills_for_turn(enabled_tools)
         latest_user_text = self._host._latest_real_user_text()
         active_task_text = self._host._browser_verification_context_text()
+        task_adoption_decision = maybe_build_task_adoption_nudge(
+            latest_user_text=latest_user_text,
+            active_task_text=active_task_text,
+            ledger=self._host._task_ledger,
+            runbook=self._host._runbook,
+            messages=self._host.messages,
+        )
         adoption_decision = maybe_build_verification_adoption_nudge(
             latest_user_text=latest_user_text,
             active_task_text=active_task_text,
@@ -795,6 +804,28 @@ class ChatAgentLoop:
                 sys_prompt = f"{sys_prompt}\n\n{verification_section}"
             if runbook_section:
                 sys_prompt = f"{sys_prompt}\n\n{runbook_section}"
+            if task_adoption_decision.should_nudge and any(
+                name in enabled_tools
+                for name in ("task", "runbook", "verify")
+            ):
+                if task_adoption_decision.kind != self._host._task_adoption_last_kind:
+                    self._host._trace_event(
+                        "task_adoption_nudge",
+                        turn=self._host._agent_turn,
+                        kind=task_adoption_decision.kind,
+                        long_horizon=task_adoption_decision.long_horizon,
+                        stateful_runtime=task_adoption_decision.stateful_runtime,
+                        recommend_runbook=task_adoption_decision.recommend_runbook,
+                        browser_actions=task_adoption_decision.activity.browser_actions,
+                        mutation_actions=task_adoption_decision.activity.mutation_actions,
+                        verify_updates=task_adoption_decision.activity.verify_updates,
+                    )
+                    self._host._task_adoption_last_kind = task_adoption_decision.kind
+                sys_prompt = (
+                    f"{sys_prompt}\n\n"
+                    f"## Planning Reminder\n\n"
+                    f"{task_adoption_decision.text}"
+                )
             capabilities = self._host._detect_client_runtime_capabilities()
             if bool(getattr(capabilities, "supports_parallel_tool_calls", False)):
                 sys_prompt = (

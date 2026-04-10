@@ -160,6 +160,24 @@ Use bash for shell and system work: builds, tests, package managers,
 git, process inspection, servers, and one-off system commands.
 Prefer the native `read_file`, `write_file`, and `edit_file` tools
 for normal file IO.
+
+When you need a local dev server, prefer a free high port. Do not
+assume `8080`, and do not kill an unknown process just because it is
+holding the port you wanted. If a preferred port is busy, pick another
+free port first. Never reclaim the active provider endpoint unless the
+user explicitly told you to replace that service.
+"""
+
+BASH_MODEL_GUIDANCE = """\
+## Using bash
+
+Use bash for shell and system work, not as the default path for file IO.
+
+- Prefer `read_file` over `cat`/`sed`/`head` for source inspection when file tools are enabled.
+- Prefer `edit_file` and `write_file` over heredocs, `echo > file`, or ad hoc shell rewriting for normal source changes.
+- Before starting a local server, choose a free port instead of assuming `8080`.
+- If the port you wanted is occupied, pick another free port instead of killing the current owner.
+- Only stop an existing process when you have positively identified it as your own stale child, or the user explicitly asked you to replace that service.
 """
 
 _BASH_TOOL_SCHEMA: dict[str, Any] = {
@@ -513,6 +531,10 @@ Use `task` to keep a compact session-local ledger authoritative.
   bookkeeping for every individual file or click.
 - Keep the list short and concrete; do not dump a full essay into it.
 - Keep exactly one task `in_progress` while you are actively working.
+- For long scoped work, create the ledger before the first big write,
+  server-management step, browser loop, or other substantive mutation.
+- Do not jump straight into a large `write_file` payload, a long bash
+  script, or repeated browser actions before the ledger exists.
 - Update the ledger when you switch focus, complete work, or hand
   control back.
 - Do not leave a task `in_progress` when you are done or waiting on
@@ -637,6 +659,8 @@ RUNBOOK_MODEL_GUIDANCE = """\
 Use `runbook` to make long iterative runs explicit.
 
 - Create it early for work that will involve multiple edit -> run -> verify loops.
+- If you already expect repeated experiments, set the runbook up before
+  the first major attempt instead of after several loose retries.
 - Capture or refresh the baseline before making major comparisons.
 - Keep one active hypothesis at a time.
 - Reuse the evaluator bundle instead of inventing a new verification plan every turn.
@@ -1346,6 +1370,7 @@ AVAILABLE_TOOLS: Mapping[str, ToolDescriptor] = {
         default_enabled=True,
         schema=_BASH_TOOL_SCHEMA,
         system_prompt_doc=BASH_DOC,
+        model_guidance=BASH_MODEL_GUIDANCE,
     ),
     "task": ToolDescriptor(
         name="task",

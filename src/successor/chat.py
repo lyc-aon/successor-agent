@@ -1460,6 +1460,7 @@ class SuccessorChat(App):
         self._verification_ledger = VerificationLedger()
         self._runbook = SessionRunbook()
         self._runbook_attempt_count: int = 0
+        self._task_adoption_last_kind: str = ""
         self._task_continue_nudged_this_turn: bool = False
         self._task_continue_nudge: str | None = None
         self._browser_verification_active: bool = False

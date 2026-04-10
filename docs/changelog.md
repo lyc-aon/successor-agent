@@ -11,6 +11,87 @@ unit on top of phase 0.
 
 ---
 
+## v0.1.31, task-adoption + reserved-port guard release (2026-04-10)
+
+This release hardens the agent loop around two concrete local-model
+failure modes:
+
+- broad, stateful requests that should start with a task ledger but
+  instead jump straight into file writes
+- preview-app serving loops that accidentally kill the live local model
+  endpoint while trying to reclaim a familiar port like `8080`
+
+The goal is not fewer turns. The goal is a more reliable default path:
+plan before mutating, verify before stopping, and choose another free
+port before you shoot your own runtime in the head.
+
+### What landed
+
+- `src/successor/task_adoption.py`
+  - new long-horizon task-adoption classifier for broad, multi-step,
+    stateful, browser-heavy, and supervised requests
+  - emits a bounded planning reminder before the first substantive
+    mutation/process-management/browser loop when no session task ledger
+    exists yet
+- `src/successor/chat_agent_loop.py`
+  - injects the new task-adoption reminder into the system prompt
+  - tracks deduped `task_adoption_nudge` events in traces
+- `src/successor/chat.py`
+  - adds session-local state so task-adoption reminders stay bounded
+    instead of repeating every turn
+- `src/successor/process_guardrails.py`
+  - new helper layer that recognizes obvious port-reclaim kill patterns
+    like `lsof ... | xargs kill`, `kill $(lsof -ti:PORT)`, and
+    `fuser -k PORT/tcp`
+  - derives reserved local ports from the active provider URL
+- `src/successor/chat_tool_runtime.py`
+  - refuses reserved-port reclaim commands before bash execution
+  - returns a concrete hint telling the model to pick another free port
+    instead of reclaiming the active local provider endpoint
+- `src/successor/tools_registry.py`
+  - strengthens bash guidance so file IO stays on native file tools
+  - now explicitly tells the model not to assume `8080`, not to kill an
+    unknown process just to reclaim a port, and not to reclaim the
+    active provider endpoint unless the user explicitly asked
+- `src/successor/tasks.py`
+  - strengthens task guidance so big writes, process management, and
+    verification loops are expected to adopt the ledger first
+- `src/successor/web/verification.py`
+  - browser-verification guidance now prefers choosing another free port
+    before cleanup when the first port is occupied
+- docs and tests
+  - updated `README.md`
+  - updated `docs/file-tools.md`
+  - added targeted tests for task adoption and reserved-port refusal
+
+### Release verification
+
+- lint:
+  - `ruff check src/successor/tools_registry.py src/successor/tasks.py src/successor/task_adoption.py src/successor/web/verification.py src/successor/chat.py src/successor/chat_agent_loop.py src/successor/chat_tool_runtime.py tests/test_process_guardrails.py tests/test_task_adoption.py tests/test_chat_reserved_ports.py tests/test_chat_tasks.py tests/test_tasks.py`
+- targeted tests:
+  - `PYTHONPATH=src pytest tests/test_process_guardrails.py tests/test_task_adoption.py tests/test_tasks.py tests/test_chat_tasks.py tests/test_chat_reserved_ports.py tests/test_chat_verification.py tests/test_chat_runbook.py tests/test_chat_bash.py`
+  - `66 passed in 1.60s`
+- live supervised E2E:
+  - workspace:
+    - `~/.local/share/successor/e2e/supervised-ledger-port-guard-run/`
+  - trace:
+    - `~/.config/successor/logs/20260410-121402-p668167.jsonl`
+  - screenshots:
+    - `~/.local/share/successor/e2e/supervised-ledger-port-guard-run/screenshot-initial.png`
+    - `~/.local/share/successor/e2e/supervised-ledger-port-guard-run/screenshot-debug.png`
+  - observed behavior:
+    - model adopted `task` before the first file mutation
+    - model used native `write_file` for all authored files
+    - model served the app on `8083` instead of touching the provider on `8080`
+    - verification contract finished `4/4 passed`
+  - observed tool counts:
+    - `task = 5`
+    - `verify = 5`
+    - `write_file = 3`
+    - `bash = 3`
+    - `browser = 6`
+    - `reserved-port refusals = 0`
+
 ## v0.1.30, verification release: repo-aware proof paths, chat seam cleanup, and stateful-runtime nudges (2026-04-10)
 
 This release packages the 2026-04-10 verification and chat-runtime work

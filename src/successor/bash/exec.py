@@ -167,6 +167,16 @@ class MutatingCommandRefused(RefusedCommand):
     """
 
 
+class ReservedPortCommandRefused(RefusedCommand):
+    """Raised when a command tries to reclaim a reserved local port.
+
+    This is narrower than the generic dangerous-command gate. The
+    command may be perfectly reasonable in another context, but if the
+    targeted port belongs to Successor's own local runtime, auto-killing
+    it is self-sabotage rather than progress.
+    """
+
+
 # ─── Output truncation ───
 
 

@@ -108,6 +108,9 @@ def build_browser_verification_guidance(
         "- If the user already gave you a working local URL, or the page is already reachable, treat that runtime as externally managed. Do not kill, restart, or replace its server unless the user asked for that or you have proved the runtime is dead and need your own replacement."
     )
     lines.append(
+        "- If you need your own local server and the first-choice port is busy, choose another free port before considering process cleanup. Do not reclaim an occupied port just because it was convenient."
+    )
+    lines.append(
         "- If this is more than a one-step sanity check and the `verify` tool is available, create or refresh a compact verification item before or during browser work so the claim and evidence stay explicit."
     )
     if browser_verifier_available and not browser_verifier_loaded:

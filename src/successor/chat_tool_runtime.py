@@ -17,6 +17,7 @@ from .bash import (
     DangerousCommandRefused,
     MutatingCommandRefused,
     RefusedCommand,
+    ReservedPortCommandRefused,
     ToolCard,
     resolve_bash_config,
 )
@@ -37,6 +38,10 @@ from .file_tools import (
     write_file_preview_card,
 )
 from .progress import ProgressUpdate, combine_progress_updates, summarize_tool_completion
+from .process_guardrails import (
+    detect_reserved_port_reclaim,
+    reserved_local_ports_from_urls,
+)
 from .runbook import (
     RunbookError,
     build_runbook_artifact,
@@ -169,6 +174,17 @@ class ChatToolRuntime:
             },
         )
 
+    def _reserved_local_ports(self) -> dict[int, str]:
+        provider_cfg = getattr(self._host.profile, "provider", None)
+        provider_base_url = ""
+        if isinstance(provider_cfg, dict):
+            provider_base_url = str(provider_cfg.get("base_url") or "").strip()
+        client_base_url = str(getattr(self._host.client, "base_url", "") or "").strip()
+        return reserved_local_ports_from_urls([
+            ("active provider endpoint", client_base_url),
+            ("configured provider endpoint", provider_base_url),
+        ])
+
     def spawn_bash_runner(
         self,
         command: str,
@@ -186,6 +202,32 @@ class ChatToolRuntime:
         final_risk = max_risk(parsed.risk, classifier_risk)
         resolved_call_id = tool_call_id or _new_tool_call_id()
         preview = replace(parsed, risk=final_risk, tool_call_id=resolved_call_id)
+        reserved_conflict = detect_reserved_port_reclaim(
+            command,
+            self._reserved_local_ports(),
+        )
+        if reserved_conflict is not None:
+            refused = ReservedPortCommandRefused(
+                replace(preview, risk="dangerous"),
+                (
+                    "command tries to kill the process bound to reserved local "
+                    f"port {reserved_conflict.port} ({reserved_conflict.label})"
+                ),
+            )
+            self._host._trace_event(
+                "bash_refused",
+                tool_call_id=resolved_call_id,
+                risk="dangerous",
+                reason=refused.reason,
+                command=command,
+                reserved_port=reserved_conflict.port,
+                reserved_label=reserved_conflict.label,
+                reserved_pattern=reserved_conflict.pattern,
+            )
+            self._append_tool_card(refused.card)
+            hint = self.refusal_hint(refused, bash_cfg)
+            self._append_successor(f"refused: {refused.reason}. {hint}")
+            return False
 
         if final_risk == "dangerous" and not bash_cfg.allow_dangerous:
             refused = DangerousCommandRefused(
@@ -1327,6 +1369,12 @@ class ChatToolRuntime:
         exc: RefusedCommand,
         bash_cfg: BashConfig,
     ) -> str:
+        if isinstance(exc, ReservedPortCommandRefused):
+            return (
+                "that port belongs to Successor's local runtime. Pick a different "
+                "free port instead, and only stop it if the user explicitly asked "
+                "you to replace that service."
+            )
         if isinstance(exc, DangerousCommandRefused):
             if bash_cfg.allow_dangerous:
                 return "enable bash.allow_dangerous in the profile to run."

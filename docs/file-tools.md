@@ -91,6 +91,9 @@ The same native file-tool surface now appears in:
 
 File tools solve authoring. Verification is a separate control problem.
 
+- For broad or long-horizon requests, the runtime now nudges the model
+  to adopt the session task ledger before the first substantive
+  mutation, process-management step, or browser loop.
 - Successor now keeps a compact internal verification contract (`verify`)
   alongside the task ledger during tool-enabled runs.
 - Use it to track concrete claims plus the exact evidence that should
@@ -123,3 +126,7 @@ File tools solve authoring. Verification is a separate control problem.
 - Browser verification is intentionally separate from file tools. If
   you need to inspect live UI state, use `browser` plus `vision` rather
   than stretching `read_file` into a visual-debug path.
+- When serving a local preview app, prefer another free high port if
+  your first choice is occupied. Do not kill an unknown process just to
+  reclaim a port, and never reclaim the active local provider endpoint
+  unless the user explicitly told you to replace it.

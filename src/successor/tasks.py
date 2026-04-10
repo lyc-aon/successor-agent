@@ -180,8 +180,8 @@ def build_task_execution_guidance(ledger: SessionTaskLedger) -> str:
     lines = ["### Task-ledger discipline", ""]
     if not ledger.items:
         lines.extend([
-            "- For multi-step work, create or update the session task ledger early.",
-            "- If the request clearly requires 3 or more distinct actions, or includes build + verify + fix phases, a `task` call is usually the first substantive step after you understand the request.",
+            "- For multi-step work, create or update the session task ledger before the first substantive mutation, process-management step, or verification loop.",
+            "- If the request clearly requires 3 or more distinct actions, includes build + verify + fix phases, or will span several turns, a `task` call is usually the first substantive step after you understand the request.",
         ])
     else:
         active = ledger.in_progress_task()
@@ -195,6 +195,7 @@ def build_task_execution_guidance(ledger: SessionTaskLedger) -> str:
             )
     lines.extend([
         "- Mark one task `in_progress` BEFORE you begin substantive work, and keep at most one task `in_progress` while actively working.",
+        "- Do not jump straight into a large `write_file` payload, multi-command bash sequence, or repeated browser flow before the ledger exists.",
         "- If you already know the next substantive tool action, update the ledger and make that tool call in the SAME response.",
         "- Mark tasks completed immediately after finishing them; do not batch completions later.",
         "- Skip the task ledger only for single trivial tasks or purely conversational replies.",

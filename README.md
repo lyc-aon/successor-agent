@@ -90,7 +90,10 @@ auto-exposes two internal control tools when tools are enabled:
 `task` for the session task ledger and `verify` for a compact
 evidence-bearing verification contract. Long iterative runs now also
 get `runbook`, an internal experiment contract for objective,
-baseline, evaluator, and attempt decisions.
+baseline, evaluator, and attempt decisions. For broad, stateful, or
+multi-step requests, the runtime now nudges the model to adopt the
+task ledger before the first substantive mutation, process-management
+step, or browser loop instead of rawdogging straight into writes.
 
 If you skip the wizard and run `successor chat` directly on a fresh install, you get the
 bundled default profile pointed at `http://localhost:8080`. The default
@@ -529,6 +532,13 @@ driver or autoplay harness when manual play is weak, and pair it with an
 observable debug surface such as a HUD value, runtime log, or state
 accessor. The goal is not fewer turns for their own sake. The goal is
 fewer fake finishes and stronger runtime proof.
+
+The same discipline now applies to serving local apps during those runs.
+The bash guidance explicitly tells the model to pick another free high
+port instead of blindly reclaiming `8080`, and the runtime hard-refuses
+obvious kill/reclaim commands when they target the active local provider
+endpoint. That keeps the model from shooting down its own llama.cpp
+server while trying to launch a preview app.
 
 For genuinely iterative runs, Successor can also keep a runbook: a
 small session-local contract for the objective, success definition,

@@ -92,8 +92,9 @@ def test_task_prompt_and_nudge_handle_empty_or_inactive_ledgers() -> None:
     empty_prompt = build_task_prompt_section(empty)
     empty_execution = build_task_execution_guidance(empty)
     assert empty_prompt.strip().endswith("No current task ledger.")
-    assert "For multi-step work, create or update the session task ledger early." in empty_execution
+    assert "For multi-step work, create or update the session task ledger before the first substantive mutation" in empty_execution
     assert "first substantive step" in empty_execution
+    assert "large `write_file` payload" in empty_execution
     assert "SAME response" in empty_execution
     assert build_task_continue_nudge(empty) == ""
 
