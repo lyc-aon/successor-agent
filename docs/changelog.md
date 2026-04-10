@@ -11,6 +11,47 @@ unit on top of phase 0.
 
 ---
 
+## v0.1.32, llama.cpp continuation-prefill hotfix (2026-04-10)
+
+This hotfix fixes a concrete local-model failure in the agent loop:
+when Successor auto-continued after an assistant turn that contained no
+visible content or after a normal assistant reply while a task or
+verification item was still `in_progress`, the next request could be
+sent to llama.cpp with the prompt ending on `assistant`.
+
+That shape is rejected by llama.cpp thinking mode with:
+`HTTP 400: Assistant response prefill is incompatible with enable_thinking.`
+
+### What landed
+
+- `src/successor/chat_agent_loop.py`
+  - adds a transient internal user continuation prefill on outbound
+    internal re-entry turns when the API-visible history would otherwise
+    end on `assistant`
+  - keeps the chat transcript unchanged while making the provider-facing
+    prompt valid for llama.cpp thinking mode
+  - marks the visible `(no answer — model produced only reasoning)`
+    placeholder as synthetic so it no longer leaks back into model
+    history
+- tests
+  - adds regression coverage for task-ledger continuation,
+    verification-ledger continuation, and the exact reasoning-only
+    placeholder path that previously triggered the 400
+
+### Release verification
+
+- lint:
+  - `ruff check src/successor/chat_agent_loop.py tests/test_chat_tasks.py tests/test_chat_verification.py`
+- targeted tests:
+  - `PYTHONPATH=src pytest -q tests/test_chat_tasks.py tests/test_chat_verification.py`
+  - `9 passed in 0.22s`
+  - `PYTHONPATH=src pytest -q tests/test_chat_subagents.py tests/test_file_tools.py tests/test_chat_bash.py`
+  - `71 passed in 1.60s`
+- live llama.cpp verification:
+  - confirmed a raw assistant-ended prompt still returns `HTTP 400`
+  - confirmed the same prompt succeeds once the internal continuation
+    user prefill is appended
+
 ## v0.1.31, task-adoption + reserved-port guard release (2026-04-10)
 
 This release hardens the agent loop around two concrete local-model

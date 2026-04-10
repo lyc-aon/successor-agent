@@ -241,6 +241,110 @@ def test_in_progress_task_triggers_single_continuation_nudge(
     assert third_sys["role"] == "system"
     assert "Continuation Reminder" in third_sys["content"]
     assert "implementing task ledger" in third_sys["content"]
+    third_tail = client.calls[2]["messages"][-1]
+    assert third_tail["role"] == "user"
+    assert "[internal harness continuation]" in third_tail["content"]
+
+    events = _trace_events(temp_config_dir)
+    assert any(event["type"] == "task_continue_nudge" for event in events)
+    assert any(event["type"] == "assistant_prefill_guard_applied" for event in events)
+
+
+def test_reasoning_only_task_continuation_keeps_placeholder_out_of_api_history(
+    temp_config_dir: Path,
+) -> None:
+    client = _CapturingClient([
+        _StaticStream([
+            StreamEnded(
+                finish_reason="tool_calls",
+                usage=None,
+                timings=None,
+                full_reasoning="",
+                full_content="",
+                tool_calls=({
+                    "id": "task_1",
+                    "name": "task",
+                    "arguments": {
+                        "items": [
+                            {
+                                "content": "Implement task ledger",
+                                "active_form": "implementing task ledger",
+                                "status": "in_progress",
+                            }
+                        ]
+                    },
+                    "raw_arguments": '{"items":[{"content":"Implement task ledger","active_form":"implementing task ledger","status":"in_progress"}]}',
+                },),
+            ),
+        ]),
+        _StaticStream([
+            StreamEnded(
+                finish_reason="stop",
+                usage=None,
+                timings=None,
+                full_reasoning="thinking about the next change",
+                full_content="",
+                tool_calls=(),
+            ),
+        ]),
+        _StaticStream([
+            StreamEnded(
+                finish_reason="tool_calls",
+                usage=None,
+                timings=None,
+                full_reasoning="",
+                full_content="",
+                tool_calls=({
+                    "id": "task_2",
+                    "name": "task",
+                    "arguments": {
+                        "items": [
+                            {
+                                "content": "Implement task ledger",
+                                "active_form": "implementing task ledger",
+                                "status": "completed",
+                            }
+                        ]
+                    },
+                    "raw_arguments": '{"items":[{"content":"Implement task ledger","active_form":"implementing task ledger","status":"completed"}]}',
+                },),
+            ),
+        ]),
+        _StaticStream([
+            ContentChunk(text="All done."),
+            StreamEnded(
+                finish_reason="stop",
+                usage=None,
+                timings=None,
+                full_reasoning="",
+                full_content="All done.",
+                tool_calls=(),
+            ),
+        ]),
+    ])
+    chat = SuccessorChat(
+        profile=Profile(name="agent", tools=("bash",)),
+        client=client,
+    )
+    chat.messages = []
+
+    chat.input_buffer = "implement it"
+    chat._submit()
+    _pump_until_idle(chat)
+    chat._trace.close()
+
+    assert client.call_count == 4
+    third_messages = client.calls[2]["messages"]
+    assert third_messages[-1]["role"] == "tool"
+    assert not any(
+        "(no answer — model produced only reasoning)" in str(message.get("content") or "")
+        for message in third_messages
+    )
+    assert any(
+        m.raw_text == "(no answer — model produced only reasoning)"
+        for m in chat.messages
+        if m.role == "successor"
+    )
 
     events = _trace_events(temp_config_dir)
     assert any(event["type"] == "task_continue_nudge" for event in events)

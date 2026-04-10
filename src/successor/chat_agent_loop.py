@@ -53,6 +53,11 @@ from .verification_hints import build_repo_verification_guidance
 from .web.verification import build_browser_verification_guidance
 
 ToolArtifact = ToolCard | SubagentToolCard
+_INTERNAL_CONTINUATION_PREFILL = (
+    "[internal harness continuation]\n"
+    "Continue from the current conversation state and follow the latest "
+    "system reminders. This is not a new user request."
+)
 
 
 def _message_has_tool_artifact(msg: Any) -> bool:
@@ -134,6 +139,25 @@ def _find_last_user_excerpt(api_messages: list[dict[str, Any]]) -> str:
         if isinstance(content, str) and content.strip():
             return _trace_clip_text(content, limit=320)
     return ""
+
+
+def _append_internal_continuation_prefill(
+    api_messages: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], bool]:
+    """Append a transient user turn when an internal continuation would
+    otherwise end on an assistant message.
+
+    llama.cpp rejects assistant-ended prompts in thinking mode
+    ("Assistant response prefill is incompatible with enable_thinking").
+    Internal continuation turns are the main way Successor can re-enter
+    the loop without a fresh user message, so guard only that case and
+    keep the transcript itself unchanged.
+    """
+    if not api_messages or api_messages[-1].get("role") != "assistant":
+        return api_messages, False
+    guarded = list(api_messages)
+    guarded.append({"role": "user", "content": _INTERNAL_CONTINUATION_PREFILL})
+    return guarded, True
 
 
 def _trace_tool_call_summary(tc: dict[str, Any]) -> dict[str, object]:
@@ -902,14 +926,27 @@ class ChatAgentLoop:
             api_message_count=len(api_messages),
             last_user_excerpt=_find_last_user_excerpt(api_messages),
         )
+        request_messages = api_messages
+        if self._host._agent_turn > 1:
+            request_messages, applied = _append_internal_continuation_prefill(
+                api_messages
+            )
+            if applied:
+                self._host._trace_event(
+                    "assistant_prefill_guard_applied",
+                    turn=self._host._agent_turn,
+                    prior_last_role="assistant",
+                )
         try:
             if native_tool_schemas:
                 self._host._stream = self._host.client.stream_chat(
-                    messages=api_messages,
+                    messages=request_messages,
                     tools=native_tool_schemas,
                 )
             else:
-                self._host._stream = self._host.client.stream_chat(messages=api_messages)
+                self._host._stream = self._host.client.stream_chat(
+                    messages=request_messages
+                )
         except Exception as exc:
             self._host._trace_event(
                 "stream_open_failed",
@@ -1086,6 +1123,7 @@ class ChatAgentLoop:
                         self._message(
                             "successor",
                             "(no answer — model produced only reasoning)",
+                            synthetic=True,
                         )
                     )
                 self._host._last_usage = ev.usage

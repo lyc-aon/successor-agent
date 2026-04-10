@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "successor"
-version = "0.1.31"
+version = "0.1.32"
 description = "Terminal harness for local LLMs and OpenAI-compatible endpoints. Five-layer cell renderer, native file tools, stateful runtime/browser verification, recording bundles with a session reviewer, configurable autocompactor, and a live-preview setup wizard."
 readme = "README.md"
 license = { text = "Apache-2.0" }

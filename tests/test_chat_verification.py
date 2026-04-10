@@ -211,9 +211,13 @@ def test_in_progress_verification_triggers_single_continuation_nudge(
     assert third_sys["role"] == "system"
     assert "Browser Verification Reminder" in third_sys["content"]
     assert "Score increments after a correct answer" in third_sys["content"]
+    third_tail = client.calls[2]["messages"][-1]
+    assert third_tail["role"] == "user"
+    assert "[internal harness continuation]" in third_tail["content"]
 
     events = _trace_events(temp_config_dir)
     assert any(event["type"] == "verification_continue_nudge" for event in events)
+    assert any(event["type"] == "assistant_prefill_guard_applied" for event in events)
 
 
 def test_stateful_runtime_async_continuation_gets_verification_setup_nudge(
