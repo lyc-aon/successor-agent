@@ -58,6 +58,7 @@ from .config import load_chat_config, save_chat_config
 from .file_tools import (
     FileReadTracker,
     FileReadStateEntry,
+    build_file_tool_recovery_nudge,
     edit_file_preview_card,
     normalize_file_path,
     note_non_read_tool_call,
@@ -218,6 +219,7 @@ from .web import (
     vision_runtime_status,
 )
 from .web.verification import (
+    build_browser_verification_guidance,
     build_verification_nudge,
     classify_browser_verification,
 )
@@ -2007,6 +2009,8 @@ class SuccessorChat(App):
         self._browser_verification_reason: str = ""
         self._verification_continue_nudged_this_turn: bool = False
         self._verification_continue_nudge: str | None = None
+        self._file_tool_continue_nudged_this_turn: bool = False
+        self._file_tool_continue_nudge: str | None = None
         self._subagent_continue_nudged_this_turn: bool = False
         self._subagent_continue_nudge: str | None = None
         self._recent_progress_summaries: list[tuple[float, str]] = []
@@ -3385,7 +3389,7 @@ class SuccessorChat(App):
             return str(msg.raw_text or "")
         return ""
 
-    def _refresh_browser_verification_mode(self) -> None:
+    def _browser_verification_context_text(self) -> str:
         active_task = self._task_ledger.in_progress_task()
         active_task_text = active_task.active_form if active_task is not None else ""
         active_verification = self._verification_ledger.in_progress_item()
@@ -3409,6 +3413,10 @@ class SuccessorChat(App):
                 )
                 if part
             )
+        return active_task_text
+
+    def _refresh_browser_verification_mode(self) -> None:
+        active_task_text = self._browser_verification_context_text()
         active, reason = classify_browser_verification(
             latest_user_text=self._latest_real_user_text(),
             active_task_text=active_task_text,
@@ -4224,6 +4232,8 @@ class SuccessorChat(App):
         self._browser_verification_reason = ""
         self._verification_continue_nudged_this_turn = False
         self._verification_continue_nudge = None
+        self._file_tool_continue_nudged_this_turn = False
+        self._file_tool_continue_nudge = None
         self._subagent_continue_nudged_this_turn = False
         self._subagent_continue_nudge = None
         # Reset the per-turn autocompact guard so a new user message
@@ -4315,6 +4325,7 @@ class SuccessorChat(App):
         verification_section = ""
         runbook_execution_guidance = ""
         runbook_section = ""
+        browser_verification_guidance = ""
         if "task" in enabled_tools:
             task_execution_guidance = build_task_execution_guidance(self._task_ledger)
             task_section = build_task_prompt_section(self._task_ledger)
@@ -4330,6 +4341,17 @@ class SuccessorChat(App):
                 self._runbook
             )
             runbook_section = build_runbook_prompt_section(self._runbook)
+        if self._browser_verification_active and "browser" in enabled_tools:
+            browser_verification_guidance = build_browser_verification_guidance(
+                latest_user_text=self._latest_real_user_text(),
+                active_task_text=self._browser_verification_context_text(),
+                vision_available="vision" in enabled_tools,
+                browser_verifier_available=(
+                    "skill" in enabled_tools
+                    and any(skill.name == "browser-verifier" for skill in enabled_skills)
+                ),
+                browser_verifier_loaded=self._skill_already_loaded("browser-verifier"),
+            )
         if enabled_tools and (
             "bash" in enabled_tools
             or any(name in {"read_file", "write_file", "edit_file"} for name in enabled_tools)
@@ -4375,6 +4397,8 @@ class SuccessorChat(App):
                 execution_parts.append(verification_execution_guidance)
             if runbook_execution_guidance:
                 execution_parts.append(runbook_execution_guidance)
+            if browser_verification_guidance:
+                execution_parts.append(browser_verification_guidance)
             sys_prompt = (
                 f"{sys_prompt}\n\n"
                 f"## Execution discipline\n\n"
@@ -4429,6 +4453,13 @@ class SuccessorChat(App):
                 f"{self._verification_continue_nudge}"
             )
             self._verification_continue_nudge = None
+        if self._file_tool_continue_nudge:
+            sys_prompt = (
+                f"{sys_prompt}\n\n"
+                f"## File Tool Recovery Reminder\n\n"
+                f"{self._file_tool_continue_nudge}"
+            )
+            self._file_tool_continue_nudge = None
         if self._subagent_continue_nudge:
             sys_prompt = (
                 f"{sys_prompt}\n\n"
@@ -6839,6 +6870,21 @@ class SuccessorChat(App):
             stderr_excerpt=_trace_clip_text(final_card.stderr, limit=320),
             truncated=final_card.truncated,
         )
+        if tool_name in {"write_file", "edit_file"} and final_card.exit_code != 0:
+            recovery_nudge = build_file_tool_recovery_nudge(
+                tool_name,
+                final_card.stderr or final_card.output or runner.error or "",
+            )
+            if recovery_nudge and not self._file_tool_continue_nudged_this_turn:
+                self._file_tool_continue_nudged_this_turn = True
+                self._file_tool_continue_nudge = recovery_nudge
+                self._trace_event(
+                    "file_tool_recovery_nudge",
+                    turn=self._agent_turn,
+                    tool_name=tool_name,
+                    tool_call_id=runner.tool_call_id,
+                    message=recovery_nudge,
+                )
         return tool_name, final_card, metadata
 
     def _cancel_running_tools(self) -> None:

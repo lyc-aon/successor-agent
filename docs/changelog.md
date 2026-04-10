@@ -11,6 +11,56 @@ unit on top of phase 0.
 
 ---
 
+## v0.1.28, verification guidance + file-tool recovery nudges (2026-04-09)
+
+This pass hardens the live loop in two places that still caused small
+models to drift: browser-led verification turns and native file-tool
+guard failures.
+
+### Deterministic references
+
+- `/home/lycaon/dev/archive/free-code-main/src/tools/AgentTool/built-in/verificationAgent.ts`
+  - verification as a separate bounded evidence loop
+- `/home/lycaon/dev/archive/free-code-main/src/tools/FileWriteTool/prompt.ts`
+  - explicit recovery path back to dedicated file tools rather than shell
+- `/home/lycaon/dev/archive/free-code-main/src/tools/FileEditTool/prompt.ts`
+  - exact-edit posture and ambiguity handling
+
+### What landed
+
+- `src/successor/web/verification.py`
+  - added browser verification execution guidance builder
+  - detects explicitly visual tasks and escalates to screenshot +
+    vision-grounded guidance
+- `src/successor/chat.py`
+  - injects browser verification guidance into the active system prompt
+    during verification-mode turns
+  - adds one bounded continuation reminder channel for failed native
+    file-tool mutations
+- `src/successor/file_tools.py`
+  - added deterministic recovery reminders for unread, partial-read,
+    stale-read, ambiguous-match, and missing-target write/edit failures
+- docs
+  - updated `README.md`
+  - updated `CHANGELOG.md`
+  - updated `docs/file-tools.md`
+  - updated `docs/web-tools.md`
+
+### Verification
+
+- lint:
+  - `ruff check src tests`
+- focused regression slice:
+  - `PYTHONPATH=src pytest -q tests/test_file_tools.py tests/test_chat_web_tools.py`
+  - `24 passed in 0.23s`
+- full suite:
+  - `PYTHONPATH=src pytest -q`
+  - `1221 passed in 12.56s`
+- live supervised browser verification against a real local app:
+  - reproduced incomplete reader/header wiring
+  - confirmed browser-led correction path
+  - verified final library/reader/atlas URL state and visible render
+
 ## v0.1.27, higher loop ceiling + advisory turn-budget diagnostics (2026-04-09)
 
 This pass raises the default autonomous loop ceiling for real long-form

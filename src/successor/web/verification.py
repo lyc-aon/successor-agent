@@ -45,6 +45,23 @@ _VERIFICATION_KEYWORDS = (
     "test like a human",
 )
 
+_VISUAL_VERIFICATION_KEYWORDS = (
+    "visual",
+    "layout",
+    "spacing",
+    "clipping",
+    "overflow",
+    "hierarchy",
+    "contrast",
+    "design",
+    "polish",
+    "animation",
+    "look",
+    "looks",
+    "human",
+    "screenshot",
+)
+
 
 def classify_browser_verification(
     *,
@@ -66,6 +83,51 @@ def classify_browser_verification(
         if any(keyword in lowered for keyword in _VERIFICATION_KEYWORDS):
             return True, source
     return False, ""
+
+
+def build_browser_verification_guidance(
+    *,
+    latest_user_text: str,
+    active_task_text: str = "",
+    vision_available: bool,
+    browser_verifier_available: bool,
+    browser_verifier_loaded: bool,
+) -> str:
+    """Return a compact execution block for browser-led verification work."""
+    visual = _looks_visual(latest_user_text, active_task_text)
+    lines = ["### Browser verification mode", ""]
+    lines.append(
+        "- Treat the browser as evidence gathering, not exploration. Open once, inspect if unsure, take the smallest proving action, then read the resulting page state before deciding the next step."
+    )
+    if browser_verifier_available and not browser_verifier_loaded:
+        lines.append(
+            "- Before the first browser action, load the `browser-verifier` skill so the verification loop stays selector-driven and bounded."
+        )
+    lines.append(
+        "- For interactive claims, prove the behavior with real browser evidence. Do not mark a claim passed from source inspection, total DOM counts, or intention alone."
+    )
+    lines.append(
+        "- When checking filters, search, or visibility, verify what is visibly rendered after the interaction. Prefer one decisive interaction plus `extract_text` or an explicit page-state check over broad exploratory clicking."
+    )
+    lines.append(
+        "- After steps that may trigger runtime issues, check `console_errors` before concluding the flow is healthy."
+    )
+    if visual and vision_available:
+        lines.append(
+            "- This task is explicitly visual. Capture a `screenshot` and use `vision` before passing layout, spacing, hierarchy, clipping, or design-polish claims."
+        )
+    elif visual:
+        lines.append(
+            "- This task is explicitly visual. Capture a `screenshot` and ground your conclusion in the visible page result before passing visual claims."
+        )
+    elif vision_available:
+        lines.append(
+            "- If any claim depends on what is visibly on screen rather than DOM text, capture a `screenshot` and use `vision` before passing it."
+        )
+    lines.append(
+        "- Stop once the requested behavior is verified or falsified. Do not tour the whole app after the decisive evidence already exists."
+    )
+    return "\n".join(lines)
 
 
 @dataclass(slots=True)
@@ -278,3 +340,13 @@ def _append_note(existing: str, note: str) -> str:
     if not base:
         return note
     return f"{base}\n\n{note}"
+
+
+def _looks_visual(*texts: str) -> bool:
+    for text in texts:
+        lowered = " ".join(str(text or "").lower().split())
+        if not lowered:
+            continue
+        if any(keyword in lowered for keyword in _VISUAL_VERIFICATION_KEYWORDS):
+            return True
+    return False

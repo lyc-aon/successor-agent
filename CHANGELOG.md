@@ -3,6 +3,51 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
+## v0.1.28 — 2026-04-09
+
+This release tightens two failure-prone parts of the live loop without
+changing the overall product surface: browser-led verification turns now
+get more explicit execution guidance, and native file-tool guard
+failures now tell the model how to recover with native tools instead of
+drifting back to bash.
+
+### What changed
+
+- browser verification mode now injects a compact runtime guidance block
+  into the active system prompt when a turn is clearly about browser-led
+  verification
+- that guidance tells the model to:
+  - treat the browser as evidence gathering rather than exploration
+  - take the smallest proving action before deciding the next step
+  - check `console_errors` after runtime-sensitive interactions
+  - use `screenshot` plus `vision` before passing explicitly visual
+    claims
+  - load the built-in `browser-verifier` skill first when it is
+    available but not already loaded
+- native `write_file` / `edit_file` guard failures now emit one
+  deterministic recovery reminder in the next turn for the common
+  refusal cases:
+  - file not fully read
+  - file only partially read
+  - file changed since last read
+  - ambiguous `old_string`
+  - missing `old_string`
+- refreshed README plus the file-tool and web-tool docs so the public
+  docs match the current loop hardening behavior
+
+### Verification
+
+- `ruff check src tests`
+- focused regression slice:
+  `24 passed in 0.23s`
+- full `PYTHONPATH=src pytest -q` suite:
+  `1221 passed in 12.56s`
+- manual browser verification against a real local app run confirming:
+  - visual verification guidance led to bounded browser proving steps
+  - reader, atlas, and library navigation stayed correct
+  - stale selected-skill URL state no longer leaked after leaving
+    reader-shaped flows
+
 ## v0.1.27 — 2026-04-09
 
 This release turns Successor's long-run control plane into something

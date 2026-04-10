@@ -381,6 +381,67 @@ def test_browser_verification_intervention_becomes_continuation_nudge(
     assert any(event["type"] == "progress_summary_emitted" for event in events)
 
 
+def test_browser_verification_mode_injects_visual_guidance(
+    monkeypatch,
+    temp_config_dir: Path,
+) -> None:
+    monkeypatch.setattr(
+        "successor.chat.browser_runtime_status",
+        lambda *_args, **_kwargs: BrowserRuntimeStatus(
+            package_available=True,
+            python_executable="/usr/bin/python3",
+            using_external_runtime=False,
+            channel="chrome",
+            executable_path="",
+            user_data_dir="/tmp/browser",
+        ),
+    )
+    monkeypatch.setattr(
+        "successor.chat.vision_runtime_status",
+        lambda *_args, **_kwargs: VisionRuntimeStatus(
+            tool_available=True,
+            mode="endpoint",
+            provider_type="openai_compat",
+            base_url="http://127.0.0.1:8090",
+            model="vision-local",
+            reason="ready",
+        ),
+    )
+    client = _CapturingClient([
+        _StaticStream([
+            StreamEnded(
+                finish_reason="stop",
+                usage=None,
+                timings=None,
+                full_reasoning="",
+                full_content="Done.",
+                tool_calls=(),
+            ),
+        ]),
+    ])
+    chat = SuccessorChat(
+        profile=Profile(
+            name="browser-chat",
+            tools=("browser", "vision"),
+            skills=("browser-verifier", "vision-inspector"),
+        ),
+        client=client,
+    )
+    chat.messages = []
+
+    chat.input_buffer = "inspect it like a human and verify the visual layout"
+    chat._submit()
+    _pump_until_idle(chat)
+
+    assert len(client.calls) == 1
+    sys_msg = client.calls[0]["messages"][0]
+    assert sys_msg["role"] == "system"
+    assert "Browser verification mode" in sys_msg["content"]
+    assert "browser-verifier" in sys_msg["content"]
+    assert "screenshot" in sys_msg["content"]
+    assert "vision" in sys_msg["content"]
+
+
 def test_native_vision_tool_call_dispatches(monkeypatch, temp_config_dir: Path) -> None:
     monkeypatch.setattr(
         "successor.chat.vision_runtime_status",

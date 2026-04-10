@@ -530,6 +530,41 @@ def note_non_read_tool_call(tracker: FileReadTracker | None) -> None:
     tracker.consecutive = 0
 
 
+def build_file_tool_recovery_nudge(tool_name: str, message: str) -> str:
+    """Return a deterministic recovery reminder for common file-tool guards."""
+    lowered = " ".join(str(message or "").lower().split())
+    if not lowered:
+        return ""
+    if "file has not been read yet" in lowered:
+        return (
+            f"`{tool_name}` was refused because the file has not been fully read in this chat yet. "
+            "Recover by calling `read_file` on the exact file path first, then retry the native file tool. "
+            "Do not fall back to bash file mutation for this."
+        )
+    if "file was only read partially" in lowered:
+        return (
+            f"`{tool_name}` was refused because the file was only read partially. "
+            "Recover by calling `read_file` on the FULL file with no offset/limit, then retry the native file tool. "
+            "Do not use `sed`, `awk`, heredocs, or shell redirection to bypass the read-before-write guard."
+        )
+    if "modified since it was read" in lowered:
+        return (
+            f"`{tool_name}` was refused because the file changed after the last full read. "
+            "Recover by calling `read_file` again on the current file contents, then re-apply the change with the native file tool."
+        )
+    if "matched" in lowered and "locations" in lowered:
+        return (
+            f"`{tool_name}` found an ambiguous target. "
+            "Recover by reading the current file, then retry with a unique `old_string` or set `replace_all=true` only if replacing every occurrence is truly intended."
+        )
+    if "old_string was not found" in lowered:
+        return (
+            f"`{tool_name}` could not find the requested target in the current file. "
+            "Recover by reading the latest file contents and basing the next exact edit on text that actually exists."
+        )
+    return ""
+
+
 def _format_read_output(
     path: str,
     lines: list[str],

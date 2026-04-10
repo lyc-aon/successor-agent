@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from successor.file_tools import (
     FileReadTracker,
     FileReadStateEntry,
     FileToolError,
+    build_file_tool_recovery_nudge,
     edit_file_preview_card,
     note_non_read_tool_call,
     read_file_preview_card,
@@ -21,6 +23,7 @@ from successor.file_tools import (
     write_file_preview_card,
 )
 from successor.profiles import Profile
+from successor.providers.llama import StreamEnded
 
 
 @dataclass
@@ -30,6 +33,38 @@ class _MockClient:
 
     def stream_chat(self, messages, *, max_tokens=None, temperature=None, timeout=None, extra=None, tools=None):  # noqa: ARG002
         raise AssertionError("stream_chat should not be called in this test")
+
+
+class _StaticStream:
+    def __init__(self, events: list[object]) -> None:
+        self._events = list(events)
+
+    def drain(self) -> list[object]:
+        if not self._events:
+            return []
+        events = list(self._events)
+        self._events.clear()
+        return events
+
+    def close(self) -> None:
+        return
+
+
+class _CapturingClient:
+    def __init__(self, streams: list[_StaticStream]) -> None:
+        self._streams = list(streams)
+        self.calls: list[dict[str, object]] = []
+        self.base_url = "http://mock"
+        self.model = "mock-model"
+
+    def stream_chat(self, messages, *, max_tokens=None, temperature=None, timeout=None, extra=None, tools=None):  # noqa: ARG002
+        self.calls.append({
+            "messages": list(messages),
+            "tools": tools,
+        })
+        if not self._streams:
+            raise RuntimeError("capturing client exhausted")
+        return self._streams.pop(0)
 
 
 def _pump_until_idle(chat: SuccessorChat, *, timeout_s: float = 2.0) -> None:
@@ -372,3 +407,85 @@ def test_native_write_file_dispatch_roundtrips_into_api_history(
     assert assistant["tool_calls"][0]["id"] == "call_write_1"
     assert assistant["tool_calls"][0]["function"]["name"] == "write_file"
     assert tool_msg["tool_call_id"] == "call_write_1"
+
+
+def test_build_file_tool_recovery_nudge_for_partial_read() -> None:
+    text = build_file_tool_recovery_nudge(
+        "edit_file",
+        "File was only read partially. Read the full file before writing to it.",
+    )
+    assert "FULL file" in text
+    assert "Do not use `sed`" in text
+
+
+def test_file_tool_guard_failure_becomes_continuation_nudge(
+    temp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "partial.txt"
+    target.write_text("alpha\nbeta\n", encoding="utf-8")
+    client = _CapturingClient([
+        _StaticStream([
+            StreamEnded(
+                finish_reason="tool_calls",
+                usage=None,
+                timings=None,
+                full_reasoning="",
+                full_content="",
+                tool_calls=({
+                    "id": "call_edit_partial",
+                    "name": "edit_file",
+                    "arguments": {
+                        "file_path": str(target),
+                        "old_string": "alpha",
+                        "new_string": "ALPHA",
+                    },
+                    "raw_arguments": json.dumps({
+                        "file_path": str(target),
+                        "old_string": "alpha",
+                        "new_string": "ALPHA",
+                    }),
+                },),
+            ),
+        ]),
+        _StaticStream([
+            StreamEnded(
+                finish_reason="stop",
+                usage=None,
+                timings=None,
+                full_reasoning="",
+                full_content="Done.",
+                tool_calls=(),
+            ),
+        ]),
+    ])
+    chat = SuccessorChat(
+        profile=Profile(name="files", tools=("read_file", "edit_file")),
+        client=client,
+    )
+    chat.messages = []
+    chat._file_read_state[str(target)] = FileReadStateEntry(
+        path=str(target),
+        content="alpha\n",
+        timestamp=time.time(),
+        mtime_ns=target.stat().st_mtime_ns,
+        partial=True,
+    )
+
+    chat.input_buffer = "update the file"
+    chat._submit()
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        chat._pump_stream()
+        chat._pump_running_tools()
+        if chat._stream is None and not chat._running_tools:
+            break
+        time.sleep(0.02)
+    else:
+        raise AssertionError("chat did not settle")
+
+    assert len(client.calls) == 2
+    second_sys = client.calls[1]["messages"][0]
+    assert second_sys["role"] == "system"
+    assert "File Tool Recovery Reminder" in second_sys["content"]
+    assert "Do not use `sed`" in second_sys["content"]

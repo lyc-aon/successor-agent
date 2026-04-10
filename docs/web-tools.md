@@ -138,6 +138,28 @@ Successor keeps one persistent browser session per profile. That means
 login state, cookies, and page context survive across multiple tool
 calls in the same chat.
 
+### Browser verification mode
+
+When a turn is clearly about browser-led QA or "test it like a human"
+verification, Successor adds a compact execution block to the active
+system prompt.
+
+That guidance pushes the model toward a tighter proving loop:
+
+- open the page once, then inspect or take the smallest proving action
+  instead of touring the whole app
+- ground interactive claims in real browser evidence rather than source
+  inspection or intent
+- check `console_errors` after steps that might trigger runtime issues
+- stop once the requested behavior is actually proven or falsified
+
+If the task is explicitly visual and the profile has `vision`
+available, the guidance also tells the model to use `screenshot` plus
+`vision` before passing layout, clipping, spacing, contrast, or design
+claims. If the built-in `browser-verifier` skill is available but not
+yet loaded, the guidance nudges the model to load it before the first
+browser action.
+
 ## Vision
 
 `vision` is the visibly grounded inspection path. Use it for layout,
@@ -210,6 +232,9 @@ Run `successor doctor` first if a profile is not surfacing `holonet`,
 - Use `vision` when the question is visibly grounded. For local UI
   verification, the normal path is `browser open`, `browser screenshot`,
   then `vision`.
+- For browser-heavy verification turns, keep the proving loop bounded:
+  one decisive interaction, visible evidence, console check if needed,
+  then stop.
 - Let the built-in skills handle the routing details when they are
   available. They keep the base prompt smaller and teach the model when
   to prefer `holonet` over `browser`, and when to bring in `vision`.

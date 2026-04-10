@@ -32,6 +32,29 @@ redirection.
 - Re-reading the same unchanged file with the same full-range request returns a short unchanged stub instead of re-sending the entire file.
 - Repeating the same exact `read_file` request too many times in a row without any intervening non-read tool call first warns, then hard-fails to break read loops.
 
+## Guard Recovery
+
+When a native write is refused, Successor now tries to recover inside
+the same authoring path instead of silently letting the model drift back
+to bash mutation.
+
+- failed `write_file` / `edit_file` calls can emit one deterministic
+  recovery reminder in the next turn's system prompt
+- the reminder is only for common guard failures, not arbitrary errors
+- current recovery cases:
+  - file has not been fully read in this chat yet
+  - file was only read partially
+  - file changed since the last full read
+  - `edit_file` target is ambiguous
+  - `edit_file` target text is not present anymore
+
+Recovery posture:
+
+- re-read the exact file with `read_file`
+- use a full-file read when the refusal says the earlier read was partial
+- retry `write_file` / `edit_file` with the native tool
+- do not bypass the guard with heredocs, `sed`, `awk`, inline Python, or shell redirection
+
 ## User-Visible Surfaces
 
 The same native file-tool surface now appears in:

@@ -218,6 +218,21 @@ structured continuation reminders instead of more blind retrying. Those
 controller decisions are recorded in the session trace and surfaced in
 the reviewer.
 
+Verification mode now also injects tighter browser execution guidance
+when the task is explicitly about visible behavior. The runtime tells
+the model to keep browser work bounded, check `console_errors` after
+runtime-sensitive steps, and use `screenshot` plus `vision` before
+passing layout, spacing, clipping, or other visual claims. If the
+profile has the built-in `browser-verifier` skill available, the system
+prompt nudges the model to load it before the first browser action.
+
+Native file-tool guards now also recover more cleanly. If `write_file`
+or `edit_file` is refused because the file was never fully read, was
+only partially read, changed since the last read, or the edit target is
+ambiguous, Successor injects one deterministic recovery reminder on the
+next turn so the model re-reads and retries the native tool instead of
+falling back to bash mutation.
+
 ## Web, Browser, And Vision Tools
 
 Successor now ships three more built-in tool families alongside `bash`
