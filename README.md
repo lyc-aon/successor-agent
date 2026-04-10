@@ -718,6 +718,9 @@ individual tests.
 - [`docs/chat-render-refactor-plan.md`](docs/chat-render-refactor-plan.md):
   the behavior-preserving extraction of chat scene composition out of
   `chat.py`, plus the verification record for the refactor
+- [`docs/chat-runtime-refactor-plan.md`](docs/chat-runtime-refactor-plan.md):
+  the follow-on extraction of native tool/runtime orchestration out of
+  `chat.py`, plus the live E2E verification record for that seam
 - [`docs/concepts.md`](docs/concepts.md): features the architecture
   can support with small additive changes
 - [`docs/llamacpp-protocol.md`](docs/llamacpp-protocol.md): what we

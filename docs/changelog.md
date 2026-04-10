@@ -11,6 +11,57 @@ unit on top of phase 0.
 
 ---
 
+## Unreleased, chat runtime seam extraction + live headless E2E verification (2026-04-10)
+
+This pass continues the post-`v0.1.29` cleanup by pulling the native
+tool/runtime orchestration out of `src/successor/chat.py` while keeping
+the existing controller surface and test hooks intact.
+
+### What landed
+
+- `src/successor/chat_tool_runtime.py`
+  - new runtime helper for tool spawn/dispatch/finalize/cancel flow
+- `src/successor/chat.py`
+  - now delegates native tool execution to `ChatToolRuntime`
+  - keeps compatibility wrappers so existing tests and controller code
+    still call the same `_spawn_*`, `_dispatch_*`, and `_finalize_*`
+    methods
+  - adds small compatibility shims for monkeypatched web-tool functions
+    and malformed-tool-call reporting
+- docs
+  - added `docs/chat-runtime-refactor-plan.md`
+  - updated `docs/changelog.md`
+
+### Verification
+
+- lint:
+  - `PYTHONPATH=src ruff check src/successor/chat.py src/successor/chat_tool_runtime.py`
+- bytecode:
+  - `PYTHONPATH=src python3 -m py_compile src/successor/chat.py src/successor/chat_tool_runtime.py`
+- targeted runtime slice:
+  - `PYTHONPATH=src pytest -q tests/test_chat_bash.py tests/test_bash_diff_capture.py tests/test_file_tools.py tests/test_session_trace.py`
+  - `66 passed`
+  - `PYTHONPATH=src pytest -q tests/test_chat_tasks.py tests/test_chat_runbook.py tests/test_chat_verification.py tests/test_chat_web_tools.py tests/test_chat_subagents.py`
+  - `27 passed`
+- full suite:
+  - `PYTHONPATH=src pytest -q`
+  - `1227 passed in 12.50s`
+- live human-emulated runtime verification:
+  - headless `SuccessorChat.on_key()` + `on_tick()` run against the real
+    local llama.cpp profile
+  - built a 3-file issue-triage web app in `/tmp/successor-refactor-e2e-1bpyrt`
+  - generated a playback bundle in `/tmp/successor-refactor-e2e-bundle`
+  - verified tool mix from trace:
+    - `write_file`: 3
+    - `bash`: 3
+    - `browser`: 33
+  - confirmed bash stayed on shell/runtime work only; no heredoc file
+    writes appeared in the trace
+  - captured screenshots for the built app and the playback viewer:
+    - `/tmp/successor-refactor-e2e-app.png`
+    - `/tmp/successor-refactor-e2e-app-mobile.png`
+    - `/tmp/successor-refactor-e2e-playback.png`
+
 ## v0.1.29, chat render seam extraction + visual verification harness (2026-04-09)
 
 This pass reduces the risk surface inside `src/successor/chat.py`
