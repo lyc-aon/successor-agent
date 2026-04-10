@@ -378,6 +378,9 @@ Example — fork a verification pass:
 - Use `role="verification"` when you want an independent read-only
   checker that runs tests, browser checks, or edge cases without
   editing project files.
+- Verification-role workers inherit a stricter runtime: native file
+  mutation tools are removed and bash mutating/dangerous actions are
+  disabled, which makes them safer for final-mile QA.
 - Do not assume results before the completion notification arrives.
 - Do not read the worker transcript while it is still running unless
   the user explicitly asks for a progress check.
@@ -402,6 +405,8 @@ independently.
 - Use `role="verification"` when you want a fresh read-only checker to
   run tests, lint, browser checks, or adversarial probes before you
   declare the work done.
+- Prefer a verification-role subagent for complex browser-heavy or
+  multi-file work where confirmation bias is likely.
 
 ### Writing the prompt
 
@@ -545,6 +550,8 @@ Example — verifying a local interactive app:
 - Keep the list compact and concrete.
 - Keep at most one item `in_progress`.
 - Update items as evidence arrives; do not leave stale claims in the contract.
+- For non-trivial work, include at least one failure-path or adversarial
+  check instead of verifying only the happy path.
 """
 
 VERIFY_MODEL_GUIDANCE = """\
@@ -555,6 +562,10 @@ Use `verify` to keep a compact list of claims plus evidence.
 - Keep claims concrete and evidence specific.
 - Prefer runtime evidence over source inspection.
 - Use `observed` for concise outcomes, especially on failures.
+- For interactive claims, name the exact state delta that must change
+  and prove that specific change.
+- For non-trivial work, include at least one failure-path or adversarial
+  probe before you declare success.
 - Do not leave an item `in_progress` once the evidence is in.
 """
 

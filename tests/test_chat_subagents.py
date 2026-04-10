@@ -543,4 +543,6 @@ def test_child_prompt_verification_role_uses_stricter_contract() -> None:
     prompt = build_child_prompt("verify the shared version", role="verification")
     assert "background verification subagent" in prompt
     assert "Read-only verification only" in prompt
+    assert "Getting seduced by the first 80%" in prompt
+    assert "externally managed" in prompt
     assert "Verdict must be one of PASS, FAIL, or PARTIAL" in prompt

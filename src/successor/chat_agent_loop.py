@@ -43,6 +43,7 @@ from .tools_registry import (
     build_native_tool_schemas,
 )
 from .verification_contract import (
+    build_verification_continue_nudge,
     build_verification_execution_guidance,
     build_verification_prompt_section,
 )
@@ -692,7 +693,8 @@ class ChatAgentLoop:
             task_section = build_task_prompt_section(self._host._task_ledger)
         if "verify" in enabled_tools:
             verification_execution_guidance = build_verification_execution_guidance(
-                self._host._verification_ledger
+                self._host._verification_ledger,
+                subagent_available="subagent" in enabled_tools,
             )
             verification_section = build_verification_prompt_section(
                 self._host._verification_ledger
@@ -1092,6 +1094,28 @@ class ChatAgentLoop:
                             "task_continue_nudge",
                             turn=self._host._agent_turn,
                             active_task=active.active_form if active else "",
+                            assistant_excerpt=_trace_clip_text(raw_content, limit=320),
+                        )
+                        self._host._begin_agent_turn()
+                        return
+
+                if (
+                    self._host._agent_turn > 0
+                    and self._host._verification_ledger.has_in_progress()
+                    and not self._host._verification_continue_nudged_this_turn
+                ):
+                    nudge = build_verification_continue_nudge(
+                        self._host._verification_ledger
+                    )
+                    if nudge:
+                        self._host._verification_continue_nudged_this_turn = True
+                        self._host._verification_continue_nudge = nudge
+                        active = self._host._verification_ledger.in_progress_item()
+                        self._host._trace_event(
+                            "verification_continue_nudge",
+                            turn=self._host._agent_turn,
+                            active_claim=active.claim if active else "",
+                            active_evidence=active.evidence if active else "",
                             assistant_excerpt=_trace_clip_text(raw_content, limit=320),
                         )
                         self._host._begin_agent_turn()

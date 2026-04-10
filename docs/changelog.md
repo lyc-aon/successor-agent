@@ -52,6 +52,15 @@ trustworthy.
     - bash forced to non-mutating / non-dangerous mode
   - cards, progress summaries, spawn payloads, and notifications now
     distinguish `verifier` from generic `subagent`
+- final-mile verification discipline
+  - browser-verification guidance now treats reachable local URLs as
+    externally managed runtimes instead of something the model should
+    routinely kill or restart
+  - browser verification now explicitly demands before/after state
+    deltas plus at least one failure-path probe for non-trivial work
+  - if the model itself leaves a verification item `in_progress` and
+    then tries to stop, the agent loop issues one bounded continuation
+    nudge instead of accepting the premature finish
 - repo contract / docs
   - `pyproject.toml` now carries repo Ruff configuration
   - `.github/workflows/test.yml` now runs Ruff before pytest
@@ -68,9 +77,11 @@ trustworthy.
 - targeted:
   - `PYTHONPATH=src pytest -q tests/test_file_tools.py tests/test_progress.py tests/test_snapshot_subagents.py tests/test_subagent_manager.py tests/test_chat_subagents.py tests/test_verification_hints.py`
   - `45 passed`
+- follow-up verification discipline slice:
+  - `PYTHONPATH=src pytest -q tests/test_verification_contract.py tests/test_chat_verification.py tests/test_chat_web_tools.py tests/test_chat_subagents.py`
 - full suite:
   - `PYTHONPATH=src pytest -q`
-  - `1234 passed in 12.59s`
+  - `1236 passed in 12.47s`
 
 ## Unreleased, chat display-runtime seam extraction + live streaming visual verification (2026-04-10)
 

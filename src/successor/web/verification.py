@@ -99,6 +99,12 @@ def build_browser_verification_guidance(
     lines.append(
         "- Treat the browser as evidence gathering, not exploration. Open once, inspect if unsure, take the smallest proving action, then read the resulting page state before deciding the next step."
     )
+    lines.append(
+        "- If the user already gave you a working local URL, or the page is already reachable, treat that runtime as externally managed. Do not kill, restart, or replace its server unless the user asked for that or you have proved the runtime is dead and need your own replacement."
+    )
+    lines.append(
+        "- If this is more than a one-step sanity check and the `verify` tool is available, create or refresh a compact verification item before or during browser work so the claim and evidence stay explicit."
+    )
     if browser_verifier_available and not browser_verifier_loaded:
         lines.append(
             "- Before the first browser action, load the `browser-verifier` skill so the verification loop stays selector-driven and bounded."
@@ -107,10 +113,16 @@ def build_browser_verification_guidance(
         "- For interactive claims, prove the behavior with real browser evidence. Do not mark a claim passed from source inspection, total DOM counts, or intention alone."
     )
     lines.append(
+        "- Capture a specific before/after state delta for the feature under test. Verify the exact score, count, label, panel state, URL, toast text, or visible copy that should change after the interaction."
+    )
+    lines.append(
         "- When checking filters, search, or visibility, verify what is visibly rendered after the interaction. Prefer one decisive interaction plus `extract_text` or an explicit page-state check over broad exploratory clicking."
     )
     lines.append(
         "- After steps that may trigger runtime issues, check `console_errors` before concluding the flow is healthy."
+    )
+    lines.append(
+        "- Run at least one edge or failure-path check that matches the feature under test instead of verifying only the happy path."
     )
     if visual and vision_available:
         lines.append(

@@ -9,6 +9,7 @@ from successor.verification_contract import (
     VerificationLedger,
     build_assertions_artifact,
     build_verification_card_output,
+    build_verification_continue_nudge,
     build_verification_execution_guidance,
     build_verification_prompt_section,
     build_verification_tool_result,
@@ -93,6 +94,29 @@ def test_verification_helpers_render_contract_and_summary() -> None:
     assert "<verification-contract>" in tool_result
     assert "<active-claim>No runtime errors</active-claim>" in tool_result
 
-    guidance = build_verification_execution_guidance(ledger)
+    guidance = build_verification_execution_guidance(ledger, subagent_available=True)
     assert "Evidence-bearing verification" in guidance
     assert "debug logs" in guidance
+    assert "before/after state delta" in guidance
+    assert "adversarial or failure-path probe" in guidance
+    assert 'role="verification"' in guidance
+
+    nudge = build_verification_continue_nudge(ledger)
+    assert "still marked `in_progress`" in nudge
+    assert "No runtime errors" in nudge
+
+
+def test_verification_continue_nudge_is_empty_without_active_item() -> None:
+    empty = VerificationLedger()
+    assert build_verification_continue_nudge(empty) == ""
+
+    passed_only = VerificationLedger(
+        items=parse_verification_items([
+            {
+                "claim": "It works",
+                "evidence": "runtime proof",
+                "status": "passed",
+            }
+        ])
+    )
+    assert build_verification_continue_nudge(passed_only) == ""

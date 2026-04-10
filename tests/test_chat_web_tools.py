@@ -440,6 +440,10 @@ def test_browser_verification_mode_injects_visual_guidance(
     assert "browser-verifier" in sys_msg["content"]
     assert "screenshot" in sys_msg["content"]
     assert "vision" in sys_msg["content"]
+    assert "externally managed" in sys_msg["content"]
+    assert "`verify` tool" in sys_msg["content"]
+    assert "before/after state delta" in sys_msg["content"]
+    assert "failure-path check" in sys_msg["content"]
 
 
 def test_native_vision_tool_call_dispatches(monkeypatch, temp_config_dir: Path) -> None:

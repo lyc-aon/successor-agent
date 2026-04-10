@@ -205,7 +205,11 @@ def build_verification_prompt_section(ledger: VerificationLedger) -> str:
     return "\n".join(lines)
 
 
-def build_verification_execution_guidance(ledger: VerificationLedger) -> str:
+def build_verification_execution_guidance(
+    ledger: VerificationLedger,
+    *,
+    subagent_available: bool = False,
+) -> str:
     lines = ["### Evidence-bearing verification", ""]
     if not ledger.items:
         lines.extend([
@@ -224,13 +228,32 @@ def build_verification_execution_guidance(ledger: VerificationLedger) -> str:
             )
     lines.extend([
         "- Prefer executable evidence: browser interactions, screenshots plus vision, console/runtime checks, command output, or a tiny verifier/player script.",
+        "- For interactive claims, capture a specific before/after state delta. Name the exact score, count, label, panel state, URL, or visible text that should change, then prove that it changed.",
         "- If direct manual checking is weak, repetitive, or impossible, add a temporary structured debug surface or debug logs that expose the exact state transitions you need to prove.",
         "- Prefer debug logs that answer concrete questions like input received, state changed, animation advanced, collision fired, or persistence wrote.",
+        "- For non-trivial work, run at least one adversarial or failure-path probe instead of verifying only the happy path.",
         "- Do not mark an item `passed` from source inspection alone. Update it only after the real evidence exists.",
         "- Mark an item `failed` when the observed evidence contradicts the claim, and record the concise observed outcome.",
         "- Skip the verification contract only for single trivial tasks or purely conversational replies.",
     ])
+    if subagent_available:
+        lines.append(
+            '- Before declaring complex browser-heavy or multi-file work done, consider launching a fresh read-only `subagent` with `role="verification"` so a separate pass can try to break it without editing project files.'
+        )
     return "\n".join(lines)
+
+
+def build_verification_continue_nudge(ledger: VerificationLedger) -> str:
+    active = ledger.in_progress_item()
+    if active is None:
+        return ""
+    return (
+        "A verification item is still marked `in_progress`: "
+        f"`{active.claim}`. If the work is still being verified, keep gathering "
+        "the named evidence now instead of handing control back. If the check is "
+        "actually complete or disproven, call the `verify` tool first so the "
+        "contract reflects that before you stop."
+    )
 
 
 def build_assertions_artifact(ledger: VerificationLedger) -> dict[str, object]:
