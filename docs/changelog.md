@@ -19,6 +19,11 @@ feedback after native file mutations, and can launch a stricter
 read-only verification worker when implementation context is no longer
 trustworthy.
 
+It also makes the project intent explicit: for local-model runs,
+productive, inspectable iteration matters more than raw turn minimization.
+The optimization target is verified output and coherent workflow, not
+one-shot theater.
+
 ### What landed
 
 - `src/successor/verification_hints.py`

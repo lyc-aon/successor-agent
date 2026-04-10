@@ -3,6 +3,25 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
+## Unreleased
+
+This documentation pass aligns the public project story with how
+Successor is actually meant to be used: long-running local-model loops
+are acceptable when they stay productive, inspectable, and grounded in
+runtime evidence. Turn count by itself is not the optimization target.
+The real targets are output quality, proof quality, and workflow
+compression, especially in browser-heavy final-mile verification.
+
+- refreshed README and public notes so the repo explicitly frames
+  `task`, `verify`, verifier workers, recordings, and high turn budgets
+  as workflow tools for local GPU-backed runs rather than one-shot
+  benchmark tricks
+- clarified that `max_agent_turns` is a safety ceiling, not the
+  primary definition of efficiency
+- tightened the public wording around final-mile verification so the
+  browser/runtime path is described as evidence gathering, not just UI
+  exploration
+
 ## v0.1.28 — 2026-04-09
 
 This release tightens two failure-prone parts of the live loop without

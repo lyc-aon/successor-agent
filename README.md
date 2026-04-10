@@ -12,6 +12,12 @@ wizard walks first-time users through provider configuration with a
 live preview pane, and the autocompactor keeps your context window healthy with
 percentage-based thresholds you can tune per profile.
 
+The operating assumption is local-model reality, not one-shot benchmark
+theater. Long runs are acceptable when they stay productive, inspectable,
+and evidence-backed. Successor is optimized for coherent workflow:
+native file work, real runtime/browser verification, compact control
+ledgers, and durable recordings that make it obvious what happened.
+
 ![Successor running multi-tool dispatch in agentic mode](https://github.com/lyc-aon/successor-agent/releases/download/v0.1.3/tool_dispatch.gif)
 
 ## Quick start
@@ -210,6 +216,11 @@ Profiles now also carry `max_agent_turns`, the hard cap for one user
 submission's model loop. The default is `999`, and both the setup wizard
 review screen and `/config` expose it so long local runs are not stuck
 with the old tiny ceiling.
+
+Raw turn count is not treated as failure by itself. For local GPU-backed
+workflows, the important question is whether the model is still making
+real progress toward a verified result. Successor's control plane is
+meant to catch unproductive loops, not punish productive iteration.
 
 Browser-heavy QA turns now also have a real runtime controller behind
 them. When the model is in verification mode, repeated failed clicks,
@@ -505,6 +516,11 @@ verification contract alongside the task ledger. The model can update
 explicit claims, the concrete evidence that should prove them, and the
 observed outcome once the evidence exists. That keeps "looks done" and
 "is actually verified" separate.
+
+For local-model workflows especially, `verify` is not about forcing the
+model into ceremony. It is there to make the final-mile proof compact and
+legible: what claim is being checked, what evidence should prove it, and
+what was actually observed.
 
 For genuinely iterative runs, Successor can also keep a runbook: a
 small session-local contract for the objective, success definition,
