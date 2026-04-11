@@ -49,6 +49,10 @@ class TurnRequestEnvelope:
     tool_schemas: tuple[dict[str, Any], ...]
     enabled_tools: tuple[str, ...]
     enabled_skills: tuple[str, ...]
+    api_messages_hash: str = ""
+    request_prefix_hash: str = ""
+    request_messages_hash: str = ""
+    request_tail_kind: str = "none"
     volatile_sections: tuple[PromptSection, ...] = ()
     continuation_prefill_applied: bool = False
     volatile_tail_applied: bool = False
@@ -110,6 +114,9 @@ class StreamPerfSnapshot:
     finish_reason: str
     provider: str
     stable_system_hash: str
+    request_prefix_hash: str
+    request_messages_hash: str
+    request_tail_kind: str
     request_slot_id: int | None
     request_cache_prompt: bool | None
     cache_break_reasons: tuple[str, ...]
@@ -439,6 +446,9 @@ def build_stream_perf_snapshot(
     finish_reason: str,
     provider: str,
     stable_system_hash: str = "",
+    request_prefix_hash: str = "",
+    request_messages_hash: str = "",
+    request_tail_kind: str = "none",
     request_slot_id: int | None = None,
     request_cache_prompt: bool | None = None,
     cache_break_reasons: tuple[str, ...] = (),
@@ -484,6 +494,9 @@ def build_stream_perf_snapshot(
         finish_reason=finish_reason,
         provider=provider,
         stable_system_hash=stable_system_hash,
+        request_prefix_hash=request_prefix_hash,
+        request_messages_hash=request_messages_hash,
+        request_tail_kind=request_tail_kind,
         request_slot_id=request_slot_id,
         request_cache_prompt=request_cache_prompt,
         cache_break_reasons=cache_break_reasons,

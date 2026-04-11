@@ -142,7 +142,7 @@ def _assistant_with_tool_calls(content: str, cards: list[ToolArtifact]) -> dict:
                 "type": "function",
                 "function": {
                     "name": _tool_name_for_card(card),
-                    "arguments": json.dumps(_tool_arguments_for_card(card)),
+                    "arguments": _canonical_json(_tool_arguments_for_card(card)),
                 },
             }
             for card in cards
@@ -205,19 +205,37 @@ def _append_runtime_tail_context(
     if not context_text.strip():
         return api_messages, False
     merged = list(api_messages)
-    if (
-        merged
-        and merged[-1].get("role") == "user"
-        and "tool_calls" not in merged[-1]
-    ):
-        existing = str(merged[-1].get("content") or "")
-        merged[-1]["content"] = (
-            existing.rstrip() + "\n\n" + context_text
-            if existing.strip() else context_text
-        )
-        return merged, True
+    # Keep runtime context as its own synthetic user turn. Merging it
+    # into an existing user message rewrites older prompt bytes and
+    # limits prefix reuse on cache-friendly providers.
     merged.append({"role": "user", "content": context_text})
     return merged, True
+
+
+def _append_api_message(
+    api_messages: list[dict[str, Any]],
+    *,
+    role: str,
+    content: str,
+) -> None:
+    if not content:
+        return
+    # Preserve message boundaries exactly. Collapsing adjacent
+    # same-role messages reduces framing tokens a bit, but it rewrites
+    # older message bytes when a new message arrives and fights KV
+    # cache reuse.
+    api_messages.append({"role": role, "content": content})
+
+
+def _hash_message_sequence(
+    messages: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    *,
+    tool_schemas: tuple[dict[str, Any], ...] = (),
+) -> str:
+    return _hash_fragments(
+        _canonical_json(list(messages)),
+        _canonical_json(tool_schemas),
+    )
 
 
 def _append_internal_continuation_prefill(
@@ -1231,6 +1249,26 @@ class ChatAgentLoop:
                 _append_internal_continuation_prefill(api_messages_list)
             )
         tool_schemas = tuple(build_native_tool_schemas(enabled_tools))
+        api_messages_hash = _hash_message_sequence(
+            api_messages_list,
+            tool_schemas=tool_schemas,
+        )
+        request_messages_hash = _hash_message_sequence(
+            request_messages_list,
+            tool_schemas=tool_schemas,
+        )
+        request_tail_kind = "none"
+        prefix_messages = request_messages_list
+        if volatile_tail_applied:
+            request_tail_kind = "runtime_tail"
+            prefix_messages = request_messages_list[:-1]
+        elif continuation_prefill_applied:
+            request_tail_kind = "continuation_prefill"
+            prefix_messages = request_messages_list[:-1]
+        request_prefix_hash = _hash_message_sequence(
+            prefix_messages,
+            tool_schemas=tool_schemas,
+        )
         stable_system_hash = _hash_fragments(
             system_prompt,
             _canonical_json(tool_schemas),
@@ -1254,6 +1292,10 @@ class ChatAgentLoop:
             system_prompt=system_prompt,
             api_messages=tuple(api_messages_list),
             request_messages=tuple(request_messages_list),
+            api_messages_hash=api_messages_hash,
+            request_prefix_hash=request_prefix_hash,
+            request_messages_hash=request_messages_hash,
+            request_tail_kind=request_tail_kind,
             tool_schemas=tool_schemas,
             enabled_tools=tuple(enabled_tools),
             enabled_skills=tuple(skill.name for skill in enabled_skills),
@@ -1341,6 +1383,10 @@ class ChatAgentLoop:
             request_message_count=len(envelope.request_messages),
             last_user_excerpt=envelope.last_user_excerpt,
             stable_system_hash=envelope.stable_system_hash,
+            api_messages_hash=envelope.api_messages_hash,
+            request_prefix_hash=envelope.request_prefix_hash,
+            request_messages_hash=envelope.request_messages_hash,
+            request_tail_kind=envelope.request_tail_kind,
             volatile_tail_hash=envelope.volatile_tail_hash,
             volatile_tail_applied=envelope.volatile_tail_applied,
             stable_prompt_cache_hit=prepared.stable_prompt_cache_hit,
@@ -1379,6 +1425,9 @@ class ChatAgentLoop:
             turn=envelope.turn,
             tool_schema_names=list(envelope.enabled_tools) if envelope.tool_schemas else [],
             stable_system_hash=envelope.stable_system_hash,
+            request_prefix_hash=envelope.request_prefix_hash,
+            request_messages_hash=envelope.request_messages_hash,
+            request_tail_kind=envelope.request_tail_kind,
             request_slot_id=envelope.request_slot_id,
             request_cache_prompt=envelope.request_cache_prompt,
         )
@@ -1394,31 +1443,20 @@ class ChatAgentLoop:
         api_messages: list[dict] = [{"role": "system", "content": sys_prompt}]
         ordered = self._host._api_ordered_messages()
 
-        def _append_text_merging(role: str, content: str) -> None:
-            if not content:
-                return
-            if (
-                len(api_messages) > 1
-                and api_messages[-1].get("role") == role
-                and "tool_calls" not in api_messages[-1]
-            ):
-                api_messages[-1]["content"] = (
-                    api_messages[-1]["content"].rstrip() + "\n\n" + content
-                )
-                return
-            api_messages.append({"role": role, "content": content})
-
         i = 0
         n = len(ordered)
         while i < n:
             m = ordered[i]
 
             if m.is_summary:
-                _append_text_merging(
-                    "user",
-                    "[summary of earlier conversation, provided by the "
-                    "harness — treat as authoritative context, not a "
-                    "user turn]\n\n" + m.raw_text,
+                _append_api_message(
+                    api_messages,
+                    role="user",
+                    content=(
+                        "[summary of earlier conversation, provided by the "
+                        "harness — treat as authoritative context, not a "
+                        "user turn]\n\n" + m.raw_text
+                    ),
                 )
                 i += 1
                 continue
@@ -1427,7 +1465,7 @@ class ChatAgentLoop:
                 if m.synthetic:
                     i += 1
                     continue
-                _append_text_merging("user", m.raw_text)
+                _append_api_message(api_messages, role="user", content=m.raw_text)
                 i += 1
                 continue
 
@@ -1454,7 +1492,7 @@ class ChatAgentLoop:
                             }
                         )
                 else:
-                    _append_text_merging("assistant", m.raw_text)
+                    _append_api_message(api_messages, role="assistant", content=m.raw_text)
                 i = j
                 continue
 

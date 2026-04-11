@@ -3702,6 +3702,9 @@ class SuccessorChat(App):
             finish_reason=finish_reason,
             provider=str((self.profile.provider or {}).get("type") or ""),
             stable_system_hash=envelope.stable_system_hash if envelope is not None else "",
+            request_prefix_hash=envelope.request_prefix_hash if envelope is not None else "",
+            request_messages_hash=envelope.request_messages_hash if envelope is not None else "",
+            request_tail_kind=envelope.request_tail_kind if envelope is not None else "none",
             request_slot_id=envelope.request_slot_id if envelope is not None else None,
             request_cache_prompt=envelope.request_cache_prompt if envelope is not None else None,
             cache_break_reasons=(
@@ -3891,6 +3894,11 @@ class SuccessorChat(App):
                 f"stable hash {latest.stable_system_hash or '?'} · "
                 f"breaks {breaks}"
             )
+            lines.append(
+                f"shape: prefix {latest.request_prefix_hash or '?'} · "
+                f"request {latest.request_messages_hash or '?'} · "
+                f"tail {latest.request_tail_kind or 'none'}"
+            )
             if latest.timings is not None:
                 lines.append(
                     "provider timings: "
@@ -3931,6 +3939,7 @@ class SuccessorChat(App):
                     f"prompt {_fmt_ms(snapshot.prompt_eval_ms)} · "
                     f"hit {_fmt_pct(snapshot.prompt_cache_hit_ratio)} · "
                     f"slot {snapshot.request_slot_id if snapshot.request_slot_id is not None else '?'} · "
+                    f"tail {snapshot.request_tail_kind or 'none'} · "
                     f"{tag}"
                 )
 

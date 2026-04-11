@@ -7,6 +7,46 @@ lives in [`docs/changelog.md`](docs/changelog.md).
 
 - no user-facing notes yet
 
+## v0.1.36 — 2026-04-10
+
+This hotfix fixes a real performance regression in long local-model
+sessions: the harness now preserves a KV-cache-friendly request shape
+instead of quietly rewriting earlier prompt bytes as the conversation
+grows.
+
+### What changed
+
+- made prompt assembly append-only in the places that matter for local
+  cache reuse
+  - runtime-tail context is now always appended as its own synthetic
+    turn instead of being merged into the latest real user message
+  - adjacent same-role API messages now preserve their original
+    boundaries instead of being merged together later
+- stabilized native tool-call serialization
+  - assistant `tool_calls[].function.arguments` now use canonical JSON
+    ordering so identical tool payloads serialize to identical bytes
+- added better cache-shape diagnostics
+  - turn traces and `/perf` now record request prefix hash, full
+    request hash, and tail kind alongside the existing stable-system
+    hash and llama timing data
+  - this makes it possible to distinguish “Successor changed the
+    request shape” from “llama.cpp stopped reusing the slot anyway”
+
+### Verification
+
+- `ruff check src tests`
+- `PYTHONPATH=src pytest -q`
+  - `1277 passed in 25.56s`
+- live llama.cpp KV verification:
+  - before fix: repeated late-turn `cache_n=0`, median first-token
+    latency ~34s, suspected KV misses across many turns
+  - after fix: `cache_n` grows turn-to-turn, hit ratio stays roughly
+    0.8–0.94, and first-token latency stays sub-second in the extended
+    local-model session
+  - comparison traces:
+    - bad run: `~/.config/successor/logs/20260410-210452-p1614416.jsonl`
+    - fixed run: `~/.config/successor/logs/20260410-221733-p1762322.jsonl`
+
 ## v0.1.35 — 2026-04-10
 
 This release tightens the tool-card surface so long iterative runs are

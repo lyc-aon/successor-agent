@@ -6,7 +6,8 @@ import json
 import time
 from pathlib import Path
 
-from successor.chat import SuccessorChat
+from successor.bash.cards import ToolCard
+from successor.chat import SuccessorChat, _Message
 from successor.profiles import Profile
 from successor.providers.llama import ContentChunk, StreamEnded
 
@@ -144,11 +145,15 @@ def test_long_horizon_request_gets_planning_reminder_before_work(
     first_sys = client.calls[0]["messages"][0]
     assert first_sys["role"] == "system"
     assert "Planning Reminder" not in first_sys["content"]
+    first_user = client.calls[0]["messages"][1]
+    assert first_user["role"] == "user"
+    assert "[internal harness runtime context]" not in first_user["content"]
     runtime_tail = client.calls[0]["messages"][-1]
     assert runtime_tail["role"] == "user"
     assert "[internal harness runtime context]" in runtime_tail["content"]
     assert "Planning Reminder" in runtime_tail["content"]
     assert "call `task` with 3-6 coarse steps" in runtime_tail["content"]
+    assert len(client.calls[0]["messages"]) == 3
 
     events = _trace_events(temp_config_dir)
     assert any(event["type"] == "task_adoption_nudge" for event in events)
@@ -180,6 +185,54 @@ def test_runtime_nudges_change_tail_without_changing_stable_system_hash(
     )
     assert "Continue the active task before you stop." in str(
         nudged.request_messages[-1]["content"] or ""
+    )
+
+
+def test_api_message_builder_preserves_same_role_boundaries(
+    temp_config_dir: Path,
+) -> None:
+    chat = SuccessorChat(
+        profile=Profile(name="agent", tools=("bash",)),
+        client=_CapturingClient([]),
+    )
+    chat.messages = [
+        _Message("user", "first user message"),
+        _Message("user", "second user message"),
+    ]
+
+    api_messages = chat._agent_loop.build_api_messages_native("sys")
+
+    assert [msg["role"] for msg in api_messages] == ["system", "user", "user"]
+    assert api_messages[1]["content"] == "first user message"
+    assert api_messages[2]["content"] == "second user message"
+
+
+def test_tool_call_arguments_are_serialized_canonically(
+    temp_config_dir: Path,
+) -> None:
+    chat = SuccessorChat(
+        profile=Profile(name="agent", tools=("bash",)),
+        client=_CapturingClient([]),
+    )
+    card = ToolCard(
+        verb="task-ledger",
+        raw_command="update tasks",
+        tool_name="task",
+        tool_arguments={
+            "zeta": "last",
+            "alpha": "first",
+            "nested": {"beta": 2, "alpha": 1},
+        },
+        tool_call_id="call_task_1",
+    )
+    chat.messages = [_Message("tool", "", tool_card=card)]
+
+    api_messages = chat._agent_loop.build_api_messages_native("sys")
+    assistant = api_messages[1]
+
+    assert assistant["role"] == "assistant"
+    assert assistant["tool_calls"][0]["function"]["arguments"] == (
+        '{"alpha":"first","nested":{"alpha":1,"beta":2},"zeta":"last"}'
     )
 
 

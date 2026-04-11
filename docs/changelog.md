@@ -15,6 +15,45 @@ unit on top of phase 0.
 
 - no internal notes yet
 
+## v0.1.36, KV-friendly prompt-assembly hotfix (2026-04-10)
+
+- fixed two request-shape mutations in `src/successor/chat_agent_loop.py`
+  that were fighting llama.cpp KV reuse even when the stable prompt
+  prefix itself had not changed
+  - `_append_runtime_tail_context()` no longer merges runtime tail
+    content into an existing user message
+  - `build_api_messages_native()` no longer merges adjacent same-role
+    messages during API-history serialization
+- canonicalized assistant tool-call argument JSON in
+  `_assistant_with_tool_calls()`
+  - tool payload bytes are now stable across equivalent dicts, which
+    removes another source of avoidable request drift
+- extended the request/perf model in
+  `src/successor/context_usage.py` and `src/successor/chat.py`
+  - `TurnRequestEnvelope` now carries:
+    - `api_messages_hash`
+    - `request_prefix_hash`
+    - `request_messages_hash`
+    - `request_tail_kind`
+  - `StreamPerfSnapshot` and `/perf` now surface those fields so live
+    sessions can distinguish harness-side request-shape churn from
+    provider-side cache dropout
+- added focused regression coverage in
+  `tests/test_chat_tasks.py`
+  - runtime-tail context remains a separate synthetic user turn
+  - same-role API message boundaries are preserved
+  - tool-call arguments are serialized canonically
+- verification:
+  - `ruff check src tests`
+  - `PYTHONPATH=src pytest -q`
+    - `1277 passed in 25.56s`
+  - extended live llama.cpp session confirmed the intended effect:
+    - previous problematic run plateaued at `cache_n=6710`, then fell
+      to `cache_n=0` with first-token latency in the tens of seconds
+    - fixed run climbed from `cache_n=3302` to `cache_n=11884` with
+      no suspected KV misses and first-token latency staying roughly
+      `250–800ms` over the long iterative build
+
 ## v0.1.35, semantic tool-card + compaction floor release (2026-04-10)
 
 - added a first-class card badge primitive in:

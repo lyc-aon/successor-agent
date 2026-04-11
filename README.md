@@ -360,8 +360,9 @@ turn.
 
 `/perf` (alias `/kv`) reports the last few completed stream timings.
 On llama.cpp it shows `cache_n`, `prompt_n`, prompt-eval latency,
-first-token latency, and a conservative "suspected KV miss" diagnostic
-when the same slot/hash suddenly stops reusing cached prompt tokens.
+first-token latency, request prefix/request hashes, and a conservative
+"suspected KV miss" diagnostic when the same slot/hash suddenly stops
+reusing cached prompt tokens.
 
 For llama.cpp specifically, the request builder is now cache-friendly
 by design. Successor keeps the system-prefix bytes stable across normal
