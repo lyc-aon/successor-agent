@@ -45,8 +45,9 @@ from .tokens import TokenCounter
 DEFAULT_KEEP_RECENT_ROUNDS: int = 6
 
 # How many rounds at minimum must exist BEFORE compaction is allowed
-# to fire (no point compacting 2 rounds — there's nothing to compact).
-MIN_ROUNDS_TO_COMPACT: int = 4
+# to fire. Compaction needs one older round to summarize and one
+# newer round to preserve verbatim, so two rounds is the true floor.
+MIN_ROUNDS_TO_COMPACT: int = 2
 
 # Max PTL retry attempts before giving up
 MAX_PTL_RETRIES: int = 3
@@ -251,6 +252,50 @@ def _build_summary_prompt(
     return messages
 
 
+def normalized_keep_recent_rounds(
+    round_count: int,
+    keep_recent_rounds: int = DEFAULT_KEEP_RECENT_ROUNDS,
+) -> int:
+    """Return a keep_recent value that leaves something to summarize.
+
+    The compactor's real structural requirement is simple:
+      - keep at least one recent round verbatim
+      - summarize at least one older round
+
+    Older code enforced an arbitrary 4-round minimum, which blocked
+    huge two-round conversations from compacting at all. This helper
+    encodes the actual invariant instead.
+    """
+    if round_count <= 1:
+        return 1
+    if keep_recent_rounds <= 0:
+        keep_recent_rounds = 1
+    if keep_recent_rounds >= round_count:
+        keep_recent_rounds = max(1, round_count // 2)
+    return min(keep_recent_rounds, round_count - 1)
+
+
+def can_compact_log(
+    log: MessageLog,
+    *,
+    keep_recent_rounds: int = DEFAULT_KEEP_RECENT_ROUNDS,
+) -> bool:
+    """Whether this log can be compacted meaningfully.
+
+    A log is compactable when there is at least one older round to
+    summarize and at least one recent round to keep. Token mass is
+    handled elsewhere by the budget gate; this helper answers only
+    the structural question.
+    """
+    if len(log.rounds) < MIN_ROUNDS_TO_COMPACT:
+        return False
+    keep_recent = normalized_keep_recent_rounds(
+        len(log.rounds),
+        keep_recent_rounds=keep_recent_rounds,
+    )
+    return (len(log.rounds) - keep_recent) >= 1
+
+
 # ─── Public entry point ───
 
 
@@ -281,9 +326,10 @@ def compact(
     now_t = now if now is not None else time.monotonic()
 
     # Refuse if there's nothing meaningful to compact
-    if len(log.rounds) < MIN_ROUNDS_TO_COMPACT:
+    if not can_compact_log(log, keep_recent_rounds=keep_recent_rounds):
         raise ValueError(
-            f"need at least {MIN_ROUNDS_TO_COMPACT} rounds to compact, "
+            "need at least 2 rounds to compact "
+            "(one older round to summarize and one recent round to keep), "
             f"got {len(log.rounds)}"
         )
 
@@ -291,11 +337,10 @@ def compact(
     pre_tokens = counter.count_log(log)
 
     # Split the log: rounds to summarize vs rounds to keep
-    if keep_recent_rounds <= 0:
-        keep_recent_rounds = 1
-    if keep_recent_rounds >= len(log.rounds):
-        # Nothing left to summarize — caller asked for too many recent
-        keep_recent_rounds = max(1, len(log.rounds) // 2)
+    keep_recent_rounds = normalized_keep_recent_rounds(
+        len(log.rounds),
+        keep_recent_rounds=keep_recent_rounds,
+    )
 
     rounds_to_summarize = log.rounds[: -keep_recent_rounds]
     rounds_to_keep = log.rounds[-keep_recent_rounds:]

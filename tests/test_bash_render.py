@@ -14,6 +14,7 @@ import pytest
 
 from successor.bash import (
     ToolCard,
+    ToolCardBadge,
     dispatch_bash,
     measure_tool_card_height,
     paint_tool_card,
@@ -108,6 +109,44 @@ def test_exec_card_uses_exec_glyph() -> None:
     card = preview_bash("python -c 'print(42)'")
     _, plain, _ = _paint(card)
     assert "▶" in plain
+
+
+def test_non_bash_native_cards_fallback_to_declared_prefix_glyph() -> None:
+    card = ToolCard(
+        verb="task-ledger",
+        params=(("tasks", "3"),),
+        risk="safe",
+        raw_command="update 3 tasks",
+        confidence=1.0,
+        parser_name="native-task",
+        tool_name="task",
+        raw_label_prefix="#",
+    )
+    _, plain, _ = _paint(card)
+    first_line = plain.split("\n")[0]
+    assert "# task-ledger" in first_line
+    assert "? task-ledger" not in first_line
+
+
+def test_card_badges_render_on_header_border() -> None:
+    card = ToolCard(
+        verb="verification",
+        params=(("assertions", "3"),),
+        risk="safe",
+        raw_command="update 3 assertions",
+        confidence=1.0,
+        parser_name="native-verify",
+        tool_name="verify",
+        raw_label_prefix="✓",
+        badges=(
+            ToolCardBadge("count", "3 checks", "accent"),
+            ToolCardBadge("state", "1 failed", "danger"),
+        ),
+    )
+    _, plain, _ = _paint(card)
+    first_line = plain.split("\n")[0]
+    assert "3 checks" in first_line
+    assert "1 failed" in first_line
 
 
 def test_low_confidence_shows_question_badge() -> None:
@@ -229,6 +268,131 @@ def test_long_output_shows_head_window_plus_overflow_marker() -> None:
     assert "line30" not in plain
     # Neither is something well past the cap
     assert "line25" not in plain
+
+
+def test_task_ledger_card_renders_full_semantic_list_without_overflow_marker() -> None:
+    card = ToolCard(
+        verb="task-ledger",
+        params=(("tasks", "6"), ("active", "Implement renderer polish")),
+        risk="safe",
+        raw_command="update 6 tasks",
+        confidence=1.0,
+        parser_name="native-task",
+        tool_name="task",
+        raw_label_prefix="#",
+        tool_arguments={
+            "items": [
+                {"content": "Inspect renderer state", "status": "completed"},
+                {
+                    "content": "Implement renderer polish",
+                    "active_form": "implementing renderer polish",
+                    "status": "in_progress",
+                },
+                {"content": "Visual review", "status": "pending"},
+                {"content": "Scrollback pass", "status": "pending"},
+                {"content": "Docs update", "status": "pending"},
+                {"content": "Release cut", "status": "pending"},
+            ]
+        },
+        output="Updated the session task ledger.",
+        exit_code=0,
+        duration_ms=0.0,
+    )
+    _, plain, _ = _paint(card, h=24)
+
+    assert "Inspect renderer state" in plain
+    assert "Implement renderer polish" in plain
+    assert "implementing renderer polish" in plain
+    assert "Release cut" in plain
+    assert "more line" not in plain
+
+
+def test_verification_card_renders_full_semantic_contract_without_overflow_marker() -> None:
+    card = ToolCard(
+        verb="verification",
+        params=(("assertions", "4"), ("active", "No runtime errors")),
+        risk="safe",
+        raw_command="update 4 assertions",
+        confidence=1.0,
+        parser_name="native-verify",
+        tool_name="verify",
+        raw_label_prefix="✓",
+        badges=(
+            ToolCardBadge("count", "4 checks", "accent"),
+            ToolCardBadge("state", "1 failed", "danger"),
+        ),
+        tool_arguments={
+            "items": [
+                {
+                    "claim": "Hero CTA opens modal",
+                    "evidence": "browser click changes dialog state",
+                    "status": "passed",
+                    "observed": "dialog rendered",
+                },
+                {
+                    "claim": "No runtime errors",
+                    "evidence": "console remains clean during playthrough",
+                    "status": "in_progress",
+                },
+                {
+                    "claim": "Score increments on hit",
+                    "evidence": "HUD score changes after scripted hit",
+                    "status": "pending",
+                },
+                {
+                    "claim": "Failure path blocks invalid input",
+                    "evidence": "bad command leaves state unchanged",
+                    "status": "failed",
+                    "observed": "invalid input still advanced the timer",
+                },
+            ]
+        },
+        output="Updated the session verification contract.",
+        exit_code=0,
+        duration_ms=0.0,
+    )
+    _, plain, _ = _paint(card, h=28)
+
+    first_line = plain.split("\n")[0]
+    assert "4 checks" in first_line
+    assert "1 failed" in first_line
+    assert "Hero CTA opens modal" in plain
+    assert "browser click changes dialog state" in plain
+    assert "Failure path blocks invalid input" in plain
+    assert "invalid input still advanced the timer" in plain
+    assert "more line" not in plain
+
+
+def test_task_card_renders_summary_badges() -> None:
+    card = ToolCard(
+        verb="task-ledger",
+        params=(("tasks", "3"),),
+        risk="safe",
+        raw_command="update 3 tasks",
+        confidence=1.0,
+        parser_name="native-task",
+        tool_name="task",
+        raw_label_prefix="#",
+        badges=(
+            ToolCardBadge("count", "3 tasks", "accent"),
+            ToolCardBadge("state", "1 active", "warning"),
+        ),
+        tool_arguments={
+            "items": [
+                {"content": "Inspect renderer state", "status": "completed"},
+                {"content": "Implement renderer polish", "status": "in_progress"},
+                {"content": "Visual review", "status": "pending"},
+            ]
+        },
+        output="Updated the session task ledger.",
+        exit_code=0,
+        duration_ms=0.0,
+    )
+    _, plain, _ = _paint(card, h=18)
+
+    first_line = plain.split("\n")[0]
+    assert "3 tasks" in first_line
+    assert "1 active" in first_line
 
 
 def test_light_theme_diff_card_fills_edge_backgrounds(tmp_path) -> None:

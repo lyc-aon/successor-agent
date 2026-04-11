@@ -1537,14 +1537,11 @@ class SuccessorChat(App):
         # StreamEnded handler whenever runners are spawned, cleared
         # in _pump_running_tools when continuation fires.
         self._pending_continuation: bool = False
-        # Sticky cache of inferred verb previews for in-flight tool
-        # calls, keyed by (stream_id, call_index). Once preview_bash
-        # returns a high-confidence verb for a streaming tool call,
-        # we remember it so a later partial that momentarily confuses
-        # the parser (e.g., an unclosed quote mid-stream) doesn't
-        # flicker the header back to the generic "receiving" message.
-        # Reset when a stream starts or ends.
-        self._streaming_verb_cache: dict[tuple[int, int], tuple[str, str, str]] = {}
+        # Sticky cache of semantic in-flight tool previews keyed by
+        # (stream_id, call_index). Used to keep streaming headers
+        # stable when partial arguments temporarily become less
+        # informative mid-stream. Reset when a stream starts or ends.
+        self._streaming_preview_cache: dict[tuple[int, int], object] = {}
 
         # ─── Scrollback state ───
         self.scroll_offset: int = 0
@@ -3668,6 +3665,7 @@ class SuccessorChat(App):
     def _mark_stream_opened(self) -> None:
         self._stream_opened_at = time.monotonic()
         self._stream_started_at = None
+        self._streaming_preview_cache = {}
 
     def _mark_stream_started(self) -> float | None:
         if self._stream_opened_at is None:
@@ -4074,8 +4072,8 @@ class SuccessorChat(App):
              didn't shrink the log enough.
           4. The current token count is at or above the autocompact
              threshold derived from `_agent_budget()`.
-          5. The log has at least `MIN_ROUNDS_TO_COMPACT` rounds.
-             A handful of rounds isn't worth compacting.
+          5. The log has at least one older round to summarize and
+             one recent round to keep verbatim.
 
         On a deferral, this method spawns the compaction worker via
         the same path as the manual /compact command (reusing the
@@ -4097,10 +4095,10 @@ class SuccessorChat(App):
         # next-request usage snapshot. This is cached off the exact
         # outbound envelope, so the gate sees the same number the
         # footer and /budget report.
-        from .agent.compact import MIN_ROUNDS_TO_COMPACT
+        from .agent.compact import can_compact_log
         counter = self._agent_token_counter()
         log = self._to_agent_log()
-        if log.round_count < MIN_ROUNDS_TO_COMPACT:
+        if not can_compact_log(log):
             return False
 
         snapshot = self._context_usage_snapshot()
@@ -4132,9 +4130,11 @@ class SuccessorChat(App):
         new log; auto re-enters `_begin_agent_turn`.
         """
         pre_tokens = counter.count_log(log)
-        keep_n = min(
-            self.profile.compaction.keep_recent_rounds,
-            max(1, log.round_count // 2),
+        from .agent.compact import normalized_keep_recent_rounds
+
+        keep_n = normalized_keep_recent_rounds(
+            log.round_count,
+            keep_recent_rounds=self.profile.compaction.keep_recent_rounds,
         )
         rounds_to_summarize = log.round_count - keep_n
 
@@ -4187,14 +4187,15 @@ class SuccessorChat(App):
             ))
             return
 
-        from .agent.compact import MIN_ROUNDS_TO_COMPACT
+        from .agent.compact import can_compact_log
         counter = self._agent_token_counter()
         log = self._to_agent_log()
-        if log.round_count < MIN_ROUNDS_TO_COMPACT:
+        if not can_compact_log(log):
             self.messages.append(_Message(
                 "successor",
-                f"need at least {MIN_ROUNDS_TO_COMPACT} rounds to compact, "
-                f"have {log.round_count}. Run /burn first to inflate the context.",
+                "need at least 2 rounds to compact "
+                "(one older round to summarize and one recent round to keep), "
+                f"have {log.round_count}.",
                 synthetic=True,
             ))
             return

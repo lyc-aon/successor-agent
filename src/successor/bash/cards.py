@@ -41,9 +41,24 @@ from .diff_artifact import ChangeArtifact
 #              via a confirmation modal (modal pattern not in v0).
 
 Risk = Literal["safe", "mutating", "dangerous"]
+BadgeTone = Literal["subtle", "accent", "success", "warning", "danger"]
 
 
 # ─── ToolCard ───
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCardBadge:
+    """Small semantic pill rendered on the card header.
+
+    `key` is stable semantic identity so callers can replace a badge
+    later without accumulating duplicates (for example, a retroactive
+    proof badge changing from "running" to "verified").
+    """
+
+    key: str
+    text: str
+    tone: BadgeTone = "subtle"
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +135,7 @@ class ToolCard:
     tool_arguments: dict[str, Any] = field(default_factory=dict)
     raw_label_prefix: str = "$"
     api_content_override: str | None = None
+    badges: tuple[ToolCardBadge, ...] = ()
     # Tool-call linkage for native Qwen tool calling. When the model
     # emits a structured tool_call, the harness propagates the model's
     # call id here so the corresponding `role: "tool"` message can

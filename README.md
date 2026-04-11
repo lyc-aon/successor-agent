@@ -217,6 +217,12 @@ jobs, playback bundles show each ledger update as a normal tool card,
 and the runtime can use that structured state to continue one more turn
 when the model stops too early.
 
+Task and verification cards are now rendered as semantic artifacts
+rather than generic tool stdout. Their full lists stay visible, their
+headers show compact aggregate badges, and verification can
+retroactively mark the prior substantive tool card with a proof state
+such as `verified` or `proof failed`.
+
 Profiles now also carry `max_agent_turns`, the hard cap for one user
 submission's model loop. The default is `999`, and both the setup wizard
 review screen and `/config` expose it so long local runs are not stuck
@@ -248,6 +254,10 @@ only partially read, changed since the last read, or the edit target is
 ambiguous, Successor injects one deterministic recovery reminder on the
 next turn so the model re-reads and retries the native tool instead of
 falling back to bash mutation.
+
+Manual compaction is no longer blocked by the old fake 4-round floor.
+If the transcript has one older round to summarize and one newer round
+to keep, `/compact` can run without requiring a dummy `/burn` first.
 
 ## Web, Browser, And Vision Tools
 

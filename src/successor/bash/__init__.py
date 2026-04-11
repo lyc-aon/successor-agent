@@ -22,7 +22,7 @@ Public surface:
 
 from __future__ import annotations
 
-from .cards import Risk, ToolCard
+from .cards import BadgeTone, Risk, ToolCard, ToolCardBadge
 from .parser import (
     bash_parser,
     get_parser,
@@ -70,6 +70,7 @@ from .render import (  # noqa: E402
 
 __all__ = [
     "BashConfig",
+    "BadgeTone",
     "DEFAULT_MAX_OUTPUT_LINES",
     "DEFAULT_TIMEOUT_S",
     "DangerousCommandRefused",
@@ -79,6 +80,7 @@ __all__ = [
     "ReservedPortCommandRefused",
     "Risk",
     "ToolCard",
+    "ToolCardBadge",
     "VerbClass",
     "bash_parser",
     "classify_risk",

@@ -228,6 +228,102 @@ def test_layout_max_lines_unchanged_when_output_fits() -> None:
     assert not any(line.kind == "truncated" for line in clipped)
 
 
+def test_task_ledger_output_uses_semantic_rows_without_clipping() -> None:
+    card = ToolCard(
+        verb="task-ledger",
+        params=(("tasks", "6"),),
+        risk="safe",
+        raw_command="update 6 tasks",
+        confidence=1.0,
+        parser_name="native-task",
+        tool_name="task",
+        tool_arguments={
+            "items": [
+                {"content": f"Task {idx}", "status": "pending"}
+                for idx in range(1, 7)
+            ]
+        },
+        output="Updated the session task ledger.",
+        exit_code=0,
+        duration_ms=0.0,
+    )
+    prep = PreparedToolOutput(card)
+
+    assert prep.preferred_max_lines is None
+    lines = prep.layout(80, max_lines=prep.preferred_max_lines)
+    plain = "\n".join(line.plain for line in lines)
+
+    assert not any(line.kind == "truncated" for line in lines)
+    assert "tasks  " in lines[0].plain
+    assert "0 completed" in plain
+    assert "6 pending" in plain
+    assert "Task 6" in plain
+    assert "[pending]" not in plain
+    assert any(line.kind == "artifact_pending" for line in lines)
+
+
+def test_verification_output_uses_semantic_rows_without_clipping() -> None:
+    card = ToolCard(
+        verb="verification",
+        params=(("assertions", "4"),),
+        risk="safe",
+        raw_command="update 4 assertions",
+        confidence=1.0,
+        parser_name="native-verify",
+        tool_name="verify",
+        tool_arguments={
+            "items": [
+                {
+                    "claim": "Hero CTA opens modal",
+                    "evidence": "browser click changes dialog state",
+                    "status": "passed",
+                    "observed": "dialog rendered",
+                },
+                {
+                    "claim": "No console errors",
+                    "evidence": "console remains clean during playthrough",
+                    "status": "in_progress",
+                    "observed": "",
+                },
+                {
+                    "claim": "Score increments on hit",
+                    "evidence": "HUD score changes after scripted hit",
+                    "status": "pending",
+                    "observed": "",
+                },
+                {
+                    "claim": "Failure path blocks invalid input",
+                    "evidence": "bad command leaves state unchanged",
+                    "status": "failed",
+                    "observed": "invalid input still advanced the timer",
+                },
+            ]
+        },
+        output="Updated the session verification contract.",
+        exit_code=0,
+        duration_ms=0.0,
+    )
+    prep = PreparedToolOutput(card)
+
+    assert prep.preferred_max_lines is None
+    lines = prep.layout(80, max_lines=prep.preferred_max_lines)
+    plain = "\n".join(line.plain for line in lines)
+
+    assert not any(line.kind == "truncated" for line in lines)
+    assert "proof  " in lines[0].plain
+    assert "1 passed" in plain
+    assert "1 failed" in plain
+    assert "1 running" in plain
+    assert "1 pending" in plain
+    assert "evidence" in plain
+    assert "observed" in plain
+    assert "[passed]" not in plain
+    assert any(line.kind == "artifact_done" for line in lines)
+    assert any(line.kind == "artifact_failed" for line in lines)
+    assert any(line.kind == "artifact_active" for line in lines)
+    assert any(line.kind == "artifact_pending" for line in lines)
+
+
 # ─── Search integration: grep output renders with highlights ───
 
 

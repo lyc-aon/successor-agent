@@ -7,6 +7,53 @@ lives in [`docs/changelog.md`](docs/changelog.md).
 
 - no user-facing notes yet
 
+## v0.1.35 — 2026-04-10
+
+This release tightens the tool-card surface so long iterative runs are
+easier to read while they are happening and easier to trust after the
+fact.
+
+### What changed
+
+- semantic streamed tool previews are now first-class instead of
+  bash-biased placeholders
+  - in-flight native tool calls keep stable glyphs and labels while
+    their arguments stream in
+  - unknown streamed tools now render as explicit unsupported/pending
+    states instead of temporarily pretending to be bash
+  - the live `↳ tool` preview now attaches directly below the assistant
+    text without the old stray spacer/cursor line
+- task and verification cards now use richer card-native rendering
+  - full task/proof lists are always shown instead of being clipped by
+    the generic tool-output cap
+  - task and verification rows now have status-specific treatment for
+    completed, active/running, pending, and failed states
+  - card headers now carry summary badges like `4 tasks`, `1 active`,
+    `3 checks`, and `1 failed`
+- verification can now annotate the earlier step it actually judged
+  - after a `verify` update, the most recent substantive prior tool
+    card gets a retroactive proof badge such as `verified` or
+    `proof failed`
+- manual compaction now uses the real structural minimum instead of the
+  old fake 4-round gate
+  - 2-round sessions can compact when there is one older round to
+    summarize and one newer round to keep
+  - the stale `Run /burn first to inflate the context` refusal path is
+    gone
+
+### Verification
+
+- `ruff check src tests`
+- `PYTHONPATH=src pytest -q`
+  - `1275 passed in 25.33s`
+- render-level visual verification:
+  - semantic streaming preview matrix
+  - paper/steel task + verify card inspection
+  - retroactive proof badge inspection on prior tool cards
+- chat-level visual artifacts:
+  - `/tmp/successor-proof-renders/verified-paper-light-final.png`
+  - `/tmp/successor-proof-renders/failed-steel-dark-final.png`
+
 ## v0.1.34 — 2026-04-10
 
 This release tightens one of the last rough edges in the terminal UX:

@@ -199,11 +199,23 @@ def test_compact_reason_propagates_to_boundary() -> None:
 
 
 def test_compact_refuses_too_few_rounds() -> None:
-    log = _build_log(2)  # less than MIN_ROUNDS_TO_COMPACT
+    log = _build_log(1)  # needs one older round to summarize and one to keep
     counter = TokenCounter()
     client = _MockClient(streams=[_stream_with_summary("s")])
     with pytest.raises(ValueError, match="need at least"):
         compact(log, client, counter=counter)
+
+
+def test_compact_allows_two_rounds_when_one_can_be_summarized() -> None:
+    log = _build_log(MIN_ROUNDS_TO_COMPACT)
+    counter = TokenCounter()
+    client = _MockClient(streams=[_stream_with_summary("two-round summary")])
+
+    new_log, boundary = compact(log, client, counter=counter)
+
+    assert boundary.summary_text == "two-round summary"
+    assert boundary.rounds_summarized == 1
+    assert new_log.round_count == 3  # boundary + summary + kept recent round
 
 
 def test_compact_refuses_when_keep_recent_eats_everything() -> None:

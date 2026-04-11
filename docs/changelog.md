@@ -15,6 +15,52 @@ unit on top of phase 0.
 
 - no internal notes yet
 
+## v0.1.35, semantic tool-card + compaction floor release (2026-04-10)
+
+- added a first-class card badge primitive in:
+  - `src/successor/bash/cards.py`
+  - `src/successor/bash/render.py`
+- upgraded task/verify card rendering so the semantic ledgers are
+  painted as proper status-aware artifacts instead of generic clipped
+  stdout
+  - task/proof rows now use dedicated artifact row kinds for:
+    - completed / passed
+    - active / running
+    - pending
+    - failed
+  - task/verify card headers now show badge summaries like:
+    - `4 tasks`
+    - `1 active`
+    - `3 checks`
+    - `1 failed`
+- added a first-pass retroactive proof path in
+  `src/successor/chat_tool_runtime.py`
+  - when the verification contract updates, the most recent substantive
+    prior tool card is mutated in-place with a proof badge such as
+    `verified` or `proof failed`
+  - cache invalidation for the mutated message now clears prepared
+    output plus prepainted row caches so the old card repaints cleanly
+- added semantic in-flight native tool previews in:
+  - `src/successor/streaming_tool_preview.py`
+  - `src/successor/chat_display_runtime.py`
+  - `tests/test_streaming_tool_preview.py`
+  - removes the fake `or "bash"` fallback for unnamed streamed tool
+    calls
+  - gives streamed native tools stable glyph/label/hint previews
+  - keeps the preview visually attached to the streamed assistant text
+- fixed manual and automatic compaction gating to use the real minimum
+  compactable shape instead of a stale hard floor of 4 rounds
+  - `src/successor/agent/compact.py`
+  - `src/successor/agent/loop.py`
+  - `src/successor/chat.py`
+- verification:
+  - `ruff check src tests`
+  - `PYTHONPATH=src pytest -q`
+    - `1275 passed in 25.33s`
+  - visual render inspection:
+    - `/tmp/successor-proof-renders/verified-paper-light-final.png`
+    - `/tmp/successor-proof-renders/failed-steel-dark-final.png`
+
 ## v0.1.34, history browser + live stream scroll release (2026-04-10)
 
 - replaced shell-style empty-prompt history recall with a dedicated

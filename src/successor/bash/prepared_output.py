@@ -54,6 +54,8 @@ from dataclasses import dataclass
 from .cards import ToolCard
 from .diff_artifact import ChangeArtifact, ChangedFile, parse_unified_diff
 from .verbclass import VerbClass, verb_class_for
+from ..tasks import parse_task_items
+from ..verification_contract import parse_verification_items
 
 
 # ─── Span + line primitives ───
@@ -312,6 +314,7 @@ def _query_from_search_params(card: ToolCard) -> str | None:
 
 
 DIFF_MAX_OUTPUT_LINES = 12
+LEDGER_MAX_OUTPUT_LINES: int | None = None
 
 
 class PreparedToolOutput:
@@ -327,10 +330,10 @@ class PreparedToolOutput:
     and does one wrap pass.
     """
 
-    __slots__ = ("_prepared", "_cache_key", "_cache_lines", "_has_semantic_diff")
+    __slots__ = ("_prepared", "_cache_key", "_cache_lines", "_preferred_max_lines")
 
     def __init__(self, card: ToolCard) -> None:
-        self._prepared, self._has_semantic_diff = _prepare_for_card(card)
+        self._prepared, self._preferred_max_lines = _prepare_for_card(card)
         # Cache keyed by (width, max_lines) so changes to either
         # invalidate a single entry. Both axes can change at render
         # time (resize → new width, max_lines stays constant in
@@ -339,8 +342,8 @@ class PreparedToolOutput:
         self._cache_lines: list[OutputLine] = []
 
     @property
-    def preferred_max_lines(self) -> int:
-        return DIFF_MAX_OUTPUT_LINES if self._has_semantic_diff else 5
+    def preferred_max_lines(self) -> int | None:
+        return self._preferred_max_lines
 
     def layout(
         self, width: int, *, max_lines: int | None = None,
@@ -400,7 +403,7 @@ class PreparedToolOutput:
 # ─── Per-card preparation dispatcher ───
 
 
-def _prepare_for_card(card: ToolCard) -> tuple[list[_PreparedLine], bool]:
+def _prepare_for_card(card: ToolCard) -> tuple[list[_PreparedLine], int | None]:
     """Parse `card.output` + `card.stderr` into a list of prepared
     lines, using a verb-class-specific parser where available.
 
@@ -409,10 +412,12 @@ def _prepare_for_card(card: ToolCard) -> tuple[list[_PreparedLine], bool]:
     """
     cls = verb_class_for(card.verb, card.risk)
     prepared: list[_PreparedLine] = []
-    has_semantic_diff = False
-
     stdout_raw = card.output or ""
     stderr_raw = card.stderr or ""
+
+    semantic_ledger = _prepare_semantic_native_artifact(card)
+    if semantic_ledger is not None:
+        return semantic_ledger, LEDGER_MAX_OUTPUT_LINES
 
     change_artifact = card.change_artifact
     if change_artifact is None and _should_parse_unified_diff(card, stdout_raw):
@@ -420,7 +425,6 @@ def _prepare_for_card(card: ToolCard) -> tuple[list[_PreparedLine], bool]:
 
     if change_artifact is not None and change_artifact.has_diff_rows:
         prepared.extend(_prepare_change_artifact(change_artifact))
-        has_semantic_diff = True
 
     elif cls == VerbClass.SEARCH and card.verb == "search-content" and stdout_raw:
         query = _query_from_search_params(card)
@@ -456,7 +460,179 @@ def _prepare_for_card(card: ToolCard) -> tuple[list[_PreparedLine], bool]:
     if stderr_raw:
         prepared.extend(_split_plain_lines(stderr_raw, kind="stderr"))
 
-    return prepared, has_semantic_diff
+    preferred_max_lines = DIFF_MAX_OUTPUT_LINES if change_artifact is not None and change_artifact.has_diff_rows else 5
+    return prepared, preferred_max_lines
+
+
+def _prepare_semantic_native_artifact(card: ToolCard) -> list[_PreparedLine] | None:
+    tool_name = str(card.tool_name or "").strip().lower()
+    items_raw = card.tool_arguments.get("items")
+    if not isinstance(items_raw, list):
+        return None
+    if tool_name == "task":
+        try:
+            return _prepare_task_ledger(items_raw)
+        except Exception:
+            return None
+    if tool_name == "verify":
+        try:
+            return _prepare_verification_ledger(items_raw)
+        except Exception:
+            return None
+    return None
+
+
+def _prepare_task_ledger(items_raw: list[object]) -> list[_PreparedLine]:
+    items = parse_task_items(items_raw)
+    if not items:
+        return [
+            _PreparedLine(
+                spans=(OutputSpan(text="ledger cleared", kind="dim"),),
+                kind="artifact_header",
+            )
+        ]
+
+    completed = sum(1 for item in items if item.status == "completed")
+    active = sum(1 for item in items if item.status == "in_progress")
+    pending = sum(1 for item in items if item.status == "pending")
+    out = [_task_summary_line(completed=completed, active=active, pending=pending)]
+
+    for item in items:
+        glyph, status_kind, label = _task_status_presentation(item.status)
+        row_kind = {
+            "completed": "artifact_done",
+            "in_progress": "artifact_active",
+            "pending": "artifact_pending",
+        }[item.status]
+        out.append(_PreparedLine(
+            spans=(
+                OutputSpan(text=f"{glyph} ", kind=status_kind),
+                OutputSpan(text=f"{label:<10}", kind="label"),
+                OutputSpan(text=item.content, kind="strong"),
+            ),
+            kind=row_kind,
+        ))
+        if item.in_progress and item.active_form != item.content:
+            out.append(_PreparedLine(
+                spans=(
+                    OutputSpan(text="   active     ", kind="label"),
+                    OutputSpan(text=item.active_form, kind="plain"),
+                ),
+                kind="artifact_note",
+            ))
+    return out
+
+
+def _task_summary_line(*, completed: int, active: int, pending: int) -> _PreparedLine:
+    return _PreparedLine(
+        spans=(
+            OutputSpan(text="tasks  ", kind="label"),
+            OutputSpan(text=f"{completed} completed", kind="status_done"),
+            OutputSpan(text=" · ", kind="dim"),
+            OutputSpan(text=f"{active} active", kind="status_active"),
+            OutputSpan(text=" · ", kind="dim"),
+            OutputSpan(text=f"{pending} pending", kind="status_pending"),
+        ),
+        kind="artifact_header",
+    )
+
+
+def _task_status_presentation(status: str) -> tuple[str, str, str]:
+    if status == "completed":
+        return ("✓", "status_done", "completed")
+    if status == "in_progress":
+        return ("◉", "status_active", "active")
+    return ("◌", "status_pending", "pending")
+
+
+def _prepare_verification_ledger(items_raw: list[object]) -> list[_PreparedLine]:
+    items = parse_verification_items(items_raw)
+    if not items:
+        return [
+            _PreparedLine(
+                spans=(OutputSpan(text="verification cleared", kind="dim"),),
+                kind="artifact_header",
+            )
+        ]
+
+    passed = sum(1 for item in items if item.status == "passed")
+    failed = sum(1 for item in items if item.status == "failed")
+    active = sum(1 for item in items if item.status == "in_progress")
+    pending = sum(1 for item in items if item.status == "pending")
+    out = [_verification_summary_line(
+        passed=passed,
+        failed=failed,
+        active=active,
+        pending=pending,
+    )]
+
+    for item in items:
+        glyph, status_kind, label = _verification_status_presentation(item.status)
+        row_kind = {
+            "passed": "artifact_done",
+            "failed": "artifact_failed",
+            "in_progress": "artifact_active",
+            "pending": "artifact_pending",
+        }[item.status]
+        out.append(_PreparedLine(
+            spans=(
+                OutputSpan(text=f"{glyph} ", kind=status_kind),
+                OutputSpan(text=f"{label:<10}", kind="label"),
+                OutputSpan(text=item.claim, kind="strong"),
+            ),
+            kind=row_kind,
+        ))
+        out.append(_PreparedLine(
+            spans=(
+                OutputSpan(text="   evidence   ", kind="label"),
+                OutputSpan(text=item.evidence, kind="plain"),
+            ),
+            kind="artifact_note",
+        ))
+        if item.observed:
+            out.append(_PreparedLine(
+                spans=(
+                    OutputSpan(text="   observed   ", kind="label"),
+                    OutputSpan(
+                        text=item.observed,
+                        kind="warn" if item.status == "failed" else "plain",
+                    ),
+                ),
+                kind="artifact_note",
+            ))
+    return out
+
+
+def _verification_summary_line(
+    *,
+    passed: int,
+    failed: int,
+    active: int,
+    pending: int,
+) -> _PreparedLine:
+    return _PreparedLine(
+        spans=(
+            OutputSpan(text="proof  ", kind="label"),
+            OutputSpan(text=f"{passed} passed", kind="status_done"),
+            OutputSpan(text=" · ", kind="dim"),
+            OutputSpan(text=f"{failed} failed", kind="status_failed"),
+            OutputSpan(text=" · ", kind="dim"),
+            OutputSpan(text=f"{active} running", kind="status_active"),
+            OutputSpan(text=" · ", kind="dim"),
+            OutputSpan(text=f"{pending} pending", kind="status_pending"),
+        ),
+        kind="artifact_header",
+    )
+
+
+def _verification_status_presentation(status: str) -> tuple[str, str, str]:
+    if status == "passed":
+        return ("✓", "status_done", "passed")
+    if status == "failed":
+        return ("✗", "status_failed", "failed")
+    if status == "in_progress":
+        return ("◉", "status_active", "running")
+    return ("◌", "status_pending", "pending")
 
 
 def _should_parse_unified_diff(card: ToolCard, stdout_raw: str) -> bool:

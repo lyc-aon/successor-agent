@@ -1578,7 +1578,7 @@ class ChatAgentLoop:
                 self._host._stream = None
                 self._host._stream_content = []
                 self._host._stream_reasoning_chars = 0
-                self._host._streaming_verb_cache = {}
+                self._host._streaming_preview_cache = {}
 
                 any_ran = False
                 if native_calls:
@@ -1683,7 +1683,7 @@ class ChatAgentLoop:
                 self._host._stream = None
                 self._host._stream_content = []
                 self._host._stream_reasoning_chars = 0
-                self._host._streaming_verb_cache = {}
+                self._host._streaming_preview_cache = {}
                 self._host._stream_bash_detector = None
                 self._host._agent_turn = 0
 

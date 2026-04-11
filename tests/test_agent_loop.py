@@ -343,13 +343,9 @@ def test_loop_blocking_limit_emits_event_and_stops() -> None:
         streams=[],  # no streams needed; we never call the API
         window=100, autocompact_buffer=20, blocking_buffer=5,
     )
-    # Stuff the log far past blocking limit with rounds that compact
-    # can't shrink because there are too few of them
-    loop.log.begin_round()
-    loop.log.append_to_current_round(LogMessage(
-        role="user", content="x" * 1000, created_at=1.0,
-    ))
-    loop.start("trigger")
+    # Start with a single huge round so the loop is far past the
+    # blocking limit but still has too little structure to compact.
+    loop.start("x" * 1000)
     _drive_to_idle(loop)
     assert any(isinstance(e, BlockingLimitReached) for e in events)
     assert loop.phase == LoopPhase.DONE

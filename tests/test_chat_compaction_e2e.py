@@ -242,6 +242,31 @@ def test_disabled_compaction_manual_compact_still_works(
     assert chat._pending_agent_turn_after_compact is False
 
 
+def test_manual_compact_allows_two_large_rounds_without_burn(
+    temp_config_dir: Path,
+) -> None:
+    """A large two-round conversation is already compactable.
+
+    Manual /compact should not require synthetic burn rounds just
+    because the chat history is structurally small.
+    """
+    from successor.chat import _Message
+
+    PROFILE_REGISTRY.reload()
+    THEME_REGISTRY.reload()
+    chat, _client = _make_chat(profile=Profile(name="manual-two-round"), window=200_000)
+    chat.messages = [
+        _Message("user", "q0 " + ("alpha " * 8000)),
+        _Message("successor", "a0 " + ("beta " * 8000)),
+        _Message("user", "q1 " + ("gamma " * 8000)),
+        _Message("successor", "a1 " + ("delta " * 8000)),
+    ]
+
+    chat._handle_compact_cmd()
+
+    assert chat._compaction_worker is not None
+
+
 # ─── Invalid profile JSON ───
 
 

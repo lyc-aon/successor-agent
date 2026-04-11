@@ -51,9 +51,9 @@ from ..render.paint import (
 )
 from ..render.text import lerp_rgb
 from ..render.theme import ThemeVariant, oklch_to_rgb
-from .cards import Risk, ToolCard
+from .cards import Risk, ToolCard, ToolCardBadge
 from .prepared_output import OutputLine, PreparedToolOutput
-from .verbclass import glyph_for_class, verb_class_for
+from .verbclass import VerbClass, glyph_for_class, verb_class_for
 
 
 # Spinner frames shared with the chat's "thinking" indicator. Imported
@@ -136,6 +136,30 @@ def _span_style(
     if row_kind == "stderr":
         base_fg = theme.accent_warn
         base_attrs = ATTR_DIM
+    elif row_kind == "artifact_done":
+        base_fg = theme.fg
+        base_bg = lerp_rgb(theme.bg_input, theme.accent, 0.10)
+        base_attrs = 0
+    elif row_kind == "artifact_active":
+        base_fg = theme.fg
+        base_bg = lerp_rgb(theme.bg_input, theme.accent_warm, 0.12)
+        base_attrs = 0
+    elif row_kind == "artifact_pending":
+        base_fg = theme.fg
+        base_bg = lerp_rgb(theme.bg_input, theme.fg_subtle, 0.06)
+        base_attrs = 0
+    elif row_kind == "artifact_failed":
+        base_fg = theme.fg
+        base_bg = lerp_rgb(theme.bg_input, theme.accent_warn, 0.11)
+        base_attrs = 0
+    elif row_kind == "artifact_header":
+        base_fg = theme.fg_subtle
+        base_bg = lerp_rgb(theme.bg_input, theme.accent, 0.08)
+        base_attrs = ATTR_DIM | ATTR_BOLD
+    elif row_kind == "artifact_note":
+        base_fg = theme.fg
+        base_bg = lerp_rgb(theme.bg_input, theme.fg_subtle, 0.05)
+        base_attrs = 0
     elif row_kind == "diff_add":
         base_fg = diff_add_fg
         base_bg = diff_add_bg
@@ -174,6 +198,30 @@ def _span_style(
         return Style(
             fg=theme.bg, bg=theme.accent_warm,
             attrs=ATTR_BOLD,
+        )
+    if span_kind == "strong":
+        return Style(
+            fg=base_fg, bg=base_bg, attrs=ATTR_BOLD,
+        )
+    if span_kind == "label":
+        return Style(
+            fg=theme.fg_dim, bg=base_bg, attrs=ATTR_DIM | ATTR_BOLD,
+        )
+    if span_kind == "status_done":
+        return Style(
+            fg=theme.accent, bg=base_bg, attrs=ATTR_BOLD,
+        )
+    if span_kind == "status_active":
+        return Style(
+            fg=theme.accent_warm, bg=base_bg, attrs=ATTR_BOLD,
+        )
+    if span_kind == "status_pending":
+        return Style(
+            fg=theme.fg_subtle, bg=base_bg, attrs=ATTR_DIM | ATTR_BOLD,
+        )
+    if span_kind == "status_failed":
+        return Style(
+            fg=theme.accent_warn, bg=base_bg, attrs=ATTR_BOLD,
         )
     if span_kind == "chrome":
         return Style(
@@ -252,6 +300,10 @@ def _verb_glyph_for_card(card: ToolCard) -> str:
     make the card kind recognizable without reading verb text.
     """
     cls = verb_class_for(card.verb, card.risk)
+    if cls == VerbClass.UNKNOWN and card.tool_name != "bash":
+        prefix = (card.raw_label_prefix or "").strip()
+        if prefix:
+            return prefix + " "
     return glyph_for_class(cls) + " "
 
 
@@ -266,6 +318,57 @@ def _raw_label(card: ToolCard) -> str:
     if extra_line_count > 0:
         return f"{label}  (+{extra_line_count} lines) "
     return f"{label} "
+
+
+def _badge_style(badge: ToolCardBadge, theme: ThemeVariant) -> Style:
+    tone = badge.tone
+    if tone == "danger":
+        fg = theme.bg
+        bg = theme.accent_warn
+    elif tone == "warning":
+        fg = theme.bg
+        bg = theme.accent_warm
+    elif tone == "success":
+        fg = theme.bg
+        bg = theme.accent
+    elif tone == "accent":
+        fg = theme.bg
+        bg = theme.accent
+    else:
+        fg = theme.fg
+        bg = lerp_rgb(theme.bg, theme.fg_subtle, 0.14)
+    return Style(fg=fg, bg=bg, attrs=ATTR_BOLD)
+
+
+def _paint_card_badges(
+    grid: Grid,
+    *,
+    badges: tuple[ToolCardBadge, ...],
+    x: int,
+    y: int,
+    box_w: int,
+    min_x: int,
+    theme: ThemeVariant,
+) -> None:
+    if not badges or not (0 <= y < grid.rows):
+        return
+    cursor = x + box_w - 3
+    for badge in reversed(badges):
+        text = badge.text.strip()
+        if not text:
+            continue
+        pill = f" {text} "
+        badge_x = cursor - len(pill) + 1
+        if badge_x <= min_x:
+            break
+        paint_text(
+            grid,
+            pill,
+            badge_x,
+            y,
+            style=_badge_style(badge, theme),
+        )
+        cursor = badge_x - 1
 
 
 # ─── Height computation ───
@@ -373,6 +476,15 @@ def paint_tool_card(
             grid, header_text, header_x, y,
             style=Style(fg=theme.bg, bg=border, attrs=ATTR_BOLD),
         )
+    _paint_card_badges(
+        grid,
+        badges=card.badges,
+        x=x,
+        y=y,
+        box_w=box_w,
+        min_x=header_x + len(header_text),
+        theme=theme,
+    )
 
     # ─── Param rows inside the box ───
     label_w = min(
@@ -645,6 +757,15 @@ def paint_tool_card_running(
             grid, header_text, header_x, y,
             style=Style(fg=theme.bg, bg=border, attrs=ATTR_BOLD),
         )
+    _paint_card_badges(
+        grid,
+        badges=preview_card.badges,
+        x=x,
+        y=y,
+        box_w=box_w,
+        min_x=header_x + len(header_text),
+        theme=theme,
+    )
 
     # ─── Param rows inside the box ───
     label_w = min(

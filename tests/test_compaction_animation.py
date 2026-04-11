@@ -565,7 +565,8 @@ def test_handle_compact_cmd_is_non_blocking(temp_config_dir: Path) -> None:
     # mock client's bogus /tokenize URL
     chat._cached_token_counter = TokenCounter()
     chat.messages = []
-    # Need at least 4 rounds for compaction not to refuse
+    # Need at least two rounds so compaction has one older round to
+    # summarize and one recent round to keep.
     for i in range(6):
         chat.messages.append(_Message("user", f"q{i}"))
         chat.messages.append(_Message("successor", f"a{i}"))

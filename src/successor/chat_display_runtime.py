@@ -42,156 +42,28 @@ from .render.paint import fill_region, paint_text
 from .render.text import ease_out_cubic, lerp_rgb
 from .render.theme import ThemeVariant
 from .tools_registry import tool_label
+from .streaming_tool_preview import build_streaming_tool_preview
 
 
-def _infer_tool_preview(
-    command_text: str,
-) -> tuple[str, str, str] | None:
-    """Return a stable preview header for a partial bash tool call."""
-    if not command_text or len(command_text.strip()) < 3:
-        return None
-    try:
-        from .bash import preview_bash
-        from .bash.verbclass import glyph_for_class, verb_class_for
+def _trim_trailing_empty_markdown_lines(lines: list[LaidOutLine]) -> list[LaidOutLine]:
+    """Drop trailing empty paragraph rows that only create dead air.
 
-        card = preview_bash(command_text)
-    except Exception:
-        return None
-    if card.confidence < 0.7:
-        return None
-    cls = verb_class_for(card.verb, card.risk)
-    glyph = glyph_for_class(cls)
-    hint = ""
-    for key, value in card.params:
-        if not value or value == "(missing)":
-            continue
-        text = str(value).replace("\n", " ").strip()
-        if len(text) > 50:
-            text = text[:47] + "…"
-        hint = f"{key}: {text}"
-        break
-    return (glyph, card.verb, hint)
-
-
-def _extract_command_tail(raw_args: str) -> str:
-    """Best-effort extract of the streaming `command` JSON field."""
-    if not raw_args:
-        return ""
-    for key_marker in ('"command":"', '"command": "'):
-        idx = raw_args.find(key_marker)
-        if idx == -1:
-            continue
-        body = raw_args[idx + len(key_marker):]
-        out: list[str] = []
-        i = 0
-        while i < len(body):
-            ch = body[i]
-            if ch == '"':
-                break
-            if ch == "\\" and i + 1 < len(body):
-                nxt = body[i + 1]
-                if nxt == "n":
-                    out.append("\n")
-                    i += 2
-                    continue
-                if nxt == "t":
-                    out.append("\t")
-                    i += 2
-                    continue
-                if nxt == "r":
-                    out.append("\r")
-                    i += 2
-                    continue
-                if nxt == '"':
-                    out.append('"')
-                    i += 2
-                    continue
-                if nxt == "\\":
-                    out.append("\\")
-                    i += 2
-                    continue
-                if nxt == "/":
-                    out.append("/")
-                    i += 2
-                    continue
-                out.append("\\")
-                i += 1
-                continue
-            out.append(ch)
-            i += 1
-        return "".join(out)
-    return raw_args
-
-
-def _extract_json_string_field(raw_args: str, field: str) -> str:
-    """Best-effort extraction of one JSON string field from a partial blob."""
-    if not raw_args:
-        return ""
-    markers = (f'"{field}":"', f'"{field}": "')
-    for key_marker in markers:
-        idx = raw_args.find(key_marker)
-        if idx == -1:
-            continue
-        body = raw_args[idx + len(key_marker):]
-        out: list[str] = []
-        i = 0
-        while i < len(body):
-            ch = body[i]
-            if ch == '"':
-                break
-            if ch == "\\" and i + 1 < len(body):
-                nxt = body[i + 1]
-                if nxt == "n":
-                    out.append("\n")
-                    i += 2
-                    continue
-                if nxt == "t":
-                    out.append("\t")
-                    i += 2
-                    continue
-                if nxt == "r":
-                    out.append("\r")
-                    i += 2
-                    continue
-                if nxt in ('"', "\\", "/"):
-                    out.append(nxt)
-                    i += 2
-                    continue
-                out.append("\\")
-                i += 1
-                continue
-            out.append(ch)
-            i += 1
-        return "".join(out)
-    return raw_args
-
-
-def _tool_preview_text(name: str, raw_args: str) -> str:
-    if name == "bash":
-        return _extract_command_tail(raw_args)
-    if name == "task":
-        content = _extract_json_string_field(raw_args, "content")
-        return f"update tasks {content}" if content else "update tasks"
-    if name == "skill":
-        skill = _extract_json_string_field(raw_args, "skill")
-        task = _extract_json_string_field(raw_args, "task")
-        bits = [bit for bit in (skill, task) if bit]
-        return " ".join(bits) if bits else raw_args
-    if name == "subagent":
-        return _extract_json_string_field(raw_args, "prompt")
-    if name == "holonet":
-        provider = _extract_json_string_field(raw_args, "provider")
-        query = _extract_json_string_field(raw_args, "query")
-        url = _extract_json_string_field(raw_args, "url")
-        bits = [bit for bit in (provider, query or url) if bit]
-        return " ".join(bits) if bits else raw_args
-    if name == "browser":
-        action = _extract_json_string_field(raw_args, "action")
-        target = _extract_json_string_field(raw_args, "target")
-        url = _extract_json_string_field(raw_args, "url")
-        bits = [bit for bit in (action, target or url) if bit]
-        return " ".join(bits) if bits else raw_args
-    return raw_args
+    This is intentionally conservative: code blocks, headers, quotes,
+    and any other tagged rows stay intact. We only strip plain empty
+    lines at the tail so in-flight tool previews can sit directly
+    beneath the last real streamed line.
+    """
+    trimmed = list(lines)
+    while trimmed:
+        tail = trimmed[-1]
+        if tail.line_tag:
+            break
+        if tail.indent:
+            break
+        if any(span.text for span in tail.spans):
+            break
+        trimmed.pop()
+    return trimmed
 
 
 class ChatDisplayRuntime:
@@ -672,7 +544,7 @@ class ChatDisplayRuntime:
             content_so_far = "".join(host._stream_content)
 
         tool_calls_in_flight = getattr(host._stream, "tool_calls_so_far", None) or []
-        out: list[RenderedRow] = [self._row(base_color=theme.accent)]
+        out: list[RenderedRow] = []
 
         if not content_so_far:
             text = (
@@ -718,7 +590,7 @@ class ChatDisplayRuntime:
                     continue
                 out.extend(
                     self.streaming_tool_call_preview_rows(
-                        name=tc.get("name") or "bash",
+                        name=tc.get("name") or "",
                         raw_arguments=raw_args,
                         call_index=tc.get("index", 0),
                         body_width=body_width,
@@ -728,9 +600,16 @@ class ChatDisplayRuntime:
                 )
             return out
 
-        live_md = PreparedMarkdown(content_so_far + "▌")
+        live_md = PreparedMarkdown(content_so_far)
         md_width = max(1, body_width - self._prefix_width)
         md_lines = live_md.lines(md_width)
+        if block_in_flight or tool_calls_in_flight:
+            md_lines = _trim_trailing_empty_markdown_lines(md_lines)
+        if md_lines:
+            last_line = md_lines[-1]
+            last_line.spans.append(LaidOutSpan(text="▌"))
+        else:
+            md_lines = [LaidOutLine(spans=[LaidOutSpan(text="▌")])]
         for line_idx, md_line in enumerate(md_lines):
             leading = (
                 self._successor_prefix if line_idx == 0 else " " * self._prefix_width
@@ -769,7 +648,7 @@ class ChatDisplayRuntime:
                 continue
             out.extend(
                 self.streaming_tool_call_preview_rows(
-                    name=tc.get("name") or "bash",
+                    name=tc.get("name") or "",
                     raw_arguments=raw_args,
                     call_index=tc.get("index", 0),
                     body_width=body_width,
@@ -790,7 +669,16 @@ class ChatDisplayRuntime:
         spinner: str,
     ) -> list[RenderedRow]:
         host = self._host
-        display_text = _tool_preview_text(name, raw_arguments)
+        cache_key = (id(host._stream), call_index)
+        prior = host._streaming_preview_cache.get(cache_key)
+        preview = build_streaming_tool_preview(
+            name=name,
+            raw_arguments=raw_arguments,
+            prior=prior,
+        )
+        if preview.sticky:
+            host._streaming_preview_cache[cache_key] = preview
+        display_text = preview.display_text or raw_arguments
         max_preview_lines = 5
         avail_w = max(10, body_width - self._prefix_width - 6)
 
@@ -808,22 +696,11 @@ class ChatDisplayRuntime:
         tail_lines[-1] = tail_lines[-1] + "▌"
 
         rows: list[RenderedRow] = []
-        inferred = _infer_tool_preview(display_text) if name == "bash" else None
-        cache_key = (id(host._stream), call_index)
-        if inferred is not None:
-            host._streaming_verb_cache[cache_key] = inferred
-        else:
-            inferred = host._streaming_verb_cache.get(cache_key)
-
-        if inferred is not None:
-            glyph, verb_name, hint = inferred
-            header_text = (
-                f"{spinner} {glyph} {verb_name}  {hint}"
-                if hint
-                else f"{spinner} {glyph} {verb_name}"
-            )
-        else:
-            header_text = f"{spinner} ⟡ {name} — receiving arguments…"
+        header_text = f"{spinner} {preview.glyph} {preview.label}"
+        if preview.hint:
+            header_text += f"  {preview.hint}"
+        elif preview.status:
+            header_text += f" — {preview.status}"
         rows.append(
             self._row(
                 leading_text=" " * self._prefix_width + "  ↳ ",

@@ -75,7 +75,13 @@ from ..providers.llama import (
 )
 from .bash_stream import BashStreamDetector
 from .budget import BudgetTracker
-from .compact import CompactionError, compact, MIN_ROUNDS_TO_COMPACT
+from .compact import (
+    CompactionError,
+    DEFAULT_KEEP_RECENT_ROUNDS,
+    can_compact_log,
+    compact,
+    normalized_keep_recent_rounds,
+)
 from .events import (
     BashBlockDetected,
     BlockingLimitReached,
@@ -271,10 +277,14 @@ class QueryLoop:
 
         # 3. Should we autocompact?
         decision, reason = self.budget.should_attempt_compaction(used, self.turn_count)
-        if decision and self.log.round_count >= MIN_ROUNDS_TO_COMPACT:
+        if decision and can_compact_log(self.log):
+            keep_recent = normalized_keep_recent_rounds(
+                self.log.round_count,
+                keep_recent_rounds=DEFAULT_KEEP_RECENT_ROUNDS,
+            )
             self._emit(CompactionStarted(
                 pre_compact_tokens=used,
-                rounds_to_summarize=self.log.round_count - 6,  # mirrors compact() default
+                rounds_to_summarize=self.log.round_count - keep_recent,
                 reason="auto",
             ))
             try:
@@ -406,15 +416,25 @@ class QueryLoop:
             self._emit(LoopErrored(message=f"reactive compact unavailable (circuit tripped): {original_error}"))
             self.phase = LoopPhase.DONE
             return
-        if self.log.round_count < MIN_ROUNDS_TO_COMPACT:
-            self._emit(LoopErrored(message=f"reactive compact unavailable (too few rounds): {original_error}"))
+        if not can_compact_log(self.log):
+            self._emit(LoopErrored(
+                message=(
+                    "reactive compact unavailable "
+                    "(need at least one older round to summarize and one recent round to keep): "
+                    f"{original_error}"
+                )
+            ))
             self.phase = LoopPhase.DONE
             return
 
         used_before = self.counter.count_log(self.log)
+        keep_recent = normalized_keep_recent_rounds(
+            self.log.round_count,
+            keep_recent_rounds=DEFAULT_KEEP_RECENT_ROUNDS,
+        )
         self._emit(CompactionStarted(
             pre_compact_tokens=used_before,
-            rounds_to_summarize=self.log.round_count - 6,
+            rounds_to_summarize=self.log.round_count - keep_recent,
             reason="reactive",
         ))
         try:

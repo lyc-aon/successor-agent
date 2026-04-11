@@ -6,9 +6,12 @@ import json
 import time
 from pathlib import Path
 
-from successor.chat import SuccessorChat
+from successor.bash import ToolCard
+from successor.chat import SuccessorChat, _Message
 from successor.profiles import Profile
 from successor.providers.llama import ContentChunk, StreamEnded
+from successor.snapshot import render_grid_to_plain
+from successor.render.cells import Grid
 
 
 class _MockClient:
@@ -118,6 +121,119 @@ def test_verify_tool_dispatch_updates_session_contract(temp_config_dir: Path) ->
     chat._trace.close()
     events = _trace_events(temp_config_dir)
     assert any(event["type"] == "verification_contract_updated" for event in events)
+
+
+def test_verify_retroactively_marks_latest_substantive_tool_card(
+    temp_config_dir: Path,
+) -> None:
+    chat = SuccessorChat(
+        profile=Profile(name="agent", tools=("bash",)),
+        client=_MockClient(),
+    )
+    chat.messages = []
+    chat.messages.append(
+        _Message(
+            "tool",
+            "",
+            tool_card=ToolCard(
+                verb="write-file",
+                params=(("path", "/tmp/demo.js"),),
+                risk="mutating",
+                raw_command="write /tmp/demo.js",
+                confidence=1.0,
+                parser_name="native-write-file",
+                tool_name="write_file",
+                raw_label_prefix="✎",
+                exit_code=0,
+                duration_ms=12.0,
+                output="Wrote /tmp/demo.js",
+                tool_call_id="call_write_1",
+            ),
+        )
+    )
+
+    assert chat._dispatch_native_tool_calls([
+        {
+            "id": "call_verify_1",
+            "name": "verify",
+            "arguments": {
+                "items": [
+                    {
+                        "claim": "The page loads without a blank viewport",
+                        "evidence": "browser open plus screenshot inspection",
+                        "status": "passed",
+                        "observed": "viewport rendered correctly",
+                    }
+                ]
+            },
+            "raw_arguments": '{"items":[{"claim":"The page loads without a blank viewport","evidence":"browser open plus screenshot inspection","status":"passed","observed":"viewport rendered correctly"}]}',
+        }
+    ])
+
+    cards = [m.tool_card for m in chat.messages if m.tool_card is not None]
+    assert len(cards) == 2
+    assert any(badge.key == "proof" and badge.text == "verified" for badge in cards[0].badges)
+
+    grid = Grid(24, 110)
+    chat.on_tick(grid)
+    plain = render_grid_to_plain(grid)
+    assert "verified" in plain
+    assert "1 checks" in plain
+
+
+def test_verify_retroactive_badge_tracks_failure_state(
+    temp_config_dir: Path,
+) -> None:
+    chat = SuccessorChat(
+        profile=Profile(name="agent", tools=("bash",)),
+        client=_MockClient(),
+    )
+    chat.messages = []
+    chat.messages.append(
+        _Message(
+            "tool",
+            "",
+            tool_card=ToolCard(
+                verb="browser",
+                params=(("action", "click"),),
+                risk="safe",
+                raw_command="browser click",
+                confidence=1.0,
+                parser_name="native-browser",
+                tool_name="browser",
+                raw_label_prefix="◉",
+                exit_code=0,
+                duration_ms=18.0,
+                output="Clicked target",
+                tool_call_id="call_browser_1",
+            ),
+        )
+    )
+
+    assert chat._dispatch_native_tool_calls([
+        {
+            "id": "call_verify_1",
+            "name": "verify",
+            "arguments": {
+                "items": [
+                    {
+                        "claim": "Failure path blocks invalid input",
+                        "evidence": "bad command leaves state unchanged",
+                        "status": "failed",
+                        "observed": "invalid input still advanced the timer",
+                    }
+                ]
+            },
+            "raw_arguments": '{"items":[{"claim":"Failure path blocks invalid input","evidence":"bad command leaves state unchanged","status":"failed","observed":"invalid input still advanced the timer"}]}',
+        }
+    ])
+
+    cards = [m.tool_card for m in chat.messages if m.tool_card is not None]
+    assert len(cards) == 2
+    assert any(
+        badge.key == "proof" and badge.text == "proof failed"
+        for badge in cards[0].badges
+    )
 
 
 def test_in_progress_verification_triggers_single_continuation_nudge(

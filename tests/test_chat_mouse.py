@@ -90,12 +90,12 @@ def test_streaming_rows_expand_scroll_headroom(temp_config_dir: Path) -> None:
     chat.density = compact
     chat.messages = [
         _Message("user", f"line {i}")
-        for i in range(4)
+        for i in range(5)
     ]
     chat._stream = _IdleStream()  # type: ignore[assignment]
     chat._stream_reasoning_chars = 42
 
-    grid = Grid(8, 80)
+    grid = Grid(7, 80)
     chat.on_tick(grid)
 
     assert chat._stream is not None

@@ -19,6 +19,7 @@ from .bash import (
     RefusedCommand,
     ReservedPortCommandRefused,
     ToolCard,
+    ToolCardBadge,
     resolve_bash_config,
 )
 from .bash.change_capture import begin_change_capture, finalize_change_capture
@@ -110,6 +111,111 @@ class ChatToolRuntime:
 
     def _append_tool_card(self, card: ToolCard, **kwargs: Any) -> None:
         self._append(self._message("tool", "", tool_card=card, **kwargs))
+
+    def _invalidate_tool_card_cache(self, msg: Any) -> None:
+        msg._prepared_tool_output = None
+        msg._card_rows_cache_key = None
+        msg._card_rows_cache = None
+
+    def _replace_badges(
+        self,
+        card: ToolCard,
+        *,
+        keys: tuple[str, ...],
+        badges: tuple[ToolCardBadge, ...],
+    ) -> ToolCard:
+        keys_set = set(keys)
+        kept = tuple(b for b in card.badges if b.key not in keys_set)
+        merged = kept + badges
+        if merged == card.badges:
+            return card
+        return replace(card, badges=merged)
+
+    def _task_badges(self) -> tuple[ToolCardBadge, ...]:
+        ledger = self._host._task_ledger
+        total = len(ledger.items)
+        if total == 0:
+            return (ToolCardBadge("task-state", "cleared", "subtle"),)
+        active = sum(1 for item in ledger.items if item.status == "in_progress")
+        pending = sum(1 for item in ledger.items if item.status == "pending")
+        if active > 0:
+            state = ToolCardBadge("task-state", f"{active} active", "warning")
+        elif pending > 0:
+            state = ToolCardBadge("task-state", f"{pending} pending", "subtle")
+        else:
+            state = ToolCardBadge("task-state", "all done", "success")
+        return (
+            ToolCardBadge("task-count", f"{total} tasks", "accent"),
+            state,
+        )
+
+    def _verification_badges(self) -> tuple[ToolCardBadge, ...]:
+        ledger = self._host._verification_ledger
+        total = len(ledger.items)
+        if total == 0:
+            return (ToolCardBadge("verify-state", "cleared", "subtle"),)
+        failed = ledger.failed_count()
+        active = sum(1 for item in ledger.items if item.status == "in_progress")
+        pending = ledger.pending_count()
+        passed = ledger.passed_count()
+        if failed > 0:
+            state = ToolCardBadge("verify-state", f"{failed} failed", "danger")
+        elif active > 0:
+            state = ToolCardBadge("verify-state", f"{active} running", "warning")
+        elif pending > 0:
+            state = ToolCardBadge("verify-state", f"{pending} pending", "subtle")
+        else:
+            state = ToolCardBadge("verify-state", f"{passed} passed", "success")
+        return (
+            ToolCardBadge("verify-count", f"{total} checks", "accent"),
+            state,
+        )
+
+    def _retroactive_proof_badges(self) -> tuple[ToolCardBadge, ...]:
+        ledger = self._host._verification_ledger
+        if not ledger.items:
+            return ()
+        if ledger.failed_count() > 0:
+            return (ToolCardBadge("proof", "proof failed", "danger"),)
+        if any(item.status == "in_progress" for item in ledger.items):
+            return (ToolCardBadge("proof", "proof running", "warning"),)
+        if ledger.pending_count() > 0:
+            return (ToolCardBadge("proof", "proof pending", "subtle"),)
+        if ledger.passed_count() == len(ledger.items):
+            return (ToolCardBadge("proof", "verified", "success"),)
+        return ()
+
+    def _annotate_latest_substantive_tool_card(self) -> None:
+        target_msg = None
+        for msg in reversed(self._host.messages):
+            card = getattr(msg, "tool_card", None)
+            if card is None:
+                continue
+            if card.tool_name in {"task", "verify", "runbook"}:
+                continue
+            target_msg = msg
+            break
+        if target_msg is None or target_msg.tool_card is None:
+            return
+        updated_card = self._replace_badges(
+            target_msg.tool_card,
+            keys=("proof",),
+            badges=self._retroactive_proof_badges(),
+        )
+        if updated_card == target_msg.tool_card:
+            return
+        target_msg.tool_card = updated_card
+        self._invalidate_tool_card_cache(target_msg)
+        proof_state = next(
+            (badge.text for badge in updated_card.badges if badge.key == "proof"),
+            "",
+        )
+        self._host._trace_event(
+            "retroactive_proof_annotation",
+            tool_name=updated_card.tool_name,
+            tool_call_id=updated_card.tool_call_id,
+            proof_state=proof_state,
+        )
 
     def _append_running_tool(self, preview: ToolCard, runner: Any) -> None:
         msg = self._message("tool", "", tool_card=preview, running_tool=runner)
@@ -530,6 +636,7 @@ class ChatToolRuntime:
             tool_name="task",
             tool_arguments=payload,
             raw_label_prefix="#",
+            badges=self._task_badges(),
             tool_call_id=resolved_call_id,
         )
         final_card = replace(
@@ -612,6 +719,7 @@ class ChatToolRuntime:
             tool_name="verify",
             tool_arguments=payload,
             raw_label_prefix="✓",
+            badges=self._verification_badges(),
             tool_call_id=resolved_call_id,
         )
         final_card = replace(
@@ -654,6 +762,7 @@ class ChatToolRuntime:
             stderr_excerpt="",
             truncated=False,
         )
+        self._annotate_latest_substantive_tool_card()
         self._append_tool_card(final_card)
         self._host._scroll_to_bottom()
         return True
@@ -1265,8 +1374,7 @@ class ChatToolRuntime:
                         tool_call_id=runner.tool_call_id,
                         message=ev.message,
                     )
-            msg._card_rows_cache_key = None
-            msg._card_rows_cache = None
+            self._invalidate_tool_card_cache(msg)
             if runner.is_done():
                 finalized = self.finalize_runner(msg)
                 if finalized is not None:
@@ -1327,8 +1435,7 @@ class ChatToolRuntime:
         metadata = dict(getattr(runner, "metadata", None) or {})
         msg.tool_card = final_card
         msg.running_tool = None
-        msg._card_rows_cache_key = None
-        msg._card_rows_cache = None
+        self._invalidate_tool_card_cache(msg)
         tool_name = getattr(final_card, "tool_name", "bash")
         event_name = "bash_runner_finished" if tool_name == "bash" else "tool_runner_finished"
         self._host._trace_event(
