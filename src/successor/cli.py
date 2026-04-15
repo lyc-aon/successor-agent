@@ -7,6 +7,7 @@ Subcommands:
     successor setup          — profile creation wizard with live preview
     successor config         — three-pane profile config menu
     successor doctor         — terminal capability check
+    successor login          — OAuth device flow for Kimi Code
     successor skills         — list loaded skills
     successor tools          — list registered tools
     successor record         — record a session (bundle or raw input JSONL)
@@ -484,6 +485,137 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_login(args: argparse.Namespace) -> int:
+    """Run the Kimi Code OAuth device flow and create a profile.
+
+    1. Request device authorization from auth.kimi.com
+    2. Print verification URL + user code
+    3. Poll until the user authorizes
+    4. Save the token to credentials storage
+    5. Fetch available models
+    6. Write a kimi-code profile
+    """
+    from .oauth import (
+        KIMI_CODE_CLIENT_ID,
+        DEFAULT_OAUTH_HOST,
+        OAuthToken,
+        request_device_authorization,
+        request_device_token,
+    )
+    from .oauth.storage import save_token
+    import urllib.request
+    import webbrowser
+
+    print("Kimi Code — OAuth device authorization")
+    print()
+
+    # Step 1: request device code
+    try:
+        auth = request_device_authorization()
+    except Exception as exc:
+        print(f"error: device authorization failed: {exc}")
+        return 1
+
+    # Step 2: show URL + code
+    print("Please visit the following URL to finish authorization:")
+    print()
+    print(f"  {auth.verification_uri_complete}")
+    print()
+    print(f"  User code: {auth.user_code}")
+    print()
+    try:
+        webbrowser.open(auth.verification_uri_complete)
+    except Exception:
+        pass
+
+    # Step 3: poll for token
+    print("Waiting for authorization", end="", flush=True)
+    deadline = time.time() + (auth.expires_in or 600)
+    token = None
+    while time.time() < deadline:
+        time.sleep(max(auth.interval, 1))
+        print(".", end="", flush=True)
+        try:
+            status, data = request_device_token(
+                auth.device_code,
+                client_id=KIMI_CODE_CLIENT_ID,
+                oauth_host=DEFAULT_OAUTH_HOST,
+            )
+        except Exception as exc:
+            print(f"\nerror: token request failed: {exc}")
+            return 1
+        if status == 200 and "access_token" in data:
+            token = OAuthToken.from_response(data)
+            break
+        error = str(data.get("error") or "")
+        if error == "expired_token":
+            print("\nerror: device code expired. Please try again.")
+            return 1
+        if error == "slow_down":
+            time.sleep(5)
+    print()
+
+    if token is None:
+        print("error: authorization timed out. Please try again.")
+        return 1
+
+    # Step 4: save token
+    save_token("oauth/kimi-code", token)
+    print("Token saved.")
+
+    # Step 5: fetch models
+    model_name = "kimi-k2-5"
+    try:
+        req = urllib.request.Request(
+            "https://api.kimi.com/coding/v1/models",
+            headers={
+                "Authorization": f"Bearer {token.access_token}",
+                "User-Agent": "successor/1.0",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=15.0) as resp:
+            models_data = json.loads(resp.read().decode("utf-8"))
+        model_ids = [
+            m.get("id", "")
+            for m in models_data.get("data", [])
+            if isinstance(m, dict) and m.get("id")
+        ]
+        if "kimi-k2-5" in model_ids:
+            model_name = "kimi-k2-5"
+        elif model_ids:
+            model_name = model_ids[0]
+    except Exception:
+        pass  # model list is optional — use default
+
+    # Step 6: write profile
+    profiles_dir = Path.home() / ".config" / "successor" / "profiles"
+    profiles_dir.mkdir(parents=True, exist_ok=True)
+    profile_path = profiles_dir / "kimi-code.json"
+    profile_data = {
+        "name": "kimi-code",
+        "description": "Kimi Code platform via OAuth",
+        "provider": {
+            "type": "openai_compat",
+            "base_url": "https://api.kimi.com/coding/v1",
+            "model": model_name,
+        },
+        "oauth": {"storage": "file", "key": "oauth/kimi-code"},
+        "tools": [
+            "read_file", "write_file", "edit_file",
+            "bash", "subagent", "holonet", "browser", "vision",
+        ],
+    }
+    profile_path.write_text(
+        json.dumps(profile_data, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    print(f"Profile written: {profile_path}")
+    print(f"  model: {model_name}")
+    print()
+    print("Run `successor chat --profile kimi-code` to start chatting.")
+    return 0
+
+
 def cmd_record(args: argparse.Namespace) -> int:
     """Run the chat with recording enabled.
 
@@ -768,6 +900,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="terminal + active profile health check",
     )
     p_doctor.set_defaults(func=cmd_doctor)
+
+    p_login = sub.add_parser(
+        "login",
+        help="OAuth device flow for Kimi Code (creates kimi-code profile)",
+    )
+    p_login.set_defaults(func=cmd_login)
 
     p_skills = sub.add_parser(
         "skills",

@@ -110,6 +110,7 @@ from ..render.theme import (
     all_themes,
     find_theme_or_fallback,
 )
+from ..providers.presets import PROVIDER_PRESETS, get_preset_by_id
 from ..skills import recommended_skills_for_tools
 from ..tools_registry import (
     AVAILABLE_TOOLS,
@@ -313,22 +314,23 @@ class _WizardState:
     chat_intro_art: str | None = "successor"
     enabled_tools: tuple[str, ...] = field(default_factory=default_enabled_tools)
     # Provider configuration (collected by Step.PROVIDER):
-    #   provider_kind  — "llamacpp" (local), "openai" (api.openai.com),
-    #                    or "openrouter" (hosted aggregator)
-    #   provider_api_key — only used when provider_kind != "llamacpp"
-    #   provider_model — model id; for openai, the OpenAI model id
-    #                    (e.g. "gpt-4o-mini"); for openrouter, the
-    #                    OpenRouter slug (e.g. "openai/gpt-oss-20b:free");
-    #                    for llamacpp, a label string ("local" by default
-    #                    — llama.cpp ignores it)
-    provider_kind: str = "llamacpp"
+    #   provider_preset  — id of the selected PROVIDER_PRESETS entry
+    #                      (e.g. "llamacpp", "openai", "zai")
+    #   provider_api_key — only used when preset needs an API key
+    #   provider_model — model id; defaults come from the preset but
+    #                    can be overridden by the user
+    provider_preset: str = "llamacpp"
     provider_api_key: str = ""
-    provider_model: str = "openai/gpt-oss-20b:free"
+    provider_model: str = "local"
+    oauth_ref: object | None = None  # OAuthRef if using OAuth preset
     # Selected compaction preset key — one of:
     #   "default" / "aggressive" / "lazy" / "off"
     # The preset is resolved to a real CompactionConfig at to_profile()
     # time via _compaction_presets().
     compaction_preset: str = "default"
+    # Bash safety: allow dangerous commands (rm -rf, sudo, curl|sh, etc.)
+    # Only meaningful when bash is in enabled_tools.
+    bash_yolo: bool = False
     # Local-only runtime preference persisted to chat.json, not profile JSON.
     # When enabled, normal chat sessions auto-write local playback bundles.
     autorecord: bool = True
@@ -338,32 +340,23 @@ class _WizardState:
     def _build_provider_dict(self) -> dict:
         """Construct the provider config dict from the wizard state.
 
-        Local llamacpp uses `max_tokens=0`, meaning "auto-budget against the
-        detected local context window". OpenAI and OpenRouter both use the
-        openai_compat client with provider-specific defaults for base_url and
-        model. context_window is intentionally NOT set — the chat detects it
-        from the provider on first use (OpenRouter's /v1/models for
-        OpenRouter, the hardcoded fallback table for OpenAI).
+        Uses the selected preset's provider_type and base_url, overlaying
+        the user's model and API key choices. Local llamacpp uses
+        max_tokens=0 for auto-budget; cloud providers default to 4096.
         """
-        if self.provider_kind == "openrouter":
-            return {
-                "type": "openai_compat",
-                "base_url": "https://openrouter.ai/api/v1",
-                "model": self.provider_model.strip() or "openai/gpt-oss-20b:free",
-                "api_key": self.provider_api_key.strip(),
-                "max_tokens": 4096,
-                "temperature": 0.7,
-            }
-        if self.provider_kind == "openai":
-            return {
-                "type": "openai_compat",
-                "base_url": "https://api.openai.com/v1",
-                "model": self.provider_model.strip() or "gpt-4o-mini",
-                "api_key": self.provider_api_key.strip(),
-                "max_tokens": 4096,
-                "temperature": 0.7,
-            }
-        return dict(_DEFAULT_PROVIDER)
+        preset = get_preset_by_id(self.provider_preset)
+        if preset is None:
+            return dict(_DEFAULT_PROVIDER)
+        result: dict = {
+            "type": preset.provider_type,
+            "base_url": preset.base_url,
+            "model": self.provider_model.strip() or preset.default_model,
+            "max_tokens": 0 if preset.provider_type == "llamacpp" else 4096,
+            "temperature": 0.7,
+        }
+        if preset.needs_api_key and preset.id != "kimi-code":
+            result["api_key"] = self.provider_api_key.strip()
+        return result
 
     def _resolve_compaction(self):
         """Look up the user's selected preset and return its config."""
@@ -374,8 +367,16 @@ class _WizardState:
         from ..profiles import CompactionConfig
         return CompactionConfig()
 
+    def _build_tool_config(self) -> dict:
+        """Build the tool_config dict from wizard state."""
+        tc: dict = {}
+        if "bash" in self.enabled_tools:
+            tc["bash"] = {"allow_dangerous": self.bash_yolo}
+        return tc
+
     def to_profile(self) -> Profile:
         """Build the final Profile dataclass from the user's choices."""
+        from ..subagents.config import SubagentConfig
         recommended_skills = recommended_skills_for_tools(self.enabled_tools)
         return Profile(
             name=self.name.strip().lower() or "untitled",
@@ -387,15 +388,18 @@ class _WizardState:
             provider=self._build_provider_dict(),
             skills=recommended_skills,
             tools=tuple(self.enabled_tools),
-            tool_config={},
+            tool_config=self._build_tool_config(),
             intro_animation=self.intro_animation,
             chat_intro_art=self.chat_intro_art,
             compaction=self._resolve_compaction(),
             max_agent_turns=self.max_agent_turns,
+            oauth=self.oauth_ref,
+            subagents=SubagentConfig(enabled=True),
         )
 
     def to_json_dict(self) -> dict:
         """Serialize for the saved JSON file (matches builtin profile shape)."""
+        from ..subagents.config import SubagentConfig
         recommended_skills = recommended_skills_for_tools(self.enabled_tools)
         return {
             "name": self.name.strip().lower() or "untitled",
@@ -407,11 +411,16 @@ class _WizardState:
             "provider": self._build_provider_dict(),
             "skills": list(recommended_skills),
             "tools": list(self.enabled_tools),
-            "tool_config": {},
+            "tool_config": self._build_tool_config(),
             "intro_animation": self.intro_animation,
             "chat_intro_art": self.chat_intro_art,
             "max_agent_turns": self.max_agent_turns,
             "compaction": self._resolve_compaction().to_dict(),
+            "oauth": (
+                {"storage": self.oauth_ref.storage, "key": self.oauth_ref.key}
+                if self.oauth_ref else None
+            ),
+            "subagents": SubagentConfig(enabled=True).to_dict(),
         }
 
 
@@ -906,86 +915,74 @@ class SuccessorSetup(App):
             return
 
     def _handle_provider(self, event: KeyEvent) -> None:
-        """Provider step: pick local llama.cpp, OpenAI, or OpenRouter.
+        """Provider step: pick a service preset, optionally enter API key + model.
 
-        Three input rows:
-          row 0 — provider type toggle (llama.cpp / openai / openrouter)
-          row 1 — api_key field          (only used by openai/openrouter)
-          row 2 — model name field       (only used by openai/openrouter)
+        Flat cursor layout (mirrors the tools step pattern):
+          cursor 0..N-1  individual presets (UP/DOWN to browse, space to select)
+          cursor N       api_key field (if selected preset needs one and is not OAuth)
+          cursor N+1     model field  (if selected preset needs one)
 
-        ↑↓ moves focus between visible rows. When focus is on row 0,
-        Space cycles the provider type. When focus is on rows 1/2,
-        printable input fills the field and Backspace deletes. → and
-        Enter advance to TOOLS once any required fields are non-empty.
+        UP/DOWN moves through all positions. Space on a preset selects it.
+        Printable chars on text fields edit the value. → advances when
+        required fields are non-empty.
         """
-        focus = self._cursors[Step.PROVIDER]
-        needs_keys = self.state.provider_kind in ("openrouter", "openai")
-        max_focus = 2 if needs_keys else 0  # llamacpp has only the toggle row
+        presets = PROVIDER_PRESETS
+        preset_count = len(presets)
+        active_preset = get_preset_by_id(self.state.provider_preset)
+        needs_keys = active_preset.needs_api_key if active_preset else False
+        is_oauth = (active_preset.id == "kimi-code") if active_preset else False
+
+        # Build cursor layout:
+        #  0..preset_count-1   individual preset rows
+        #  preset_count        api_key field (only if needs_keys and not OAuth)
+        #  preset_count + api_offset   model field (only if needs_keys)
+        api_offset = 1 if (needs_keys and not is_oauth) else 0
+        max_pos = preset_count + api_offset + (1 if needs_keys else 0)
+
+        cursor = self._cursors[Step.PROVIDER]
 
         if event.key == Key.UP:
-            self._cursors[Step.PROVIDER] = max(0, focus - 1)
+            cursor = (cursor - 1) % max_pos
+            self._cursors[Step.PROVIDER] = cursor
             return
         if event.key == Key.DOWN:
-            self._cursors[Step.PROVIDER] = min(max_focus, focus + 1)
+            cursor = (cursor + 1) % max_pos
+            self._cursors[Step.PROVIDER] = cursor
             return
         if event.key == Key.LEFT:
-            # On the toggle row, ← retreats. On the input rows, ←
-            # would clobber typed characters; treat it as "go back to
-            # the toggle row" instead.
-            if focus == 0:
-                self._retreat_step()
-            else:
-                self._cursors[Step.PROVIDER] = 0
+            self._retreat_step()
             return
-        if event.key == Key.RIGHT or event.key == Key.ENTER:
-            # Validate before advancing. Hosted providers need api_key + model.
-            if needs_keys and not self.state.provider_api_key.strip():
-                self._cursors[Step.PROVIDER] = 1
-                self._glow = _ValidationGlow(
-                    field="provider_api_key",
-                    message=f"api key required for {self.state.provider_kind}",
-                    started_at=self.elapsed,
-                )
+        if event.key == Key.RIGHT:
+            # Validate and advance
+            if self._try_advance_provider(active_preset, needs_keys, is_oauth,
+                                          preset_count, api_offset, cursor):
+                self._advance_step()
+            return
+        if event.key == Key.ENTER:
+            if cursor < preset_count:
+                # Select this preset
+                self._select_preset(cursor)
                 return
-            if needs_keys and not self.state.provider_model.strip():
-                self._cursors[Step.PROVIDER] = 2
-                self._glow = _ValidationGlow(
-                    field="provider_model",
-                    message=f"model name required for {self.state.provider_kind}",
-                    started_at=self.elapsed,
-                )
-                return
-            self._advance_step()
+            # On text fields, ENTER advances
+            if self._try_advance_provider(active_preset, needs_keys, is_oauth,
+                                          preset_count, api_offset, cursor):
+                self._advance_step()
             return
 
-        # Toggle row: Space cycles type llamacpp → openai → openrouter → llamacpp
-        if focus == 0 and event.is_char and event.char == " ":
-            cycle = ("llamacpp", "openai", "openrouter")
-            try:
-                idx = cycle.index(self.state.provider_kind)
-            except ValueError:
-                idx = 0
-            new_kind = cycle[(idx + 1) % len(cycle)]
-            # Swap default model when toggling between hosted providers so
-            # the user isn't stuck typing every time. Only overwrites the
-            # model when the current value matches the OTHER provider's
-            # default — preserves user-typed values.
-            if new_kind == "openai" and self.state.provider_model in (
-                "openai/gpt-oss-20b:free", "",
-            ):
-                self.state.provider_model = "gpt-4o-mini"
-            elif new_kind == "openrouter" and self.state.provider_model in (
-                "gpt-4o-mini", "",
-            ):
-                self.state.provider_model = "openai/gpt-oss-20b:free"
-            self.state.provider_kind = new_kind
+        # Preset row: space selects
+        if cursor < preset_count:
+            if event.is_char and event.char == " ":
+                self._select_preset(cursor)
             return
 
-        # Input rows: only relevant when a hosted provider is selected.
+        # Text input rows
         if not needs_keys:
             return
 
-        if focus == 1:
+        api_cursor = preset_count
+        model_cursor = preset_count + api_offset
+
+        if cursor == api_cursor and api_offset:
             # api_key field
             if event.key == Key.BACKSPACE:
                 if self.state.provider_api_key:
@@ -1000,7 +997,7 @@ class SuccessorSetup(App):
                         self.state.provider_api_key += ch
                 return
 
-        if focus == 2:
+        if cursor == model_cursor:
             # model field
             if event.key == Key.BACKSPACE:
                 if self.state.provider_model:
@@ -1011,11 +1008,143 @@ class SuccessorSetup(App):
                 return
             if event.is_char and event.char and not event.is_ctrl and not event.is_alt:
                 for ch in event.char:
-                    # Allow alphanumerics and the few punctuation chars
-                    # used in model slugs (/, -, ., :, _).
                     if ord(ch) >= 0x20 and ch != " ":
                         self.state.provider_model += ch
                 return
+
+    def _select_preset(self, cursor_index: int) -> None:
+        """Select the preset at the given cursor position."""
+        new_preset = PROVIDER_PRESETS[cursor_index]
+        old_preset = get_preset_by_id(self.state.provider_preset)
+        old_default = old_preset.default_model if old_preset else ""
+        if not self.state.provider_model or self.state.provider_model == old_default:
+            self.state.provider_model = new_preset.default_model
+        self.state.provider_preset = new_preset.id
+
+        # Check for existing OAuth token when selecting kimi-code
+        if new_preset.id == "kimi-code":
+            from ..oauth.storage import load_token
+            from ..profiles.profile import OAuthRef
+            token = load_token("oauth/kimi-code")
+            if token is not None:
+                self.state.oauth_ref = OAuthRef(
+                    storage="file", key="oauth/kimi-code",
+                )
+            else:
+                self.state.oauth_ref = None
+        else:
+            self.state.oauth_ref = None
+
+    def _try_advance_provider(
+        self, preset, needs_keys, is_oauth, preset_count, api_offset, cursor,
+    ) -> bool:
+        """Validate provider fields and optionally run OAuth flow.
+
+        Returns True if the step should advance.
+        """
+        if preset is None:
+            return False
+
+        # OAuth preset: run device flow if no token
+        if is_oauth and self.state.oauth_ref is None:
+            if not self._run_oauth_device_flow():
+                return False
+
+        # API key validation (skip for OAuth presets)
+        if needs_keys and not is_oauth and not self.state.provider_api_key.strip():
+            self._cursors[Step.PROVIDER] = preset_count  # api_key field
+            self._glow = _ValidationGlow(
+                field="provider_api_key",
+                message=f"api key required for {preset.label}",
+                started_at=self.elapsed,
+            )
+            return False
+        if needs_keys and not self.state.provider_model.strip():
+            self._cursors[Step.PROVIDER] = preset_count + api_offset
+            self._glow = _ValidationGlow(
+                field="provider_model",
+                message=f"model name required for {preset.label}",
+                started_at=self.elapsed,
+            )
+            return False
+        return True
+
+    def _run_oauth_device_flow(self) -> bool:
+        """Run the OAuth device flow for Kimi Code. Blocks until done.
+
+        Returns True if a token was obtained, False otherwise.
+        """
+        import time as _time
+        from ..oauth import (
+            KIMI_CODE_CLIENT_ID,
+            DEFAULT_OAUTH_HOST,
+            OAuthToken,
+            request_device_authorization,
+            request_device_token,
+        )
+        from ..oauth.storage import save_token
+        from ..profiles.profile import OAuthRef
+
+        # Request device code
+        try:
+            auth = request_device_authorization()
+        except Exception as exc:
+            self._toast = _Toast(
+                f"OAuth error: {exc}", started_at=self.elapsed,
+            )
+            return False
+
+        # Show instructions via toast (visible on next paint)
+        self._toast = _Toast(
+            f"Visit {auth.verification_uri_complete}  code: {auth.user_code}",
+            started_at=self.elapsed,
+        )
+
+        # Try to open browser
+        import webbrowser
+        try:
+            webbrowser.open(auth.verification_uri_complete)
+        except Exception:
+            pass
+
+        # Poll for token (blocks wizard)
+        deadline = _time.time() + (auth.expires_in or 600)
+        token = None
+        while _time.time() < deadline:
+            _time.sleep(max(auth.interval, 1))
+            try:
+                status, data = request_device_token(
+                    auth.device_code,
+                    client_id=KIMI_CODE_CLIENT_ID,
+                    oauth_host=DEFAULT_OAUTH_HOST,
+                )
+            except Exception:
+                continue
+            if status == 200 and "access_token" in data:
+                token = OAuthToken.from_response(data)
+                break
+            error = str(data.get("error") or "")
+            if error == "expired_token":
+                self._toast = _Toast(
+                    "Device code expired. Try again.",
+                    started_at=self.elapsed,
+                )
+                return False
+
+        if token is None:
+            self._toast = _Toast(
+                "OAuth timed out. Try again.",
+                started_at=self.elapsed,
+            )
+            return False
+
+        save_token("oauth/kimi-code", token)
+        self.state.oauth_ref = OAuthRef(storage="file", key="oauth/kimi-code")
+        self._toast = _Toast(
+            "OAuth authorized!",
+            started_at=self.elapsed,
+        )
+        return True
 
     def _handle_tools(self, event: KeyEvent) -> None:
         """Tools step: space toggles the cursor'd tool on/off.
@@ -1025,6 +1154,10 @@ class SuccessorSetup(App):
         move the cursor between tools; space (or Enter without a
         modifier key) toggles the currently highlighted one. → advances
         to REVIEW.
+
+        When bash is enabled, an extra row for "yolo mode" appears
+        after the tool list. The cursor can land on it to toggle
+        bash_allow_dangerous.
         """
         tool_names = selectable_tool_names()
         if not tool_names:
@@ -1036,24 +1169,35 @@ class SuccessorSetup(App):
                 self._retreat_step()
             return
 
+        enabled = set(self.state.enabled_tools)
+        has_yolo_row = "bash" in enabled
+        max_pos = len(tool_names) + (1 if has_yolo_row else 0)
+
         cursor = self._cursors[Step.TOOLS]
         if event.key == Key.UP:
-            cursor = (cursor - 1) % len(tool_names)
+            cursor = (cursor - 1) % max_pos
             self._cursors[Step.TOOLS] = cursor
             return
         if event.key == Key.DOWN:
-            cursor = (cursor + 1) % len(tool_names)
+            cursor = (cursor + 1) % max_pos
             self._cursors[Step.TOOLS] = cursor
             return
         if event.is_char and event.char == " ":
-            # Toggle the currently highlighted tool
-            current = list(self.state.enabled_tools)
-            name = tool_names[cursor]
-            if name in current:
-                current.remove(name)
+            if cursor < len(tool_names):
+                # Toggle the currently highlighted tool
+                current = list(self.state.enabled_tools)
+                name = tool_names[cursor]
+                if name in current:
+                    current.remove(name)
+                    # Turning off bash also resets yolo
+                    if name == "bash":
+                        self.state.bash_yolo = False
+                else:
+                    current.append(name)
+                self.state.enabled_tools = tuple(current)
             else:
-                current.append(name)
-            self.state.enabled_tools = tuple(current)
+                # Yolo toggle row
+                self.state.bash_yolo = not self.state.bash_yolo
             return
         if event.key == Key.ENTER or event.key == Key.RIGHT:
             self._advance_step()
@@ -1728,160 +1872,179 @@ class SuccessorSetup(App):
         right: int,
         bottom: int,
     ) -> None:
-        """Provider step painter.
+        """Provider step painter — flat cursor with per-row highlighting.
 
-        Layout:
-            which model provider should this profile talk to?
-            ↑↓ move · space toggles type · → next
+        Layout mirrors the tools step: every preset and every input field
+        is an individual cursor position. UP/DOWN moves through all rows.
 
-            ▸ [▣] local llama.cpp     uses http://localhost:8080
-              [ ] openai                api.openai.com — api key required
-              [ ] openrouter            openrouter.ai — api key required
-
-            api_key  ••••••••••••      (only for hosted providers)
-            model    gpt-4o-mini
-
-        The active row is highlighted with a ▸ glyph and accent color.
-        Inputs render in code-tinted boxes so they're visually distinct
-        from selectable rows. The api_key field renders as bullets
-        unless the cursor is on it (then plaintext while editing).
+        Cursor positions:
+          0..N-1   individual presets
+          N        api_key field (only if selected preset needs one and is not OAuth)
+          N+1      model field (only if selected preset needs one)
         """
         prompt = "which model provider should this profile talk to?"
         paint_text(grid, prompt, left, top, style=Style(fg=theme.fg, bg=theme.bg))
-        helper = "↑↓ move · space toggles type · → next"
+        helper = "↑↓ move · space select · → next"
         paint_text(
             grid, helper, left, top + 1,
             style=Style(fg=theme.fg_dim, bg=theme.bg, attrs=ATTR_DIM | ATTR_ITALIC),
         )
 
-        focus = self._cursors[Step.PROVIDER]
-        needs_keys = self.state.provider_kind in ("openrouter", "openai")
+        cursor = self._cursors[Step.PROVIDER]
+        preset = get_preset_by_id(self.state.provider_preset)
+        needs_keys = preset.needs_api_key if preset else False
+        is_oauth = (preset.id == "kimi-code") if preset else False
+        preset_count = len(PROVIDER_PRESETS)
+        api_offset = 1 if (needs_keys and not is_oauth) else 0
 
-        # Toggle row group (focus = 0 — single focusable row, but we
-        # paint all three options stacked so the user can see what's
-        # available even before they hit Space).
-        toggle_y = top + 3
-        sel_glyph = "▸" if focus == 0 else " "
-        provider_options = (
-            ("llamacpp", "local llama.cpp", "free + private, needs llama-server running"),
-            ("openai", "openai", "pay-per-use against your OpenAI credits"),
-            ("openrouter", "openrouter", "free models available, no card needed"),
-        )
-        for i, (kind, label, hint) in enumerate(provider_options):
-            row_y = toggle_y + i
-            if row_y >= bottom:
+        # ── Preset rows ──
+        row_y = top + 3
+        for i, p in enumerate(PROVIDER_PRESETS):
+            if row_y >= bottom - 3:
+                paint_text(
+                    grid, f"  ... +{preset_count - i} more",
+                    left, row_y,
+                    style=Style(fg=theme.fg_dim, bg=theme.bg, attrs=ATTR_DIM | ATTR_ITALIC),
+                )
                 break
-            is_picked = self.state.provider_kind == kind
+            is_picked = self.state.provider_preset == p.id
+            is_focused = cursor == i
             check = "[▣]" if is_picked else "[ ]"
-            cursor_glyph = sel_glyph if i == 0 else " "
-            line = f"{cursor_glyph} {check}  {label}"
+            glyph = "▸" if is_focused else " "
+            line = f"{glyph} {check}  {p.label}"
             line_style = Style(
-                fg=theme.accent if (focus == 0 and is_picked) else theme.fg,
+                fg=theme.accent if is_focused else (theme.fg if not is_picked else theme.fg),
                 bg=theme.bg,
-                attrs=ATTR_BOLD if is_picked else 0,
+                attrs=ATTR_BOLD if is_focused or is_picked else 0,
             )
             paint_text(grid, line, left, row_y, style=line_style)
             paint_text(
-                grid, hint, left + len(line) + 4, row_y,
+                grid, p.hint, left + len(line) + 4, row_y,
                 style=Style(fg=theme.fg_dim, bg=theme.bg, attrs=ATTR_DIM | ATTR_ITALIC),
             )
+            row_y += 1
 
-        # Input rows for hosted providers (focus = 1, 2)
-        if not needs_keys:
-            # llamacpp picked — leave the rest blank but show one helpful line
-            note_y = toggle_y + 5
-            if note_y < bottom:
+        # ── OAuth status (when kimi-code is selected) ──
+        if is_oauth:
+            row_y += 1  # blank line
+            if row_y < bottom:
+                if self.state.oauth_ref is not None:
+                    paint_text(
+                        grid, "  ✓ OAuth token found — press → to continue",
+                        left, row_y,
+                        style=Style(fg=theme.fg_dim, bg=theme.bg, attrs=ATTR_ITALIC),
+                    )
+                else:
+                    paint_text(
+                        grid, "  ⚡ OAuth required — press → to start device authorization",
+                        left, row_y,
+                        style=Style(fg=theme.accent_warm, bg=theme.bg, attrs=ATTR_BOLD),
+                    )
+            row_y += 1
+
+        # ── Local provider hint ──
+        if not needs_keys and not is_oauth:
+            row_y += 1
+            if row_y < bottom:
                 paint_text(
                     grid,
                     "press → to continue. nothing else to configure.",
-                    left, note_y,
+                    left, row_y,
                     style=Style(fg=theme.fg_dim, bg=theme.bg, attrs=ATTR_DIM | ATTR_ITALIC),
                 )
             return
 
-        # api_key field
-        api_y = toggle_y + 4
-        if api_y < bottom:
-            label = "api_key"
-            label_w = max(8, len(label))
-            label_style = Style(
-                fg=theme.accent if focus == 1 else theme.fg_dim,
-                bg=theme.bg,
-                attrs=ATTR_BOLD if focus == 1 else ATTR_DIM,
-            )
-            cursor_glyph = "▸" if focus == 1 else " "
-            paint_text(grid, cursor_glyph, left, api_y, style=label_style)
-            paint_text(grid, label.rjust(label_w), left + 2, api_y, style=label_style)
+        if not needs_keys:
+            return
 
-            # Render the value: bullets when not focused, plaintext when focused
-            value = self.state.provider_api_key
-            if focus == 1:
-                display = value
-            else:
-                display = "•" * min(len(value), 24) if value else "(unset)"
-            value_x = left + 2 + label_w + 2
-            value_style = Style(
-                fg=theme.fg if focus == 1 else theme.fg_dim,
-                bg=theme.bg_input,
-            )
-            avail_w = max(0, right - value_x - 2)
-            display = display[:avail_w] if avail_w > 0 else ""
-            # Pad to a fixed width so the input box has a visible extent
-            box_w = max(40, len(display) + 4)
-            box_w = min(box_w, avail_w)
-            if box_w > 0:
-                fill_region(grid, value_x, api_y, box_w, 1, style=Style(bg=theme.bg_input))
-                paint_text(grid, display, value_x + 1, api_y, style=value_style)
-                # Cursor shows when this row is focused
-                if focus == 1:
-                    cur_x = value_x + 1 + len(display)
-                    if cur_x < value_x + box_w - 1:
-                        cursor_visible = (int(self.elapsed * 2) % 2) == 0
-                        if cursor_visible:
-                            grid.set(api_y, cur_x, Cell(" ", Style(fg=theme.bg_input, bg=theme.fg)))
+        # ── Input rows (api_key, model) ──
+        row_y += 1  # blank line between presets and inputs
+        label_w = 8  # align labels at 8 chars
 
-        # model field
-        model_y = api_y + 1
-        if model_y < bottom:
+        # api_key field (cursor position: preset_count, if shown)
+        api_cursor = preset_count
+        if api_offset:
+            if row_y < bottom:
+                is_api_focus = cursor == api_cursor
+                label = "api_key"
+                label_style = Style(
+                    fg=theme.accent if is_api_focus else theme.fg_dim,
+                    bg=theme.bg,
+                    attrs=ATTR_BOLD if is_api_focus else ATTR_DIM,
+                )
+                glyph = "▸" if is_api_focus else " "
+                paint_text(grid, glyph, left, row_y, style=label_style)
+                paint_text(grid, label.rjust(label_w), left + 2, row_y, style=label_style)
+
+                value = self.state.provider_api_key
+                display = value if is_api_focus else (
+                    "•" * min(len(value), 24) if value else "(unset)"
+                )
+                value_x = left + 2 + label_w + 2
+                value_style = Style(
+                    fg=theme.fg if is_api_focus else theme.fg_dim,
+                    bg=theme.bg_input,
+                )
+                avail_w = max(0, right - value_x - 2)
+                display = display[:avail_w] if avail_w > 0 else ""
+                box_w = min(max(40, len(display) + 4), avail_w)
+                if box_w > 0:
+                    fill_region(grid, value_x, row_y, box_w, 1, style=Style(bg=theme.bg_input))
+                    paint_text(grid, display, value_x + 1, row_y, style=value_style)
+                    if is_api_focus:
+                        cur_x = value_x + 1 + len(display)
+                        if cur_x < value_x + box_w - 1:
+                            cursor_visible = (int(self.elapsed * 2) % 2) == 0
+                            if cursor_visible:
+                                grid.set(row_y, cur_x, Cell(" ", Style(fg=theme.bg_input, bg=theme.fg)))
+            row_y += 1
+
+        # model field (cursor position: preset_count + api_offset)
+        model_cursor = preset_count + api_offset
+        if row_y < bottom:
+            is_model_focus = cursor == model_cursor
             label = "model"
-            label_w = max(8, len("api_key"))
             label_style = Style(
-                fg=theme.accent if focus == 2 else theme.fg_dim,
+                fg=theme.accent if is_model_focus else theme.fg_dim,
                 bg=theme.bg,
-                attrs=ATTR_BOLD if focus == 2 else ATTR_DIM,
+                attrs=ATTR_BOLD if is_model_focus else ATTR_DIM,
             )
-            cursor_glyph = "▸" if focus == 2 else " "
-            paint_text(grid, cursor_glyph, left, model_y, style=label_style)
-            paint_text(grid, label.rjust(label_w), left + 2, model_y, style=label_style)
+            glyph = "▸" if is_model_focus else " "
+            paint_text(grid, glyph, left, row_y, style=label_style)
+            paint_text(grid, label.rjust(label_w), left + 2, row_y, style=label_style)
 
             value = self.state.provider_model or "(unset)"
             value_x = left + 2 + label_w + 2
             value_style = Style(
-                fg=theme.fg if focus == 2 else theme.fg_dim,
+                fg=theme.fg if is_model_focus else theme.fg_dim,
                 bg=theme.bg_input,
             )
             avail_w = max(0, right - value_x - 2)
             display = value[:avail_w] if avail_w > 0 else ""
-            box_w = max(40, len(display) + 4)
-            box_w = min(box_w, avail_w)
+            box_w = min(max(40, len(display) + 4), avail_w)
             if box_w > 0:
-                fill_region(grid, value_x, model_y, box_w, 1, style=Style(bg=theme.bg_input))
-                paint_text(grid, display, value_x + 1, model_y, style=value_style)
-                if focus == 2:
+                fill_region(grid, value_x, row_y, box_w, 1, style=Style(bg=theme.bg_input))
+                paint_text(grid, display, value_x + 1, row_y, style=value_style)
+                if is_model_focus:
                     cur_x = value_x + 1 + len(display)
                     if cur_x < value_x + box_w - 1:
                         cursor_visible = (int(self.elapsed * 2) % 2) == 0
                         if cursor_visible:
-                            grid.set(model_y, cur_x, Cell(" ", Style(fg=theme.bg_input, bg=theme.fg)))
+                            grid.set(row_y, cur_x, Cell(" ", Style(fg=theme.bg_input, bg=theme.fg)))
 
         # Hint footer
-        hint_y = model_y + 2
+        hint_y = row_y + 2
         if hint_y < bottom:
-            if self.state.provider_api_key.strip() and self.state.provider_model.strip():
+            ready = True
+            if needs_keys and not is_oauth and not self.state.provider_api_key.strip():
+                ready = False
+            if needs_keys and not self.state.provider_model.strip():
+                ready = False
+            if ready:
                 hint = "press → to continue"
                 color = theme.accent
             else:
-                hint = "fill api_key and model, then press →"
+                hint = "fill required fields, then press →"
                 color = theme.accent_warm
             paint_text(
                 grid, hint, left, hint_y,
@@ -1949,10 +2112,34 @@ class SuccessorSetup(App):
                     style=Style(fg=theme.fg_dim, bg=theme.bg, attrs=ATTR_DIM | ATTR_ITALIC),
                 )
 
+        # Yolo mode toggle — only shown when bash is enabled
+        if "bash" in enabled:
+            yolo_idx = len(tool_names)
+            yolo_y = top + 3 + yolo_idx * 2
+            if yolo_y < bottom - 1:
+                is_cursor = yolo_idx == cursor
+                is_on = self.state.bash_yolo
+                glyph = "▸" if is_cursor else " "
+                check = "[✓]" if is_on else "[ ]"
+                row_fg = theme.accent_warm if is_cursor else theme.fg
+                row_attrs = ATTR_BOLD if is_cursor else 0
+                label = f"{glyph} {check}  yolo mode"
+                paint_text(
+                    grid, label, left, yolo_y,
+                    style=Style(fg=row_fg, bg=theme.bg, attrs=row_attrs),
+                )
+                if yolo_y + 1 < bottom:
+                    desc = "allow dangerous commands (rm -rf, sudo, curl|sh, etc.)"
+                    paint_text(
+                        grid, desc, left + 7, yolo_y + 1,
+                        style=Style(fg=theme.fg_dim, bg=theme.bg, attrs=ATTR_DIM | ATTR_ITALIC),
+                    )
+
         # Summary footer — how many tools are enabled
         count = len(enabled)
+        last_row = top + 3 + (len(tool_names) + (1 if "bash" in enabled else 0)) * 2
         summary_y = bottom - 2
-        if summary_y > top + 3 + len(tool_names) * 2:
+        if summary_y > last_row:
             if count == 0:
                 summary = "chat-only mode — no tools enabled"
                 summary_color = theme.fg_dim
@@ -2114,12 +2301,14 @@ class SuccessorSetup(App):
             skills_label = ", ".join(skills)
         else:
             skills_label = "(none)"
-        if self.state.provider_kind == "openrouter":
-            provider_summary = f"openrouter · {self.state.provider_model}"
-        elif self.state.provider_kind == "openai":
-            provider_summary = f"openai · {self.state.provider_model}"
+        preset = get_preset_by_id(self.state.provider_preset)
+        if preset:
+            if self.state.provider_model and self.state.provider_model != preset.default_model:
+                provider_summary = f"{preset.label} · {self.state.provider_model}"
+            else:
+                provider_summary = f"{preset.label} · {self.state.provider_model or preset.default_model}"
         else:
-            provider_summary = "local llama.cpp at http://localhost:8080"
+            provider_summary = f"{self.state.provider_preset} · {self.state.provider_model}"
         rows_data = [
             ("name", self.state.name),
             ("theme", self.state.theme_name),

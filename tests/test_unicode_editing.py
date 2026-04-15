@@ -84,8 +84,13 @@ def test_wizard_provider_backspace_deletes_full_decomposed_grapheme(
 ) -> None:
     wizard = SuccessorSetup()
     wizard._enter_step(Step.PROVIDER)
-    wizard._handle_provider(KeyEvent(char=" "))  # toggle to openai
-    wizard._handle_provider(KeyEvent(key=Key.DOWN))  # api_key field
+    # Navigate to openai (cursor 2) and select it
+    for _ in range(2):
+        wizard._handle_provider(KeyEvent(key=Key.DOWN))
+    wizard._handle_provider(KeyEvent(char=" "))  # select openai
+    # Move to api_key field (cursor 8): from cursor 2, DOWN 6 times
+    for _ in range(6):
+        wizard._handle_provider(KeyEvent(key=Key.DOWN))
     wizard.state.provider_api_key = "cafe\u0301"
     wizard._handle_provider(KeyEvent(key=Key.BACKSPACE))
     assert wizard.state.provider_api_key == "caf"

@@ -25,11 +25,17 @@ from successor.agent.events import (
     ToolCompleted,
     ToolRefused,
     ToolStarted,
+    TransientRetry,
     TurnCompleted,
     TurnStarted,
 )
 from successor.agent.log import LogMessage, MessageLog
-from successor.agent.loop import LoopPhase, QueryLoop
+from successor.agent.loop import (
+    LoopPhase,
+    MAX_TRANSIENT_RETRIES,
+    QueryLoop,
+    is_transient_stream_error,
+)
 from successor.agent.tokens import TokenCounter
 from successor.providers.llama import (
     ContentChunk,
@@ -398,3 +404,87 @@ def test_stats_reflects_state() -> None:
     assert s["rounds"] == 1
     assert s["messages"] == 2
     assert s["tokens"] > 0
+
+
+# ─── Transient retry ───
+
+
+def test_is_transient_classifies_known_patterns() -> None:
+    assert is_transient_stream_error("connection refused")
+    assert is_transient_stream_error("HTTP 429: Too Many Requests")
+    assert is_transient_stream_error("connection timed out")
+    assert is_transient_stream_error("HTTP 503: Service Unavailable")
+    assert is_transient_stream_error("connection reset by peer")
+    assert is_transient_stream_error("Name or service not known")
+
+
+def test_is_transient_rejects_fatal_errors() -> None:
+    assert not is_transient_stream_error("HTTP 401: Unauthorized")
+    assert not is_transient_stream_error("HTTP 402: Payment Required")
+    assert not is_transient_stream_error("prompt is too long")
+    assert not is_transient_stream_error("some random error")
+
+
+def test_transient_retry_retries_then_succeeds() -> None:
+    """First stream fails with transient error (no content), second succeeds."""
+    fail_stream = _MockStream(events=[
+        StreamStarted(),
+        StreamError(message="connection refused"),
+    ])
+    ok_stream = _stream_text("recovered answer")
+    loop, client, events = _make_loop(streams=[fail_stream, ok_stream])
+    loop.start("hello")
+    _drive_to_idle(loop)
+    # Should have retried and succeeded
+    assert loop.phase == LoopPhase.IDLE
+    assert client.call_count == 2
+    assert any(isinstance(e, TransientRetry) for e in events)
+    assert any(isinstance(e, StreamCommitted) for e in events)
+
+
+def test_transient_retry_exhausts_max_retries() -> None:
+    """After MAX_TRANSIENT_RETRIES, give up and error out."""
+    fail_streams = [_MockStream(events=[
+        StreamStarted(),
+        StreamError(message="connection refused"),
+    ]) for _ in range(MAX_TRANSIENT_RETRIES + 2)]
+    loop, client, events = _make_loop(streams=fail_streams)
+    loop.start("hello")
+    _drive_to_idle(loop)
+    assert loop.phase == LoopPhase.DONE
+    assert client.call_count == MAX_TRANSIENT_RETRIES + 1
+    retries = [e for e in events if isinstance(e, TransientRetry)]
+    assert len(retries) == MAX_TRANSIENT_RETRIES
+    assert any(isinstance(e, LoopErrored) for e in events)
+
+
+def test_transient_no_retry_after_content_delivered() -> None:
+    """Once content has streamed, transient errors are NOT retried."""
+    fail_stream = _MockStream(events=[
+        StreamStarted(),
+        ContentChunk(text="partial "),
+        ContentChunk(text="content"),
+        StreamError(message="connection reset by peer"),
+    ])
+    loop, client, events = _make_loop(streams=[fail_stream])
+    loop.start("hello")
+    _drive_to_idle(loop)
+    # Should NOT retry — content was delivered
+    assert loop.phase == LoopPhase.DONE
+    assert client.call_count == 1
+    assert not any(isinstance(e, TransientRetry) for e in events)
+    assert any(isinstance(e, LoopErrored) for e in events)
+
+
+def test_nontransient_error_not_retried() -> None:
+    """Fatal errors (401, 402) are never retried even with no content."""
+    fail_stream = _MockStream(events=[
+        StreamStarted(),
+        StreamError(message="HTTP 401: Unauthorized"),
+    ])
+    loop, client, events = _make_loop(streams=[fail_stream])
+    loop.start("hello")
+    _drive_to_idle(loop)
+    assert loop.phase == LoopPhase.DONE
+    assert client.call_count == 1
+    assert not any(isinstance(e, TransientRetry) for e in events)

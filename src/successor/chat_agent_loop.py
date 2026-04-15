@@ -10,10 +10,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
 from .agent.bash_stream import BashStreamDetector
+from .agent.loop import (
+    MAX_TRANSIENT_RETRIES,
+    TRANSIENT_BACKOFF_BASE_S,
+    is_transient_stream_error,
+)
 from .bash import ToolCard, resolve_bash_config
 from .context_usage import (
     PromptSection,
@@ -766,6 +772,7 @@ class ChatAgentLoop:
         self._append(self._message("user", text))
         self._host._scroll_to_bottom()
         self._host._agent_turn = 0
+        self._host._transient_retry_count = 0
         self._host._task_adoption_last_kind = ""
         self._host._task_continue_nudged_this_turn = False
         self._host._task_continue_nudge = None
@@ -969,6 +976,29 @@ class ChatAgentLoop:
                     key="skill_discovery",
                     label="Skill Discovery",
                     content=skill_discovery,
+                )
+            )
+
+        # Kimi compatibility nudge — when a profile is flagged as
+        # kimi_compat, inject a reminder so the model uses Successor's
+        # native tool names instead of Kimi CLI names.
+        if getattr(self._host.profile, "kimi_compat", False):
+            sections.append(
+                PromptSection(
+                    key="kimi_compat_nudge",
+                    label="Kimi Compatibility",
+                    content=(
+                        "## Tool name reminder\n\n"
+                        "You are running inside Successor. Use the exact tool names provided above:\n"
+                        "- `read_file` (not `ReadFile`)\n"
+                        "- `write_file` (not `WriteFile`)\n"
+                        "- `edit_file` (not `StrReplaceFile`)\n"
+                        "- `bash` (not `Shell`)\n"
+                        "- `subagent` (not `Agent`)\n"
+                        "- `holonet` for web search and fetch\n"
+                        "Use `file_path` not `path`, `offset` not `line_offset`, "
+                        "`limit` not `n_lines`."
+                    ),
                 )
             )
 
@@ -1711,6 +1741,58 @@ class ChatAgentLoop:
                     message=ev.message,
                     partial_excerpt=_trace_clip_text(partial, limit=400),
                 )
+
+                # ── OAuth recovery ──
+                # When the profile uses OAuth and we get a 401/403, the
+                # access token may have expired (or been revoked). Try an
+                # immediate refresh. If it works, auto-retry the stream
+                # so the user never sees the error. If it fails, show an
+                # actionable message.
+                lower_msg = (ev.message or "").lower()
+                is_auth_err = "http 401" in lower_msg or "unauthorized" in lower_msg or "http 403" in lower_msg or "forbidden" in lower_msg
+                if (
+                    not partial
+                    and is_auth_err
+                    and self._host.profile.oauth is not None
+                ):
+                    refreshed = self._try_oauth_recovery()
+                    if refreshed:
+                        # Token refreshed — retry the stream immediately
+                        self._host._stream = None
+                        self.begin_agent_turn()
+                        return
+                    # Refresh failed — fall through to formatted error below,
+                    # which will include the OAuth-specific message.
+
+                # Pre-stream transient retry: if no content has been
+                # delivered yet, the user hasn't seen anything. Safe to
+                # back off and retry — no partial response to conflict
+                # with.  We time.sleep here because the frame loop has
+                # nothing to render (no content = blank stream area).
+                if (
+                    not partial
+                    and is_transient_stream_error(ev.message or "")
+                    and self._host._transient_retry_count < MAX_TRANSIENT_RETRIES
+                ):
+                    self._host._transient_retry_count += 1
+                    delay = TRANSIENT_BACKOFF_BASE_S * (
+                        2 ** (self._host._transient_retry_count - 1)
+                    )
+                    self._host._trace_event(
+                        "transient_retry",
+                        turn=self._host._agent_turn,
+                        attempt=self._host._transient_retry_count,
+                        max_attempts=MAX_TRANSIENT_RETRIES,
+                        delay_s=delay,
+                        reason=ev.message,
+                    )
+                    self._host._stream = None
+                    time.sleep(delay)
+                    # Re-kick the agent turn — begin_agent_turn opens a
+                    # new stream and resets stream content buffers.
+                    self.begin_agent_turn()
+                    return
+
                 if partial:
                     msg = f"{partial}\n\n[stream interrupted: {ev.message}]"
                 else:
@@ -1724,6 +1806,37 @@ class ChatAgentLoop:
                 self._host._streaming_preview_cache = {}
                 self._host._stream_bash_detector = None
                 self._host._agent_turn = 0
+
+    def _try_oauth_recovery(self) -> bool:
+        """Attempt an immediate OAuth token refresh.
+
+        Called when a 401/403 occurs on an OAuth-enabled profile. Returns
+        True if the token was refreshed (caller should retry the stream),
+        False if refresh failed or no refresh token is available.
+        """
+        import successor.oauth as _oauth_mod
+        from .oauth.storage import load_token, save_token
+
+        oauth_ref = self._host.profile.oauth
+        token = load_token(oauth_ref.key)
+        if token is None or not token.refresh_token:
+            return False
+        try:
+            new_token = _oauth_mod.refresh_access_token(
+                token.refresh_token,
+                client_id=_oauth_mod.KIMI_CODE_CLIENT_ID,
+                oauth_host=_oauth_mod.DEFAULT_OAUTH_HOST,
+            )
+        except Exception:
+            return False
+        save_token(oauth_ref.key, new_token)
+        self._host.client.api_key = new_token.access_token
+        self._host._trace_event(
+            "oauth_recovery",
+            turn=self._host._agent_turn,
+            action="refresh_succeeded",
+        )
+        return True
 
     def format_stream_error(self, raw: str) -> str:
         """Translate a raw stream error into a friendlier hint."""
@@ -1762,7 +1875,20 @@ class ChatAgentLoop:
                 f"  3. Open /config and edit the active profile's\n"
                 f"     provider.base_url and provider.api_key fields."
             )
-        if "http 401" in lower or "unauthorized" in lower:
+        is_auth = "http 401" in lower or "unauthorized" in lower
+        is_forbidden = "http 403" in lower or "forbidden" in lower
+        if is_auth or is_forbidden:
+            has_oauth = self._host.profile.oauth is not None
+            if has_oauth:
+                return (
+                    f"[auth failed — {base_url}]\n"
+                    f"\n"
+                    f"OAuth token refresh failed. The stored credentials may\n"
+                    f"have expired or been revoked.\n"
+                    f"\n"
+                    f"Run `successor login` to re-authenticate, then restart\n"
+                    f"the chat."
+                )
             return (
                 f"[unauthorized — {base_url}]\n"
                 f"\n"

@@ -62,6 +62,21 @@ def test_friendly_error_for_unauthorized(temp_config_dir: Path) -> None:
     assert "/config" in msg
 
 
+def test_friendly_error_for_oauth_auth_failure(temp_config_dir: Path) -> None:
+    """HTTP 401/403 on an OAuth profile should suggest `successor login`."""
+    import dataclasses
+    from successor.profiles.profile import OAuthRef
+    chat = SuccessorChat()
+    chat.profile = dataclasses.replace(
+        chat.profile, oauth=OAuthRef(storage="file", key="oauth/kimi-code"),
+    )
+    msg = chat._format_stream_error("HTTP 403: Forbidden")
+    assert "auth failed" in msg.lower()
+    assert "successor login" in msg
+    # Should NOT show the generic api_key hint
+    assert "api_key" not in msg
+
+
 def test_friendly_error_for_payment_required(temp_config_dir: Path) -> None:
     """HTTP 402 (out of credits) should mention topping up."""
     chat = SuccessorChat()
@@ -84,7 +99,12 @@ def test_friendly_error_for_rate_limit(temp_config_dir: Path) -> None:
 def test_stream_error_event_renders_friendly_message(temp_config_dir: Path) -> None:
     """End-to-end through _pump_stream: a StreamError event for a
     connection failure produces an assistant message with the friendly
-    hint, not the raw urllib error."""
+    hint, not the raw urllib error.
+
+    Set transient_retry_count to max so the retry logic doesn't kick
+    in — we're testing the error display path, not retry.
+    """
+    from successor.agent.loop import MAX_TRANSIENT_RETRIES
     from successor.chat import _Message  # noqa: F401
     chat = SuccessorChat()
     chat.messages = []
@@ -98,6 +118,7 @@ def test_stream_error_event_renders_friendly_message(temp_config_dir: Path) -> N
 
     chat._stream = _ErrorStream()  # type: ignore[assignment]
     chat._stream_content = []
+    chat._transient_retry_count = MAX_TRANSIENT_RETRIES
     chat._pump_stream()
 
     assert chat._stream is None

@@ -11,9 +11,47 @@ unit on top of phase 0.
 
 ---
 
-## Unreleased
+## v0.1.37, Kimi Code OAuth + provider UX (2026-04-15)
 
-- no internal notes yet
+- **Kimi Code integration** — full OAuth device-flow support for
+  Moonshot's Kimi K2.5 coding agent API
+  - new `src/successor/oauth/` package: stdlib-only device authorization,
+    token refresh, and file-based credential storage at
+    `~/.config/successor/credentials/`
+  - `successor login` CLI command runs the device flow, saves the token,
+    and optionally creates a profile
+  - background `OAuthRefreshWorker` daemon keeps the token alive with
+    automatic refresh (checks every 60s, refreshes within 5 min of expiry)
+  - profile schema extended with `oauth: OAuthRef | None` and
+    `kimi_compat: bool` fields
+  - Kimi Code provider preset + factory aliases (`kimi`, `kimi-code`)
+  - tool compatibility layer: Kimi CLI tool names (`ReadFile`, `Shell`,
+    `Agent`, `SearchWeb`, etc.) are automatically mapped to Successor
+    native names at dispatch time; system prompt nudge injected when
+    `kimi_compat` is enabled
+  - required `X-Msh-*` identification headers auto-injected by
+    `OpenAICompatClient` when the base URL targets `api.kimi.com`
+    (reuses official Kimi CLI device ID when available)
+  - **OAuth recovery in chat**: when a stream fails with 401/403 on an
+    OAuth profile, the agent loop attempts an immediate token refresh
+    before showing any error. If refresh succeeds, the stream auto-retries
+    silently; if it fails, the user gets an actionable message pointing
+    to `successor login`
+
+- **Provider wizard overhaul** — consistent UP/DOWN arrow navigation
+  - provider selection step now uses per-row cursor highlighting with
+    UP/DOWN arrows (matching every other wizard step), replacing the old
+    SPACE-to-cycle pattern
+  - OAuth detection in the wizard: selecting Kimi Code checks for a stored
+    token and offers inline device authorization when none is found
+  - wizard `to_profile()` and `to_json_dict()` now emit `oauth` and
+    `subagents` fields
+
+- `write_file` gained optional `mode: "append"` parameter
+- provider wizard now offers 8 presets (added ollama, anthropic, z.ai,
+  generic, Kimi Code)
+- 403 Forbidden now handled as an auth error alongside 401 in stream
+  error formatting
 
 ## v0.1.36, KV-friendly prompt-assembly hotfix (2026-04-10)
 

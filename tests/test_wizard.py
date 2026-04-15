@@ -551,40 +551,131 @@ def test_wizard_state_chat_only_roundtrip(temp_config_dir: Path) -> None:
     assert payload["tools"] == []
 
 
+def test_yolo_toggle_appears_when_bash_enabled(temp_config_dir: Path) -> None:
+    """When bash is in enabled_tools, cursor can reach the yolo row."""
+    from successor.tools_registry import selectable_tool_names
+    wizard = SuccessorSetup()
+    wizard._enter_step(Step.TOOLS)
+    assert "bash" in wizard.state.enabled_tools
+    tool_names = selectable_tool_names()
+    yolo_idx = len(tool_names)
+
+    # Move cursor down to the yolo row
+    for _ in range(yolo_idx):
+        wizard._handle_tools(KeyEvent(key=Key.DOWN))
+    assert wizard._cursors[Step.TOOLS] == yolo_idx
+
+    # Toggle yolo on
+    wizard._handle_tools(KeyEvent(char=" "))
+    assert wizard.state.bash_yolo is True
+
+    # Toggle yolo off
+    wizard._handle_tools(KeyEvent(char=" "))
+    assert wizard.state.bash_yolo is False
+
+
+def test_yolo_resets_when_bash_disabled(temp_config_dir: Path) -> None:
+    """Turning off bash via toggle resets bash_yolo to False."""
+    wizard = SuccessorSetup()
+    wizard._enter_step(Step.TOOLS)
+    # Enable yolo first
+    wizard.state.bash_yolo = True
+    assert wizard.state.bash_yolo is True
+
+    # Find bash in tool_names and toggle it off
+    from successor.tools_registry import selectable_tool_names
+    tool_names = selectable_tool_names()
+    bash_idx = tool_names.index("bash")
+    wizard._cursors[Step.TOOLS] = bash_idx
+    wizard._handle_tools(KeyEvent(char=" "))
+    assert "bash" not in wizard.state.enabled_tools
+    assert wizard.state.bash_yolo is False
+
+
+def test_yolo_in_tool_config_json(temp_config_dir: Path) -> None:
+    """to_json_dict includes bash.allow_dangerous when yolo is on."""
+    state = _WizardState(
+        name="yolo-test",
+        enabled_tools=("bash",),
+        bash_yolo=True,
+    )
+    payload = state.to_json_dict()
+    assert payload["tool_config"]["bash"]["allow_dangerous"] is True
+
+
+def test_yolo_absent_when_bash_not_enabled(temp_config_dir: Path) -> None:
+    """tool_config is empty when bash is not in tools."""
+    state = _WizardState(
+        name="no-bash",
+        enabled_tools=("read_file",),
+        bash_yolo=True,  # shouldn't matter — bash isn't enabled
+    )
+    payload = state.to_json_dict()
+    assert payload["tool_config"] == {}
+
+
+def test_yolo_row_not_reachable_without_bash(temp_config_dir: Path) -> None:
+    """Without bash, cursor wraps only within tool checkboxes."""
+    from successor.tools_registry import selectable_tool_names
+    wizard = SuccessorSetup()
+    wizard._enter_step(Step.TOOLS)
+    # Disable bash
+    tool_names = selectable_tool_names()
+    bash_idx = tool_names.index("bash")
+    wizard._cursors[Step.TOOLS] = bash_idx
+    wizard._handle_tools(KeyEvent(char=" "))
+    assert "bash" not in wizard.state.enabled_tools
+
+    # Move cursor past last tool — should wrap to 0, not to yolo row
+    wizard._cursors[Step.TOOLS] = len(tool_names) - 1
+    wizard._handle_tools(KeyEvent(key=Key.DOWN))
+    assert wizard._cursors[Step.TOOLS] == 0
+
+
 # ─── Provider step ───
 
 
 def test_provider_step_default_is_llamacpp(temp_config_dir: Path) -> None:
     wizard = SuccessorSetup()
     wizard._enter_step(Step.PROVIDER)
-    assert wizard.state.provider_kind == "llamacpp"
+    assert wizard.state.provider_preset == "llamacpp"
     # Default → produces a llamacpp provider config
     profile = wizard.state.to_profile()
     assert profile.provider["type"] == "llamacpp"
     assert profile.provider["base_url"] == "http://localhost:8080"
 
 
-def test_provider_step_space_toggles_kind_when_focused_on_row_0(temp_config_dir: Path) -> None:
+def test_provider_step_arrow_keys_select_presets(temp_config_dir: Path) -> None:
     wizard = SuccessorSetup()
     wizard._enter_step(Step.PROVIDER)
     assert wizard._cursors[Step.PROVIDER] == 0
-    # Cycle is llamacpp → openai → openrouter → llamacpp
-    wizard._handle_provider(KeyEvent(char=" "))
-    assert wizard.state.provider_kind == "openai"
-    wizard._handle_provider(KeyEvent(char=" "))
-    assert wizard.state.provider_kind == "openrouter"
-    wizard._handle_provider(KeyEvent(char=" "))
-    assert wizard.state.provider_kind == "llamacpp"
+    assert wizard.state.provider_preset == "llamacpp"
+    # DOWN moves cursor to each preset; space selects it
+    # Cursor 0 = llamacpp (already selected), 1 = ollama, 2 = openai, etc.
+    presets = ["ollama", "openai", "anthropic", "zai", "openrouter", "generic", "kimi-code"]
+    for i, expected in enumerate(presets):
+        wizard._handle_provider(KeyEvent(key=Key.DOWN))
+        assert wizard._cursors[Step.PROVIDER] == i + 1
+        wizard._handle_provider(KeyEvent(char=" "))
+        assert wizard.state.provider_preset == expected, (
+            f"after pressing space at cursor {i + 1}, expected {expected}, got {wizard.state.provider_preset}"
+        )
+    # UP from cursor 0 wraps to max_pos - 1
+    wizard._cursors[Step.PROVIDER] = 0
+    wizard._handle_provider(KeyEvent(key=Key.UP))
+    # max_pos for kimi-code (no api_key needed, no OAuth token) = 8
+    assert wizard._cursors[Step.PROVIDER] == 7  # wraps to last preset
 
 
 def test_provider_step_openrouter_requires_api_key_to_advance(temp_config_dir: Path) -> None:
     wizard = SuccessorSetup()
     wizard._enter_step(Step.PROVIDER)
-    # Toggle: llamacpp → openai → openrouter
+    # Navigate to openrouter (cursor 5) and select it
+    for _ in range(5):
+        wizard._handle_provider(KeyEvent(key=Key.DOWN))
     wizard._handle_provider(KeyEvent(char=" "))
-    wizard._handle_provider(KeyEvent(char=" "))
-    assert wizard.state.provider_kind == "openrouter"
-    # Clear default model so we test ONLY the api_key requirement.
+    assert wizard.state.provider_preset == "openrouter"
+    # Clear the api key and try to advance
     wizard.state.provider_api_key = ""
     wizard._handle_provider(KeyEvent(key=Key.RIGHT))
     assert wizard.current_step == Step.PROVIDER  # blocked
@@ -595,8 +686,11 @@ def test_provider_step_openrouter_requires_api_key_to_advance(temp_config_dir: P
 def test_provider_step_openai_requires_api_key_to_advance(temp_config_dir: Path) -> None:
     wizard = SuccessorSetup()
     wizard._enter_step(Step.PROVIDER)
-    wizard._handle_provider(KeyEvent(char=" "))  # toggle to openai
-    assert wizard.state.provider_kind == "openai"
+    # Navigate to openai (cursor 2) and select it
+    for _ in range(2):
+        wizard._handle_provider(KeyEvent(key=Key.DOWN))
+    wizard._handle_provider(KeyEvent(char=" "))
+    assert wizard.state.provider_preset == "openai"
     wizard.state.provider_api_key = ""
     wizard._handle_provider(KeyEvent(key=Key.RIGHT))
     assert wizard.current_step == Step.PROVIDER  # blocked
@@ -608,21 +702,25 @@ def test_provider_step_openai_requires_api_key_to_advance(temp_config_dir: Path)
 def test_provider_step_openrouter_full_flow(temp_config_dir: Path) -> None:
     wizard = SuccessorSetup()
     wizard._enter_step(Step.PROVIDER)
-    # Toggle to openrouter (llamacpp → openai → openrouter)
+    # Navigate to openrouter (cursor 5) and select it
+    for _ in range(5):
+        wizard._handle_provider(KeyEvent(key=Key.DOWN))
     wizard._handle_provider(KeyEvent(char=" "))
-    wizard._handle_provider(KeyEvent(char=" "))
-    # Move focus to api_key, type some chars
-    wizard._handle_provider(KeyEvent(key=Key.DOWN))
-    assert wizard._cursors[Step.PROVIDER] == 1
+    assert wizard.state.provider_preset == "openrouter"
+    # Now openrouter is selected (needs api_key). Cursor still at 5.
+    # Move down to api_key field (cursor 8): 5→6→7→8
+    for _ in range(3):
+        wizard._handle_provider(KeyEvent(key=Key.DOWN))
+    assert wizard._cursors[Step.PROVIDER] == 8
     for ch in "sk-or-test-key":
         wizard._handle_provider(KeyEvent(char=ch))
     assert wizard.state.provider_api_key == "sk-or-test-key"
     # Backspace deletes one char
     wizard._handle_provider(KeyEvent(key=Key.BACKSPACE))
     assert wizard.state.provider_api_key == "sk-or-test-ke"
-    # Move focus to model field
+    # Move focus to model field (cursor 9)
     wizard._handle_provider(KeyEvent(key=Key.DOWN))
-    assert wizard._cursors[Step.PROVIDER] == 2
+    assert wizard._cursors[Step.PROVIDER] == 9
     # Default model is preset; clear and type a fresh one
     wizard.state.provider_model = ""
     for ch in "google/gemma-3-27b-it:free":
@@ -645,12 +743,17 @@ def test_provider_step_openrouter_full_flow(temp_config_dir: Path) -> None:
 def test_provider_step_openai_full_flow(temp_config_dir: Path) -> None:
     wizard = SuccessorSetup()
     wizard._enter_step(Step.PROVIDER)
-    wizard._handle_provider(KeyEvent(char=" "))  # toggle to openai
-    assert wizard.state.provider_kind == "openai"
-    # Default model should auto-swap to gpt-4o-mini when picking openai
-    assert wizard.state.provider_model == "gpt-4o-mini"
-    # Type the api key
-    wizard._handle_provider(KeyEvent(key=Key.DOWN))
+    # Navigate to openai (cursor 2) and select it
+    for _ in range(2):
+        wizard._handle_provider(KeyEvent(key=Key.DOWN))
+    wizard._handle_provider(KeyEvent(char=" "))
+    assert wizard.state.provider_preset == "openai"
+    # Default model should auto-swap to gpt-4.1-mini when picking openai
+    assert wizard.state.provider_model == "gpt-4.1-mini"
+    # Move to api_key field (cursor 8): from cursor 2, DOWN 6 times
+    for _ in range(6):
+        wizard._handle_provider(KeyEvent(key=Key.DOWN))
+    assert wizard._cursors[Step.PROVIDER] == 8
     for ch in "sk-proj-test-key":
         wizard._handle_provider(KeyEvent(char=ch))
     assert wizard.state.provider_api_key == "sk-proj-test-key"
@@ -661,27 +764,77 @@ def test_provider_step_openai_full_flow(temp_config_dir: Path) -> None:
     payload = wizard.state.to_json_dict()
     assert payload["provider"]["type"] == "openai_compat"
     assert payload["provider"]["base_url"] == "https://api.openai.com/v1"
-    assert payload["provider"]["model"] == "gpt-4o-mini"
+    assert payload["provider"]["model"] == "gpt-4.1-mini"
     assert payload["provider"]["api_key"] == "sk-proj-test-key"
     assert "context_window" not in payload["provider"]
 
 
-def test_provider_step_left_from_input_returns_to_toggle_then_back(
+def test_provider_step_zai_flow(temp_config_dir: Path) -> None:
+    wizard = SuccessorSetup()
+    wizard._enter_step(Step.PROVIDER)
+    # Navigate to zai (cursor 4) and select it
+    for _ in range(4):
+        wizard._handle_provider(KeyEvent(key=Key.DOWN))
+    wizard._handle_provider(KeyEvent(char=" "))
+    assert wizard.state.provider_preset == "zai"
+    assert wizard.state.provider_model == "glm-5.1"
+    # Move to api_key field (cursor 8): from cursor 4, DOWN 4 times
+    for _ in range(4):
+        wizard._handle_provider(KeyEvent(key=Key.DOWN))
+    for ch in "test-zai-key":
+        wizard._handle_provider(KeyEvent(char=ch))
+    assert wizard.state.provider_api_key == "test-zai-key"
+    # Right advances
+    wizard._handle_provider(KeyEvent(key=Key.RIGHT))
+    assert wizard.current_step == Step.TOOLS
+
+    payload = wizard.state.to_json_dict()
+    assert payload["provider"]["type"] == "anthropic"
+    assert payload["provider"]["base_url"] == "https://api.z.ai/api/anthropic"
+    assert payload["provider"]["model"] == "glm-5.1"
+    assert payload["provider"]["api_key"] == "test-zai-key"
+
+
+def test_provider_step_left_retreats_to_previous_step(
     temp_config_dir: Path,
 ) -> None:
     wizard = SuccessorSetup()
     wizard._enter_step(Step.PROVIDER)
-    # Toggle to openai (one Space) so we have visible input rows
-    wizard._handle_provider(KeyEvent(char=" "))
-    wizard._handle_provider(KeyEvent(key=Key.DOWN))
-    assert wizard._cursors[Step.PROVIDER] == 1
-    # Left from a focused input should pull back to row 0, NOT retreat to INTRO
-    wizard._handle_provider(KeyEvent(key=Key.LEFT))
-    assert wizard.current_step == Step.PROVIDER
-    assert wizard._cursors[Step.PROVIDER] == 0
-    # Left from row 0 retreats to INTRO
+    # LEFT always retreats to the previous step
     wizard._handle_provider(KeyEvent(key=Key.LEFT))
     assert wizard.current_step == Step.INTRO
+
+
+def test_provider_step_to_json_includes_subagents_and_oauth(
+    temp_config_dir: Path,
+) -> None:
+    wizard = SuccessorSetup()
+    wizard._enter_step(Step.PROVIDER)
+    # Default llamacpp preset — no OAuth
+    payload = wizard.state.to_json_dict()
+    assert payload["oauth"] is None
+    assert isinstance(payload["subagents"], dict)
+    assert payload["subagents"]["enabled"] is True
+    # Provider config should not have api_key for llamacpp
+    assert "api_key" not in payload["provider"]
+
+
+def test_provider_step_kimi_code_detects_oauth(temp_config_dir: Path) -> None:
+    wizard = SuccessorSetup()
+    wizard._enter_step(Step.PROVIDER)
+    # Navigate to kimi-code (cursor 7) and select it
+    for _ in range(7):
+        wizard._handle_provider(KeyEvent(key=Key.DOWN))
+    wizard._handle_provider(KeyEvent(char=" "))
+    assert wizard.state.provider_preset == "kimi-code"
+    # No stored token → oauth_ref should be None
+    assert wizard.state.oauth_ref is None
+    # Provider dict should NOT include api_key for kimi-code
+    provider = wizard.state._build_provider_dict()
+    assert "api_key" not in provider
+    assert provider["type"] == "openai_compat"
+    assert provider["base_url"] == "https://api.kimi.com/coding/v1"
+    assert provider["model"] == "kimi-k2-5"
 
 
 def test_snapshot_review_shows_summary(temp_config_dir: Path) -> None:

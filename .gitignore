@@ -77,3 +77,6 @@ scripts/walkthrough_demo.py
 /plans/
 /notes/
 docs/*.local.md
+*.local.md
+/labs/
+accomplishment.html

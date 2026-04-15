@@ -131,6 +131,98 @@ class ChatToolRuntime:
             return card
         return replace(card, badges=merged)
 
+    # ─── Kimi tool name normalization ───
+
+    _KIMI_TOOL_MAP: dict[str, str] = {
+        "ReadFile": "read_file",
+        "WriteFile": "write_file",
+        "StrReplaceFile": "edit_file",
+        "Shell": "bash",
+        "Agent": "subagent",
+        "SearchWeb": "holonet",
+        "FetchURL": "holonet",
+    }
+
+    def _normalize_kimi_tool_call(
+        self, name: str, args: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        """Map Kimi CLI tool names + params to Successor native equivalents.
+
+        Runs unconditionally — it's idempotent for native Successor tool
+        names (they pass through unchanged). Only Kimi names get remapped.
+        """
+        native_name = self._KIMI_TOOL_MAP.get(name)
+        if native_name is None:
+            # Unknown tool — not a Kimi name, not a native name.
+            # Known Kimi tools that we can't map get a nudge below.
+            return name, args
+
+        args = dict(args)  # shallow copy before mutation
+
+        if name == "ReadFile":
+            args.setdefault("file_path", args.pop("path", ""))
+            args.setdefault("offset", args.pop("line_offset", 0))
+            args.setdefault("limit", args.pop("n_lines", None))
+
+        elif name == "WriteFile":
+            args.setdefault("file_path", args.pop("path", ""))
+            # Kimi's WriteFile has a mode param — map it through
+            # (append mode support is optional scope)
+
+        elif name == "StrReplaceFile":
+            args.setdefault("file_path", args.pop("path", ""))
+            edit = args.pop("edit", None)
+            if isinstance(edit, dict):
+                args.setdefault("old_string", edit.get("old", ""))
+                args.setdefault("new_string", edit.get("new", ""))
+                ra = edit.get("replace_all")
+                if ra is not None:
+                    args["replace_all"] = bool(ra)
+            elif isinstance(edit, list) and len(edit) == 1:
+                single = edit[0]
+                if isinstance(single, dict):
+                    args.setdefault("old_string", single.get("old", ""))
+                    args.setdefault("new_string", single.get("new", ""))
+                    ra = single.get("replace_all")
+                    if ra is not None:
+                        args["replace_all"] = bool(ra)
+            elif isinstance(edit, list) and len(edit) > 1:
+                # Multi-edit lists are not supported — return a
+                # synthetic error to nudge the model.
+                self._append_successor(
+                    "StrReplaceFile with multiple edits is not supported. "
+                    "Use separate edit_file calls or bash with sed.",
+                )
+                # Return a dummy that won't match any handler
+                return "__kimi_unsupported__", args
+
+        elif name == "Shell":
+            # Drop params that Successor's bash doesn't use
+            args.pop("timeout", None)
+            args.pop("run_in_background", None)
+            command = args.pop("command", "")
+            if command and not args.get("command"):
+                args["command"] = command
+
+        elif name == "Agent":
+            desc = args.pop("description", "")
+            if desc and not args.get("name"):
+                args["name"] = desc
+
+        elif name == "SearchWeb":
+            args["provider"] = "brave_search"
+            query = args.pop("query", "")
+            if query:
+                args["query"] = query
+
+        elif name == "FetchURL":
+            args["provider"] = "firecrawl_scrape"
+            url = args.pop("url", "")
+            if url:
+                args["url"] = url
+
+        return native_name, args
+
     def _task_badges(self) -> tuple[ToolCardBadge, ...]:
         ledger = self._host._task_ledger
         total = len(ledger.items)
@@ -1229,6 +1321,9 @@ class ChatToolRuntime:
             name = tc.get("name") or ""
             args = tc.get("arguments") or {}
             call_id = tc.get("id") or ""
+
+            # Normalize Kimi-style tool calls to Successor native names.
+            name, args = self._normalize_kimi_tool_call(name, args)
 
             if name != "bash":
                 if name != "read_file":

@@ -1505,6 +1505,7 @@ class SuccessorChat(App):
         # the model can react to its own tool output. Hard-capped
         # at MAX_AGENT_TURNS to bound runaway loops.
         self._agent_turn: int = 0
+        self._transient_retry_count: int = 0
         self._task_ledger = SessionTaskLedger()
         self._verification_ledger = VerificationLedger()
         self._runbook = SessionRunbook()
@@ -1608,6 +1609,23 @@ class SuccessorChat(App):
         # ~40s cache miss. With it, the next message is near-instant.
         # Auto-canceled by _submit when the user types a real message.
         self._cache_warmer: _CacheWarmer | None = None
+
+        # OAuth refresh worker — when the active profile has an OAuth
+        # ref, this daemon thread periodically refreshes the access
+        # token and mutates client.api_key. The initial token is
+        # loaded eagerly so the provider is usable on the first stream.
+        self._oauth_worker = None
+        if self.profile.oauth is not None:
+            from .oauth.worker import OAuthRefreshWorker
+            from .oauth.storage import load_token
+            token = load_token(self.profile.oauth.key)
+            if token is not None:
+                self.client.api_key = token.access_token
+            self._oauth_worker = OAuthRefreshWorker(
+                oauth_ref=self.profile.oauth,
+                client=self.client,
+            )
+            self._oauth_worker.start()
 
         # Cached TokenCounter for the agent log adapter — lazy-init
         # on first /budget or /compact so we don't pay the construction
@@ -1747,6 +1765,12 @@ class SuccessorChat(App):
             except Exception:
                 pass
             self._cache_warmer = None
+        if self._oauth_worker is not None:
+            try:
+                self._oauth_worker.stop()
+            except Exception:
+                pass
+            self._oauth_worker = None
         if self._browser_manager is not None:
             try:
                 self._browser_manager.close()
@@ -2395,6 +2419,14 @@ class SuccessorChat(App):
         # old provider, and the next user message starts on the new one.
         self.system_prompt = new_profile.system_prompt
 
+        # Stop old OAuth worker before swapping provider
+        if self._oauth_worker is not None:
+            try:
+                self._oauth_worker.stop()
+            except Exception:
+                pass
+            self._oauth_worker = None
+
         if new_profile.provider:
             try:
                 self.client = make_provider(new_profile.provider)
@@ -2407,6 +2439,19 @@ class SuccessorChat(App):
             self.client = LlamaCppClient()
         self._apply_provider_cache_preferences()
         self._reset_client_dependent_caches()
+
+        # Start new OAuth worker if the new profile has OAuth
+        if new_profile.oauth is not None:
+            from .oauth.worker import OAuthRefreshWorker
+            from .oauth.storage import load_token
+            token = load_token(new_profile.oauth.key)
+            if token is not None:
+                self.client.api_key = token.access_token
+            self._oauth_worker = OAuthRefreshWorker(
+                oauth_ref=new_profile.oauth,
+                client=self.client,
+            )
+            self._oauth_worker.start()
 
         # Queue-width changes apply once the manager is idle. If
         # background tasks are active, keep the old scheduler shape
@@ -4581,6 +4626,16 @@ class SuccessorChat(App):
         # we care about.
         if self._cache_warmer is not None and self._cache_warmer.is_done():
             self._cache_warmer = None
+
+        # Surface OAuth refresh errors as a synthetic successor message.
+        # Clear after surfacing so we don't spam on every tick.
+        if self._oauth_worker is not None and self._oauth_worker.last_error:
+            self.messages.append(_Message(
+                "successor",
+                f"OAuth refresh error: {self._oauth_worker.last_error}",
+                synthetic=True,
+            ))
+            self._oauth_worker.last_error = None
 
         # Resolve the active theme variant for THIS frame. Combines the
         # (theme, display_mode) state into one ThemeVariant. If either

@@ -162,6 +162,19 @@ class LoopErrored:
     message: str
 
 
+@dataclass(frozen=True, slots=True)
+class TransientRetry:
+    """A transient error occurred before any content was delivered.
+
+    The loop is backing off and retrying the stream. The UI should
+    suppress the error display and optionally show a retry indicator.
+    """
+    attempt: int
+    max_attempts: int
+    delay_s: float
+    reason: str
+
+
 # ─── Type alias for the consumer's callback signature ───
 
 
@@ -169,6 +182,7 @@ ChatEvent = (
     StreamStarted | ReasoningChars | ContentChunk | StreamCommitted | StreamFailed
     | BashBlockDetected | ToolStarted | ToolCompleted | ToolRefused
     | CompactionStarted | Compacted | CompactionFailed
+    | TransientRetry
     | TurnStarted | TurnCompleted
     | BlockingLimitReached | MaxTurnsReached | LoopErrored
 )

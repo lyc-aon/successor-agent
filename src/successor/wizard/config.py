@@ -190,18 +190,22 @@ def _theme_options() -> list[str]:
 
 
 def _provider_type_options() -> list[str]:
-    """Cycle options for the provider_type field — pulled from
-    PROVIDER_REGISTRY so adding a new backend automatically extends
-    the cycle list."""
-    from ..providers import PROVIDER_REGISTRY
-    # Use only the canonical names (filter out aliases like "llama"
-    # that point at the same constructor)
-    canonical = sorted({
-        cls.provider_type
-        for cls in PROVIDER_REGISTRY.values()
-        if hasattr(cls, "provider_type")
-    })
-    return canonical or ["llamacpp"]
+    """Cycle options for the provider_type field — preset IDs.
+
+    The cycle widget stores and returns these IDs. Display names are
+    resolved in the settings paint path via _provider_type_display_name().
+    """
+    from ..providers.presets import PROVIDER_PRESETS
+    return [p.id for p in PROVIDER_PRESETS]
+
+
+def _provider_type_display_name(preset_id: str) -> str:
+    """Map a preset ID to its friendly display name for the settings list."""
+    from ..providers.presets import get_preset_by_id
+    preset = get_preset_by_id(preset_id)
+    if preset:
+        return preset.label
+    return preset_id
 
 
 _SETTINGS_TREE: tuple[_SettingField, ...] = (
@@ -1014,7 +1018,31 @@ class SuccessorConfig(App):
         elif field.name.startswith("provider_"):
             key = field.name.removeprefix("provider_")
             new_provider = dict(old_profile.provider) if old_profile.provider else {}
-            new_provider[key] = new_value
+            if field.name == "provider_type":
+                # Translate preset ID to actual provider config
+                from ..providers.presets import PROVIDER_PRESETS, get_preset_by_id
+                preset = get_preset_by_id(new_value)
+                if preset:
+                    old_model = new_provider.get("model", "")
+                    old_api_key = new_provider.get("api_key", "")
+                    new_provider["type"] = preset.provider_type
+                    new_provider["base_url"] = preset.base_url
+                    # Update model to new preset default unless the user typed
+                    # a custom model (not a default from any preset). This
+                    # prevents keeping "local" when switching from llamacpp
+                    # to z.ai.
+                    all_defaults = {p.default_model for p in PROVIDER_PRESETS}
+                    if not old_model or old_model in all_defaults:
+                        new_provider["model"] = preset.default_model
+                    # Preserve existing API key if the new preset needs one
+                    if preset.needs_api_key and old_api_key:
+                        new_provider["api_key"] = old_api_key
+                    elif not preset.needs_api_key:
+                        new_provider.pop("api_key", None)
+                else:
+                    new_provider["type"] = new_value
+            else:
+                new_provider[key] = new_value
             new_profile = replace(old_profile, provider=new_provider)
         elif field.name.startswith("compaction_"):
             # Build a new CompactionConfig with the updated field. The
@@ -1112,6 +1140,17 @@ class SuccessorConfig(App):
             return None
         if field.name.startswith("provider_"):
             key = field.name.removeprefix("provider_")
+            if field.name == "provider_type":
+                # Show preset ID instead of raw provider type
+                from ..providers.presets import match_preset
+                if profile.provider:
+                    p_type = profile.provider.get("type", "llamacpp")
+                    p_url = profile.provider.get("base_url", "")
+                    preset = match_preset(p_type, p_url)
+                    if preset:
+                        return preset.id
+                    return p_type
+                return "llamacpp"
             if profile.provider:
                 return profile.provider.get(key)
             return None
@@ -1151,7 +1190,7 @@ class SuccessorConfig(App):
             key = field.name.removeprefix("vision_")
             defaults = {
                 "mode": "inherit",
-                "provider_type": "llamacpp",
+                "provider_type": "openai_compat",
                 "base_url": "",
                 "model": "",
                 "api_key": "",
@@ -2216,6 +2255,9 @@ class SuccessorConfig(App):
             value = self._profile_value_for_field(profile, fld)
             if value is None:
                 value_text = "(none)"
+            elif fld.name == "provider_type":
+                # Show friendly preset label instead of raw ID
+                value_text = _provider_type_display_name(str(value))
             else:
                 value_text = str(value)
 
@@ -2577,7 +2619,10 @@ class SuccessorConfig(App):
             row_y = box_y + 1 + i
             if row_y >= box_y + box_h - 1:
                 break
-            opt_text = str(opt) if opt is not None else "(none)"
+            if field.name == "provider_type" and opt is not None:
+                opt_text = _provider_type_display_name(str(opt))
+            else:
+                opt_text = str(opt) if opt is not None else "(none)"
             is_selected = i == self._editing_cursor
 
             row_bg = theme.accent if is_selected else theme.bg_input
@@ -2866,6 +2911,11 @@ def _profile_to_json_dict(profile: Profile) -> dict:
         "max_agent_turns": profile.max_agent_turns,
         "compaction": profile.compaction.to_dict(),
         "subagents": profile.subagents.to_dict(),
+        "oauth": (
+            {"storage": profile.oauth.storage, "key": profile.oauth.key}
+            if profile.oauth else None
+        ),
+        "kimi_compat": profile.kimi_compat,
     }
 
 

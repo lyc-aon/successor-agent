@@ -98,6 +98,7 @@ from .events import (
     ToolCompleted,
     ToolRefused,
     ToolStarted,
+    TransientRetry,
     TurnCompleted,
     TurnStarted,
 )
@@ -114,6 +115,38 @@ DEFAULT_MAX_TURNS: int = 50
 # after the stream commits. v0 = after-commit only; in-flight tool
 # dispatch comes later when we wire async/threading.
 EXECUTE_TOOLS_DURING_STREAM: bool = False
+
+# Pre-stream retry: max attempts and backoff base.
+MAX_TRANSIENT_RETRIES: int = 3
+TRANSIENT_BACKOFF_BASE_S: float = 1.0
+
+
+def is_transient_stream_error(msg: str) -> bool:
+    """Classify a StreamError message as transient (retry-able) or fatal.
+
+    Only errors that occur before any content has been delivered to the
+    user are safe to retry — once content streams, retrying would produce
+    a different response the user already saw part of.  This classifier
+    is used *after* confirming zero content was delivered.
+    """
+    lower = msg.lower()
+    if "connection refused" in lower or "errno 111" in lower:
+        return True
+    if "name or service not known" in lower or "nodename nor servname" in lower:
+        return True
+    if "temporary failure in name resolution" in lower:
+        return True
+    if "network is unreachable" in lower:
+        return True
+    if "timed out" in lower or "timeout" in lower:
+        return True
+    if "http 429" in lower or "too many requests" in lower:
+        return True
+    if "http 503" in lower or "service unavailable" in lower:
+        return True
+    if "connection reset" in lower or "broken pipe" in lower:
+        return True
+    return False
 
 
 # ─── Loop state ───
@@ -180,6 +213,7 @@ class QueryLoop:
     _stream_content_buf: list[str] = field(default_factory=list)
     _stream_reasoning_chars: int = 0
     _last_error: str = ""
+    _transient_retry_count: int = 0
 
     # Test/diagnostic introspection
     _started_at: float = 0.0
@@ -212,6 +246,7 @@ class QueryLoop:
         self.counter.refresh_round_estimates(self.log)
 
         self.turn_count += 1
+        self._transient_retry_count = 0
         self._emit(TurnStarted(turn_count=self.turn_count))
 
         self.phase = LoopPhase.COMPACTING
@@ -400,9 +435,34 @@ class QueryLoop:
                 if is_ptl:
                     # Reactive compact: try to recover by compacting NOW
                     self._reactive_compact_recovery(msg)
-                else:
-                    self._emit(LoopErrored(message=msg))
-                    self.phase = LoopPhase.DONE
+                    return
+
+                # Pre-stream transient retry: if no content has been
+                # delivered to the user yet, the error happened before
+                # any visible output.  Safe to back off and retry — the
+                # user never saw a partial response.
+                no_content = not self._stream_content_buf
+                if (
+                    no_content
+                    and is_transient_stream_error(msg)
+                    and self._transient_retry_count < MAX_TRANSIENT_RETRIES
+                ):
+                    self._transient_retry_count += 1
+                    delay = TRANSIENT_BACKOFF_BASE_S * (
+                        2 ** (self._transient_retry_count - 1)
+                    )
+                    self._emit(TransientRetry(
+                        attempt=self._transient_retry_count,
+                        max_attempts=MAX_TRANSIENT_RETRIES,
+                        delay_s=delay,
+                        reason=msg,
+                    ))
+                    time.sleep(delay)
+                    self._begin_stream()
+                    return
+
+                self._emit(LoopErrored(message=msg))
+                self.phase = LoopPhase.DONE
                 return
 
     def _reactive_compact_recovery(self, original_error: str) -> None:

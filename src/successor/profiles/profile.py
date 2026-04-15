@@ -275,6 +275,18 @@ DEFAULT_MAX_AGENT_TURNS = 999
 
 
 @dataclass(frozen=True, slots=True)
+class OAuthRef:
+    """Reference to a stored OAuth token.
+
+    ``storage`` is the backend type (only ``"file"`` for now).
+    ``key`` identifies the credential file, e.g. ``"oauth/kimi-code"``.
+    """
+
+    storage: str
+    key: str
+
+
+@dataclass(frozen=True, slots=True)
 class Profile:
     """One named profile — everything that defines a persona's feel.
 
@@ -344,6 +356,8 @@ class Profile:
     compaction: CompactionConfig = field(default_factory=CompactionConfig)
     subagents: SubagentConfig = field(default_factory=SubagentConfig)
     max_agent_turns: int = DEFAULT_MAX_AGENT_TURNS
+    oauth: OAuthRef | None = None
+    kimi_compat: bool = False
 
     def __post_init__(self) -> None:
         if self.max_agent_turns < 1:
@@ -439,6 +453,17 @@ def parse_profile_file(path: Path) -> Profile | None:
     if isinstance(max_turns_val, int) and not isinstance(max_turns_val, bool):
         if max_turns_val >= 1:
             kwargs["max_agent_turns"] = max_turns_val
+
+    oauth_val = data.get("oauth")
+    if isinstance(oauth_val, dict):
+        kwargs["oauth"] = OAuthRef(
+            storage=str(oauth_val.get("storage", "file")),
+            key=str(oauth_val.get("key", "")),
+        )
+
+    kc_val = data.get("kimi_compat")
+    if isinstance(kc_val, bool):
+        kwargs["kimi_compat"] = kc_val
 
     return Profile(**kwargs)
 

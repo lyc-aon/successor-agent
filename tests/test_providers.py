@@ -20,6 +20,7 @@ from __future__ import annotations
 import pytest
 
 from successor.providers import (
+    AnthropicClient,
     ChatProvider,
     LlamaCppClient,
     OpenAICompatClient,
@@ -40,6 +41,11 @@ def test_llamacpp_conforms_to_chat_provider() -> None:
 
 def test_openai_compat_conforms_to_chat_provider() -> None:
     client = OpenAICompatClient()
+    assert isinstance(client, ChatProvider)
+
+
+def test_anthropic_conforms_to_chat_provider() -> None:
+    client = AnthropicClient()
     assert isinstance(client, ChatProvider)
 
 
@@ -114,6 +120,9 @@ def test_factory_aliases_work() -> None:
 
     d = make_provider({"type": "openai-compat"})
     assert isinstance(d, OpenAICompatClient)
+
+    e = make_provider({"type": "claude"})
+    assert isinstance(e, AnthropicClient)
 
 
 def test_factory_type_is_case_insensitive() -> None:
@@ -230,6 +239,7 @@ def test_factory_unknown_type_lists_available() -> None:
     msg = str(excinfo.value)
     assert "llamacpp" in msg
     assert "openai_compat" in msg
+    assert "anthropic" in msg
 
 
 def test_factory_non_string_type_raises() -> None:
@@ -243,9 +253,11 @@ def test_factory_non_string_type_raises() -> None:
 def test_registry_contains_canonical_names() -> None:
     assert "llamacpp" in PROVIDER_REGISTRY
     assert "openai_compat" in PROVIDER_REGISTRY
+    assert "anthropic" in PROVIDER_REGISTRY
 
 
 def test_registry_canonical_names_match_provider_type_attribute() -> None:
     """Each registered constructor's `provider_type` matches its key."""
     assert PROVIDER_REGISTRY["llamacpp"].provider_type == "llamacpp"
     assert PROVIDER_REGISTRY["openai_compat"].provider_type == "openai_compat"
+    assert PROVIDER_REGISTRY["anthropic"].provider_type == "anthropic"

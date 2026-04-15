@@ -285,14 +285,20 @@ def run_write_file(
         working_directory=working_directory,
     )
     content = _require_string(arguments.get("content"), name="content")
+    mode = str(arguments.get("mode", "overwrite")).lower()
     existing = _read_optional_text_file(path)
     if existing is not None:
         _require_full_read(path, read_state)
         _ensure_not_stale(path, current_text=existing[0], read_state=read_state)
 
+    if mode == "append":
+        final_content = (existing[0] if existing else "") + content
+    else:
+        final_content = content
+
     before_raw = existing[0] if existing is not None else None
-    _write_text_file(path, content)
-    after_raw = content
+    _write_text_file(path, final_content)
+    after_raw = final_content
     after_normalized = _normalize_newlines(after_raw)
     stat_info = os.stat(path)
     read_state[path] = FileReadStateEntry(

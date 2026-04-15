@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from .anthropic import AnthropicClient
 from .llama import LlamaCppClient
 from .openai_compat import OpenAICompatClient
 
@@ -37,6 +38,7 @@ ProviderFactory = Callable[..., Any]
 PROVIDER_REGISTRY: dict[str, ProviderFactory] = {
     "llamacpp": LlamaCppClient,
     "openai_compat": OpenAICompatClient,
+    "anthropic": AnthropicClient,
     # Aliases for ergonomics — the canonical names above are what
     # `provider_type` returns, but users will type whatever feels
     # right in their JSON files.
@@ -44,6 +46,9 @@ PROVIDER_REGISTRY: dict[str, ProviderFactory] = {
     "llama.cpp": LlamaCppClient,
     "openai": OpenAICompatClient,
     "openai-compat": OpenAICompatClient,
+    "claude": AnthropicClient,
+    "kimi": OpenAICompatClient,
+    "kimi-code": OpenAICompatClient,
 }
 
 

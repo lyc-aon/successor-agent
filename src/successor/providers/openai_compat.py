@@ -26,11 +26,59 @@ Both return ChatStream instances backed by the same SSE worker thread.
 from __future__ import annotations
 
 import json
+import platform
+import uuid
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Iterable
 
 from .llama import ChatStream
+
+
+# ─── Kimi Code identification headers ───
+# api.kimi.com/coding requires X-Msh-* headers to identify the client
+# as a recognized coding agent. Without these, every request gets 403
+# "access_terminated_error". The device ID is generated once and
+# persisted so the server sees a stable identity across sessions.
+
+_KIMI_DEVICE_ID_PATH = Path.home() / ".local" / "share" / "kimi-cli" / "device_id"
+
+
+def _kimi_code_headers() -> dict[str, str]:
+    """Build the X-Msh-* headers required by api.kimi.com/coding/v1."""
+    device_id = _load_kimi_device_id()
+    return {
+        "User-Agent": "KimiCLI/1.29.0",
+        "X-Msh-Platform": "kimi_cli",
+        "X-Msh-Version": "1.29.0",
+        "X-Msh-Device-Name": platform.node()[:64],
+        "X-Msh-Device-Model": f"{platform.system()} {platform.release()} {platform.machine()}",
+        "X-Msh-Os-Version": platform.version()[:128],
+        "X-Msh-Device-Id": device_id,
+    }
+
+
+def _load_kimi_device_id() -> str:
+    """Load or create a persistent device ID for Kimi Code.
+
+    Reuses the official Kimi CLI's device ID if present, otherwise
+    generates one and persists it in the same location for compat.
+    """
+    try:
+        if _KIMI_DEVICE_ID_PATH.exists():
+            existing = _KIMI_DEVICE_ID_PATH.read_text().strip()
+            if existing:
+                return existing
+    except OSError:
+        pass
+    new_id = uuid.uuid4().hex
+    try:
+        _KIMI_DEVICE_ID_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _KIMI_DEVICE_ID_PATH.write_text(new_id)
+    except OSError:
+        pass
+    return new_id
 
 
 # Static fallback table for OpenAI-family models whose /v1/models endpoint
@@ -139,6 +187,11 @@ class OpenAICompatClient:
         self.default_temperature = default_temperature
         self.default_timeout = default_timeout
         self.connect_timeout = connect_timeout
+        self._extra_headers: dict[str, str] = {}
+        # Kimi Code (api.kimi.com/coding) requires X-Msh-* headers
+        # to identify the client as a recognized coding agent.
+        if "api.kimi.com" in self.base_url:
+            self._extra_headers = _kimi_code_headers()
 
     def _api_root(self) -> str:
         """Return the base URL with `/v1` ensured exactly once.
@@ -212,6 +265,7 @@ class OpenAICompatClient:
                 timeout=timeout if timeout is not None else self.default_timeout,
                 connect_timeout=self.connect_timeout,
                 api_key=self.api_key,
+                extra_headers=self._extra_headers,
             )
 
         return ChatStream(
@@ -229,7 +283,7 @@ class OpenAICompatClient:
         auth for it (some require auth — passes the api_key if set).
         """
         url = f"{self._api_root()}/models"
-        headers = {}
+        headers = dict(self._extra_headers)
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         try:
@@ -269,7 +323,7 @@ class OpenAICompatClient:
             return self._cached_context_window
         result: int | None = None
         url = f"{self._api_root()}/models"
-        headers = {}
+        headers = dict(self._extra_headers)
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         try:
@@ -328,8 +382,10 @@ class _AuthenticatedChatStream(ChatStream):
         timeout: float,
         connect_timeout: float,
         api_key: str,
+        extra_headers: dict[str, str] | None = None,
     ) -> None:
         self._api_key = api_key
+        self._extra_headers = extra_headers or {}
         super().__init__(
             url=url,
             body=body,
@@ -351,14 +407,16 @@ class _AuthenticatedChatStream(ChatStream):
         )
 
         try:
+            req_headers: dict[str, str] = {
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",
+                "Authorization": f"Bearer {self._api_key}",
+            }
+            req_headers.update(self._extra_headers)
             req = urllib.request.Request(
                 url,
                 data=json.dumps(body).encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "text/event-stream",
-                    "Authorization": f"Bearer {self._api_key}",
-                },
+                headers=req_headers,
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=connect_timeout) as resp:

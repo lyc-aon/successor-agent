@@ -51,13 +51,20 @@ src/successor/tool_runner.py generic native-tool runner for non-bash tools
 src/successor/tasks.py       session-local task ledger for structured autonomy
 
 src/successor/profiles/      Profile dataclass + JSON loader + active-profile resolver
-src/successor/providers/     ChatProvider protocol + factory + llamacpp/openai_compat
+src/successor/providers/     ChatProvider protocol + factory + llamacpp/openai_compat/anthropic
+  presets.py            provider preset definitions (8 presets incl. Kimi Code)
+  factory.py            config dict → ChatProvider constructor
+  anthropic.py          Anthropic API client (Messages API format)
 src/successor/skills/        Skill dataclass + frontmatter parser + registry
 src/successor/tools/         @tool decorator + ToolRegistry (Python imports, gated user dir)
 src/successor/web/           optional API/web tooling
   config.py              holonet/browser profile config resolution
   holonet.py             API-backed web routes (Brave, Firecrawl, Europe PMC, ClinicalTrials)
   browser.py             Playwright browser manager + native browser actions
+src/successor/oauth/         OAuth device-flow client + token storage + refresh worker
+  __init__.py            device authorization, token exchange, token refresh
+  storage.py             file-based credential persistence (~/.config/successor/credentials/)
+  worker.py              OAuthRefreshWorker daemon thread (auto-refresh within 5 min of expiry)
 src/successor/bash/          bash-masking subsystem — parse model bash → structured cards
   cards.py               ToolCard frozen dataclass (verb/params/risk/raw/output/exit_code)
   parser.py              @bash_parser registry, parse_bash(), clip_at_operators
@@ -127,6 +134,7 @@ Available subcommands (use either `successor` or `sx`):
 ```
 successor              help
 successor -V           version
+successor login        OAuth device flow for Kimi Code (saves token + creates profile)
 successor chat         chat interface (real llama.cpp streaming, intro plays first)
                         - inside chat:
                           /bash <cmd>     run bash, render as tool card

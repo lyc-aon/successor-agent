@@ -62,14 +62,32 @@ llama-server -m /path/to/Qwen3-VL.gguf --mmproj /path/to/mmproj.gguf --port 8090
 `successor setup` plays the SUCCESSOR emergence animation and walks
 you through 10 interactive wizard steps with a live preview pane:
 welcome, name, theme, dark/light, density, intro animation, provider,
-tools, autocompact, review. The provider step gives you three choices out of the
+tools, autocompact, review. The provider step gives you eight choices out of the
 box:
 
 | Provider | Auth | Notes |
 |---|---|---|
 | **local llama.cpp** | none | free + private, needs `llama-server` running |
+| **ollama** | none | local models via `ollama serve` |
 | **openai** | API key | pay-per-use against your OpenAI credits |
+| **anthropic** | API key | anthropic.com or z.ai endpoints |
+| **z.ai** | API key | GLM models via Anthropic-compatible endpoint |
 | **openrouter** | API key | free models available, no card needed |
+| **generic** | optional | any `/v1/chat/completions` endpoint |
+| **Kimi Code** | OAuth | run `successor login` first |
+
+## Kimi Code platform
+
+To use the Kimi Code platform with OAuth device flow:
+
+```bash
+successor login
+successor chat --profile kimi-code
+```
+
+The `login` command runs the OAuth device authorization flow against
+`auth.kimi.com`, saves the token, and creates a `kimi-code` profile
+with the appropriate provider config and tool set.
 
 When you save, the wizard writes the profile to
 `~/.config/successor/profiles/<name>.json` and drops straight into the

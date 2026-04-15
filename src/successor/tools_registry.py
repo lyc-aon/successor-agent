@@ -307,6 +307,11 @@ _WRITE_FILE_TOOL_SCHEMA: dict[str, Any] = {
                     "type": "string",
                     "description": "Full file contents to write.",
                 },
+                "mode": {
+                    "type": "string",
+                    "enum": ["overwrite", "append"],
+                    "description": "Write mode: overwrite the file or append to the end. Defaults to overwrite.",
+                },
             },
             "required": ["file_path", "content"],
         },
