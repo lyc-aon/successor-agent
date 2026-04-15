@@ -12,7 +12,6 @@ import pytest
 
 from successor.providers.presets import (
     PROVIDER_PRESETS,
-    ProviderPreset,
     get_preset_by_id,
     match_preset,
 )

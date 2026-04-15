@@ -28,8 +28,6 @@ chat App's _pump_stream doesn't care which backend produced them.
 from __future__ import annotations
 
 import json
-import queue
-import threading
 import time
 import urllib.error
 import urllib.request
@@ -39,8 +37,6 @@ from .llama import (
     ChatStream,
     ContentChunk,
     ReasoningChunk,
-    StreamEnded,
-    StreamError,
     StreamStarted,
 )
 
@@ -257,7 +253,6 @@ class AnthropicClient:
             if role == "tool":
                 # Tool result — convert to Anthropic tool_result content block
                 tool_call_id = m.get("tool_call_id", "")
-                name = m.get("name", "")
                 anthropic_msgs.append({
                     "role": "user",
                     "content": [{

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import io
-import pytest
 
 from successor.providers import (
     ChatProvider,
@@ -27,7 +26,6 @@ from successor.providers.anthropic import (
     _lookup_anthropic_fallback,
 )
 from successor.providers.llama import (
-    ChatStream,
     ContentChunk,
     StreamEnded,
     StreamStarted,
@@ -313,7 +311,6 @@ def test_sse_text_content(monkeypatch) -> None:
     )
     # Monkeypatch the SSE reading to use our fake response
     fake_resp = _FakeResponse(sse_data)
-    import time
     stream._queue.put(StreamStarted())
     stream._read_anthropic_sse(fake_resp, 30.0)
     stream._done.set()
