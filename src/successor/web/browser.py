@@ -602,10 +602,34 @@ def _execute_browser_action(
                 ),
                 metadata=_page_state_metadata(page),
             )
+        if action == "js_eval":
+            expression = str(arguments.get("expression", "") or "").strip()
+            if not expression:
+                raise RuntimeError("js_eval requires an expression")
+            result = page.evaluate(expression)
+            import json as _json
+            if isinstance(result, (dict, list)):
+                formatted = _json.dumps(result, indent=2, default=str)
+            else:
+                formatted = str(result)
+            # Cap output to avoid flooding context
+            if len(formatted) > 4000:
+                formatted = formatted[:4000] + "\n… [truncated]"
+            return ToolExecutionResult(
+                output="\n".join(
+                    [
+                        "JavaScript evaluation result:",
+                        f"URL: {page.url}",
+                        "",
+                        formatted,
+                    ]
+                ),
+                metadata=_page_state_metadata(page),
+            )
         raise RuntimeError(
             "unsupported browser action. Use open, inspect, click, type, "
             "press, select, storage_state, clear_storage, wait_for, extract_text, "
-            "screenshot, or console_errors."
+            "screenshot, console_errors, or js_eval."
         )
     except Exception as exc:  # noqa: BLE001
         screenshot_note = ""

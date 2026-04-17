@@ -107,6 +107,8 @@ tests/                       pytest suite, hermetic via SUCCESSOR_CONFIG_DIR
 scripts/                     manual-run scripts (no auto-execution)
   e2e_chat_driver.py     scripted scenarios that drive a real chat against
                          llama.cpp and snapshot every turn for review
+  sandbox_runner.py      full-tool E2E testing with sandbox profiles
+  sandbox_scenarios.py   tiered scenario definitions (4 tiers, 8 scenarios)
 
 docs/                        architectural docs (read these)
   rendering-superpowers.md   READ FIRST — what the architecture buys us
@@ -145,7 +147,8 @@ successor chat         chat interface (real llama.cpp streaming, intro plays fir
                           /fork <text>    spawn a background subagent
                           /tasks          list background task state
                           /task-cancel    cancel a queued/running task
-                          Ctrl+G          interrupt an in-flight stream or running tool
+                          Ctrl+C          interrupt an in-flight stream or running tool (double-press to exit)
+                          Ctrl+G          interrupt (legacy alias, same as Ctrl+C)
                           Ctrl+,          open config menu
                           Ctrl+P          cycle profiles
                           Ctrl+T          cycle themes
@@ -273,7 +276,7 @@ it before continuing.
 ## Architectural decisions cross-checked against free-code
 
 The agent loop, compaction pipeline, and bash-masking subsystem were
-designed against `~/dev/ai/free-code-main/`'s actual source as a
+designed against `~/dev/ai/references/freecode-reference/`'s actual source as a
 reference implementation. Where we diverged:
 
 - Generator-based loop (free-code) → tick-driven state machine (us),
@@ -303,7 +306,7 @@ reference implementation. Where we diverged:
 ## Things deliberately deferred
 
 - No arrow-key cursor navigation in the input box
-- No interrupt during successor response other than Ctrl+G
+- Ctrl+C interrupts the current stream/tool; double-press Ctrl+C to exit
 - Streaming tool execution (tools start AFTER stream commits)
 - Concurrent tool execution
 

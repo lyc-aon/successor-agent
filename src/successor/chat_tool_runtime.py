@@ -867,7 +867,10 @@ class ChatToolRuntime:
     ) -> bool:
         resolved_call_id = tool_call_id or _new_tool_call_id()
         try:
-            state = parse_runbook_state(arguments)
+            state = parse_runbook_state(
+                arguments,
+                existing=self._host._runbook.state,
+            )
             if state is None and arguments.get("attempt") not in (None, ""):
                 raise RunbookError(
                     "runbook.attempt cannot be recorded in the same call that clears the runbook"

@@ -415,7 +415,6 @@ def _extract_chat_content(payload: dict[str, Any]) -> str:
         text = content.strip()
         if text:
             return text
-        raise ValueError("vision endpoint returned empty content")
     if isinstance(content, list):
         out: list[str] = []
         for part in content:
@@ -426,4 +425,11 @@ def _extract_chat_content(payload: dict[str, Any]) -> str:
                 out.append(text.strip())
         if out:
             return "\n".join(out)
+    # Thinking models (Qwen3.x, etc.) may put the analysis in
+    # reasoning_content and leave content empty — especially when
+    # max_tokens is too low for the model to finish thinking and
+    # start producing visible output.
+    reasoning = message.get("reasoning_content", "")
+    if isinstance(reasoning, str) and reasoning.strip():
+        return reasoning.strip()
     raise ValueError("vision endpoint returned no readable content")

@@ -3,9 +3,66 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
-## Unreleased
+## v0.1.38 — 2026-04-17
 
-- no user-facing notes yet
+Agent loop hardening, browser tool improvements, and compaction
+overhaul driven by real small-model testing with Qwen 3.6-35B-A3B.
+
+### What changed
+
+- **Ctrl+C double-press interrupt** — first press now interrupts the
+  running stream, tools, or compaction (same as Ctrl+G). Second press
+  within 800ms exits cleanly. Previously Ctrl+C killed the harness
+  instantly with no chance to interrupt.
+
+- **`js_eval` browser action** — the browser tool gained a
+  `page.evaluate()` action for running arbitrary JavaScript against the
+  live page. Models can now read DOM state, call functions, and inspect
+  variables directly instead of building debug panels.
+
+- **screenshot loop prevention** — read-only browser actions
+  (screenshot, js_eval, extract_text, inspect) no longer reset the
+  stagnant-state counter. New screenshot streak detector nudges the
+  model after 3+ consecutive screenshots. New action-repeat tracker
+  nudges after 3+ identical `(action, target)` calls.
+
+- **edit_file works after partial reads** — `edit_file` no longer
+  requires a full `read_file` first. Partial reads (with `offset` /
+  `limit`) are now accepted; the old_string match against current disk
+  content is the real safety check. Files that have never been read
+  are still rejected.
+
+- **compaction overhaul** — four changes that collectively double the
+  usable context runway between compaction cycles:
+  - tool outputs in kept rounds are now cleared during compaction
+    (keeps only the 4 most recent tool results, replaces older ones
+    with placeholders)
+  - microcompact keeps 4 most recent tool results (was 8)
+  - the system prompt measurement now uses the full assembled prompt
+    (with tool guidance, primers, skill hints) instead of just the
+    profile's short prompt, so pre/post compaction measurements
+    match what the model actually sees
+  - default `keep_recent_rounds` lowered from 6 to 2 for tool-heavy
+    local-model profiles
+
+- **vision thinking-model fix** — the vision tool now falls back to
+  `reasoning_content` when `content` is empty, fixing analysis of
+  screenshots with thinking models (Qwen 3.x) that exhaust
+  `max_tokens` in the reasoning phase. Default vision `max_tokens`
+  raised to 16384 (was 1024), ceiling raised to 65536 (was 8192).
+
+### Sandbox testing infrastructure
+
+New `scripts/sandbox_runner.py` and `scripts/sandbox_scenarios.py`
+provide a tiered E2E testing framework for small-model behavior
+observation. Four tiers: basic tool dispatch, structured autonomy
+(task/verify/runbook), browser + vision compound verification, and the
+snake-game self-verification primitive.
+
+### Verification
+
+- `ruff check src tests`
+- `pytest -q` — 1362 passed
 
 ## v0.1.36 — 2026-04-10
 

@@ -110,7 +110,7 @@ class VisionConfig:
     api_key: str = ""
     api_key_file: str = ""
     timeout_s: float = 120.0
-    max_tokens: int = 1024
+    max_tokens: int = 16384
     detail: str = "auto"
 
     def effective_api_key(self) -> str:
@@ -186,12 +186,12 @@ def resolve_vision_config(profile: Any) -> VisionConfig:
         if provider_type not in VISION_PROVIDER_OPTIONS:
             provider_type = "llamacpp"
         timeout_s = float(raw.get("timeout_s", 120.0))
-        max_tokens = int(raw.get("max_tokens", 1024))
+        max_tokens = int(raw.get("max_tokens", 16384))
         detail = str(raw.get("detail", "auto") or "auto").strip().lower()
         if detail not in {"auto", "low", "high", "original"}:
             detail = "auto"
         timeout_s = max(5.0, min(600.0, timeout_s))
-        max_tokens = max(64, min(8192, max_tokens))
+        max_tokens = max(64, min(65536, max_tokens))
         return VisionConfig(
             mode=mode,
             provider_type=provider_type,

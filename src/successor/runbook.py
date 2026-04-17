@@ -31,11 +31,11 @@ EvaluatorKind = Literal[
 ]
 AttemptDecision = Literal["kept", "discarded", "inconclusive", "failed_env"]
 
-MAX_SCOPE_ITEMS = 12
-MAX_PROTECTED_ITEMS = 12
-MAX_EVALUATOR_STEPS = 8
-MAX_ATTEMPT_FILES = 16
-MAX_ATTEMPT_ARTIFACTS = 16
+MAX_SCOPE_ITEMS = 64
+MAX_PROTECTED_ITEMS = 64
+MAX_EVALUATOR_STEPS = 32
+MAX_ATTEMPT_FILES = 64
+MAX_ATTEMPT_ARTIFACTS = 64
 
 
 class RunbookError(ValueError):
@@ -247,36 +247,137 @@ class SessionRunbook:
         return self.state.active_hypothesis
 
 
-def parse_runbook_state(arguments: dict[str, Any]) -> SessionRunbookState | None:
+def parse_runbook_state(
+    arguments: dict[str, Any],
+    *,
+    existing: SessionRunbookState | None = None,
+) -> SessionRunbookState | None:
+    """Parse a runbook tool payload into a SessionRunbookState.
+
+    Supports two modes:
+      - **Create/replace**: when ``objective`` is present, all fields are
+        parsed from the payload as before.
+      - **Partial update**: when ``objective`` is absent but an existing
+        state is provided, only the supplied fields are overridden and
+        the rest are inherited from ``existing``.
+
+    Returns ``None`` when ``clear`` is set.
+    """
     if bool(arguments.get("clear")):
         return None
-    objective = _normalize_required_text(
-        arguments.get("objective"),
-        field_name="objective",
-    )
-    success_definition = _normalize_required_text(
-        arguments.get("success_definition"),
-        field_name="success_definition",
-    )
-    return SessionRunbookState(
-        objective=objective,
-        success_definition=success_definition,
-        scope=_normalize_text_list(
+
+    raw_objective = arguments.get("objective")
+    raw_success = arguments.get("success_definition")
+
+    # Determine whether this is a partial update or a full create.
+    has_objective = isinstance(raw_objective, str) and raw_objective.strip()
+
+    if not has_objective and existing is not None:
+        # Partial update — inherit from existing state, override what's
+        # provided.
+        objective = existing.objective
+        success_definition = existing.success_definition
+        scope = (
+            _normalize_text_list(
+                arguments.get("scope"),
+                field_name="scope",
+                max_items=MAX_SCOPE_ITEMS,
+            )
+            if arguments.get("scope") is not None
+            else existing.scope
+        )
+        protected_surfaces = (
+            _normalize_text_list(
+                arguments.get("protected_surfaces"),
+                field_name="protected_surfaces",
+                max_items=MAX_PROTECTED_ITEMS,
+            )
+            if arguments.get("protected_surfaces") is not None
+            else existing.protected_surfaces
+        )
+        baseline_status = (
+            _normalize_baseline_status(arguments.get("baseline_status"))
+            if arguments.get("baseline_status") is not None
+            else existing.baseline_status
+        )
+        baseline_summary = (
+            _normalize_optional_text(arguments.get("baseline_summary"))
+            if arguments.get("baseline_summary") is not None
+            else existing.baseline_summary
+        )
+        active_hypothesis = (
+            _normalize_optional_text(arguments.get("active_hypothesis"))
+            if arguments.get("active_hypothesis") is not None
+            else existing.active_hypothesis
+        )
+        evaluator = (
+            parse_evaluator_steps(arguments.get("evaluator"))
+            if arguments.get("evaluator") is not None
+            else existing.evaluator
+        )
+        decision_policy = (
+            _normalize_optional_text(arguments.get("decision_policy"))
+            if arguments.get("decision_policy") is not None
+            else existing.decision_policy
+        )
+        status = (
+            _normalize_runbook_status(arguments.get("status"))
+            if arguments.get("status") is not None
+            else existing.status
+        )
+    else:
+        # Full create/replace — objective and success_definition required.
+        if not has_objective:
+            raise RunbookError(
+                "runbook.objective is required when creating a new runbook. "
+                "Provide objective and success_definition on the first call."
+            )
+        objective = _normalize_required_text(
+            raw_objective,
+            field_name="objective",
+        )
+        success_definition = _normalize_required_text(
+            raw_success,
+            field_name="success_definition",
+        )
+        scope = _normalize_text_list(
             arguments.get("scope"),
             field_name="scope",
             max_items=MAX_SCOPE_ITEMS,
-        ),
-        protected_surfaces=_normalize_text_list(
+        )
+        protected_surfaces = _normalize_text_list(
             arguments.get("protected_surfaces"),
             field_name="protected_surfaces",
             max_items=MAX_PROTECTED_ITEMS,
-        ),
-        baseline_status=_normalize_baseline_status(arguments.get("baseline_status")),
-        baseline_summary=_normalize_optional_text(arguments.get("baseline_summary")),
-        active_hypothesis=_normalize_optional_text(arguments.get("active_hypothesis")),
-        evaluator=parse_evaluator_steps(arguments.get("evaluator")),
-        decision_policy=_normalize_optional_text(arguments.get("decision_policy")),
-        status=_normalize_runbook_status(arguments.get("status")),
+        )
+        baseline_status = _normalize_baseline_status(
+            arguments.get("baseline_status"),
+        )
+        baseline_summary = _normalize_optional_text(
+            arguments.get("baseline_summary"),
+        )
+        active_hypothesis = _normalize_optional_text(
+            arguments.get("active_hypothesis"),
+        )
+        evaluator = parse_evaluator_steps(
+            arguments.get("evaluator"),
+        )
+        decision_policy = _normalize_optional_text(
+            arguments.get("decision_policy"),
+        )
+        status = _normalize_runbook_status(arguments.get("status"))
+
+    return SessionRunbookState(
+        objective=objective,
+        success_definition=success_definition,
+        scope=scope,
+        protected_surfaces=protected_surfaces,
+        baseline_status=baseline_status,
+        baseline_summary=baseline_summary,
+        active_hypothesis=active_hypothesis,
+        evaluator=evaluator,
+        decision_policy=decision_policy,
+        status=status,
     )
 
 

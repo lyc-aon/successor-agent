@@ -363,8 +363,15 @@ def run_edit_file(
     if existing is None:
         raise FileToolError("File does not exist. Use write_file to create new files.")
     raw_text, _mtime_ns = existing
-    _require_full_read(path, read_state)
-    _ensure_not_stale(path, current_text=raw_text, read_state=read_state)
+    entry = read_state.get(path)
+    if entry is None:
+        raise FileToolError("File has not been read yet. Read it first before writing to it.")
+    # Partial reads are allowed for edit_file — the old_string match
+    # below validates against the current file on disk, which is the
+    # real safety check. Only run the staleness check for full reads
+    # where the cached content should match disk.
+    if not entry.partial:
+        _ensure_not_stale(path, current_text=raw_text, read_state=read_state)
 
     line_ending = _detect_line_ending(raw_text)
     normalized_text = _normalize_newlines(raw_text)

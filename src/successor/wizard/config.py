@@ -699,10 +699,21 @@ class SuccessorConfig(App):
     # ─── Preview chat construction ───
 
     def _build_preview_chat(self):
-        """Construct the live preview chat — same pattern as the wizard."""
-        from ..chat import SuccessorChat, _Message
+        """Construct the live preview chat — same pattern as the wizard.
 
-        chat = SuccessorChat()
+        Uses a lightweight stub client so the preview chat skips the
+        health check, OAuth worker startup, and recording bundle init
+        that a full SuccessorChat would run. The preview only needs
+        theme/density/display_mode rendering — it never streams.
+        """
+        from ..chat import SuccessorChat, _Message
+        from ..providers.llama import LlamaCppClient
+
+        stub_client = LlamaCppClient(base_url="http://localhost:0")
+        chat = SuccessorChat(client=stub_client)
+        # Stub out the health result so the empty-state panel doesn't
+        # show "UNREACHABLE" — the preview is cosmetic only.
+        chat._server_health_ok = None
         chat.messages = []
         chat.messages.append(
             _Message(

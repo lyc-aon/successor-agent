@@ -120,6 +120,12 @@ The current browser actions are:
 - `extract_text`
 - `screenshot`
 - `console_errors`
+- `js_eval` — run arbitrary JavaScript via `page.evaluate()` and
+  return the result. Use the `expression` parameter. Output is
+  JSON-formatted (objects/arrays) or stringified (primitives),
+  capped at 4KB. Useful for reading page state (e.g.
+  `window.__appState`), calling functions, or inspecting variables
+  without building a debug panel into the page.
 
 Configuration lives under `tool_config.browser`. The config menu
 exposes:

@@ -728,9 +728,12 @@ _RUNBOOK_TOOL_SCHEMA: dict[str, Any] = {
     "function": {
         "name": "runbook",
         "description": (
-            "Replace the current session experiment runbook for long "
-            "iterative work and optionally record the latest bounded "
-            "attempt result."
+            "Create or update the session experiment runbook for long "
+            "iterative work. On first call, provide objective and "
+            "success_definition. Subsequent calls may update individual "
+            "fields without resending the full runbook (partial update). "
+            "Set clear=true to remove the runbook. Optionally record the "
+            "latest bounded attempt result."
         ),
         "parameters": {
             "type": "object",
@@ -1189,8 +1192,8 @@ _BROWSER_TOOL_SCHEMA: dict[str, Any] = {
         "name": "browser",
         "description": (
             "Control a persistent Playwright browser session for live "
-            "navigation, clicking, typing, extraction, screenshots, and "
-            "console-error checks."
+            "navigation, clicking, typing, extraction, screenshots, "
+            "console-error checks, and JavaScript evaluation."
         ),
         "parameters": {
             "type": "object",
@@ -1210,6 +1213,7 @@ _BROWSER_TOOL_SCHEMA: dict[str, Any] = {
                         "extract_text",
                         "screenshot",
                         "console_errors",
+                        "js_eval",
                     ],
                     "description": "Browser action to perform.",
                 },
@@ -1254,6 +1258,10 @@ _BROWSER_TOOL_SCHEMA: dict[str, Any] = {
                     "type": "string",
                     "enum": ["local", "session", "both"],
                     "description": "Storage scope for `clear_storage`. Defaults to `both`.",
+                },
+                "expression": {
+                    "type": "string",
+                    "description": "JavaScript expression for `js_eval`. Runs via page.evaluate() and returns the result. Use for reading page state, calling functions, or inspecting variables (e.g. `window.__snakeState` or `document.querySelector('#score').textContent`).",
                 },
             },
             "required": ["action"],

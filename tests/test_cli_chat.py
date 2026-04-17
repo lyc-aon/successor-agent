@@ -13,7 +13,7 @@ def test_cmd_chat_forwards_intro_slash_prefill(monkeypatch) -> None:
     created: list[object] = []
 
     class _FakeChat:
-        def __init__(self, *, profile, initial_input="") -> None:
+        def __init__(self, *, profile, initial_input="", terminal=None) -> None:
             self.profile = profile
             self.initial_input = initial_input
             self._pending_action = None
@@ -24,7 +24,9 @@ def test_cmd_chat_forwards_intro_slash_prefill(monkeypatch) -> None:
 
     monkeypatch.setattr("successor.profiles.get_active_profile", lambda: profile)
     monkeypatch.setattr("successor.chat.SuccessorChat", _FakeChat)
-    monkeypatch.setattr("successor.cli._play_intro_animation", lambda name: "/")
+    monkeypatch.setattr(
+        "successor.cli._play_intro_animation", lambda name, **_: "/",
+    )
 
     assert cmd_chat(argparse.Namespace()) == 0
     assert len(created) == 1
@@ -36,7 +38,7 @@ def test_cmd_chat_does_not_prefill_without_intro(monkeypatch) -> None:
     created: list[object] = []
 
     class _FakeChat:
-        def __init__(self, *, profile, initial_input="") -> None:
+        def __init__(self, *, profile, initial_input="", terminal=None) -> None:
             self.profile = profile
             self.initial_input = initial_input
             self._pending_action = None

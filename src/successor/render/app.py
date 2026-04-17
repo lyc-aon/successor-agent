@@ -31,6 +31,9 @@ from .diff import diff_frames
 from .terminal import Terminal
 
 
+_CTRL_C_DOUBLE_PRESS_S = 0.8  # 800ms window, matching free-code
+
+
 class App:
     """Frame-budgeted terminal app loop.
 
@@ -57,6 +60,9 @@ class App:
         self._t0 = 0.0
         self._frame = 0
         self._running = False
+        # Double-press Ctrl+C state (free-code pattern)
+        self._ctrl_c_pending = False
+        self._ctrl_c_pending_at = 0.0
 
     # ─── public state ───
 
@@ -67,6 +73,17 @@ class App:
     @property
     def frame(self) -> int:
         return self._frame
+
+    @property
+    def ctrl_c_pending(self) -> bool:
+        """True when the user has pressed Ctrl+C once and we're waiting
+        for either a second press (exit) or timeout (cancel pending)."""
+        if not self._ctrl_c_pending:
+            return False
+        if time.monotonic() - self._ctrl_c_pending_at > _CTRL_C_DOUBLE_PRESS_S:
+            self._ctrl_c_pending = False
+            return False
+        return True
 
     def stop(self) -> None:
         self._running = False
@@ -79,6 +96,12 @@ class App:
 
     def on_key(self, byte: int) -> None:
         """Override: react to a single input byte. Default does nothing."""
+        ...
+
+    def on_interrupt(self) -> None:
+        """Override: called on first Ctrl+C press to interrupt the
+        current operation (stream, tool, compaction). Default no-op.
+        Subclasses should cancel in-flight work here."""
         ...
 
     # ─── loop ───
@@ -137,9 +160,24 @@ class App:
                     if not data:
                         break
                     for b in data:
+                        if b == 0x03:  # Ctrl+C — double-press pattern
+                            now = time.monotonic()
+                            if (
+                                self._ctrl_c_pending
+                                and (now - self._ctrl_c_pending_at)
+                                    < _CTRL_C_DOUBLE_PRESS_S
+                            ):
+                                self._running = False
+                                break
+                            self._ctrl_c_pending = True
+                            self._ctrl_c_pending_at = now
+                            self.on_interrupt()
+                            continue
                         if b in self.quit_keys:
                             self._running = False
                             break
+                        # Any non-Ctrl+C key clears the pending state
+                        self._ctrl_c_pending = False
                         self.on_key(b)
                     # If a SIGWINCH arrived during input handling, break out
                     # of the input drain so the next iteration can react.

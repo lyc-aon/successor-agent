@@ -328,7 +328,11 @@ def test_edit_file_rejects_partial_read_and_ambiguous_match(tmp_path: Path) -> N
         tool_call_id="call_edit_partial",
     )
 
-    with pytest.raises(FileToolError, match="only read partially"):
+    # Partial reads are now allowed for edit_file — the old_string
+    # match validates against current disk content. With "two" matching
+    # 2 locations, this should hit the ambiguous-match error, not the
+    # partial-read error.
+    with pytest.raises(FileToolError, match="matched 2 locations"):
         run_edit_file(
             {"file_path": str(target), "old_string": "two", "new_string": "TWO"},
             preview=preview,
@@ -336,6 +340,7 @@ def test_edit_file_rejects_partial_read_and_ambiguous_match(tmp_path: Path) -> N
             working_directory=str(tmp_path),
         )
 
+    # Same behavior with a full read — still ambiguous
     state[str(target)] = FileReadStateEntry(
         path=str(target),
         content="two\ntwo\n",
@@ -527,13 +532,9 @@ def test_file_tool_guard_failure_becomes_continuation_nudge(
         client=client,
     )
     chat.messages = []
-    chat._file_read_state[str(target)] = FileReadStateEntry(
-        path=str(target),
-        content="alpha\n",
-        timestamp=time.time(),
-        mtime_ns=target.stat().st_mtime_ns,
-        partial=True,
-    )
+    # No entry in _file_read_state — simulates "file never read".
+    # (Partial reads are now allowed for edit_file, so we use the
+    # "never read" path to trigger the guard failure + recovery nudge.)
 
     chat.input_buffer = "update the file"
     chat._submit()
@@ -555,4 +556,4 @@ def test_file_tool_guard_failure_becomes_continuation_nudge(
     assert second_tail["role"] == "user"
     assert "[internal harness runtime context]" in second_tail["content"]
     assert "File Tool Recovery Reminder" in second_tail["content"]
-    assert "Do not use `sed`" in second_tail["content"]
+    assert "read_file" in second_tail["content"]

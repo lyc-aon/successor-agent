@@ -37,6 +37,8 @@ from .log import (
 )
 from .tokens import TokenCounter
 
+from successor.bash.cards import ToolCard
+
 
 # ─── Constants ───
 
@@ -380,14 +382,38 @@ def compact(
     )
     new_log.insert_boundary(boundary, summary_text, position=0)
 
-    # Append the kept rounds verbatim
-    for r in rounds_to_keep:
+    # Append the kept rounds, clearing stale tool outputs to save
+    # context. Tool-heavy turns can have 30+ tool results with KB of
+    # output each — keeping them verbatim defeats the purpose of
+    # compaction. We preserve the N most recent tool results and
+    # replace older ones with a concise placeholder.
+    _KEEP_RECENT_TOOL_RESULTS_IN_KEPT_ROUNDS = 4
+    _COMPACTION_CLEARED = "[tool output cleared — see summary above for context]"
+
+    # First pass: collect all tool-result positions in kept rounds
+    tool_positions: list[tuple[int, int]] = []
+    for ri, r in enumerate(rounds_to_keep):
+        for mi, m in enumerate(r.messages):
+            if m.tool_card is not None and isinstance(m.tool_card, ToolCard):
+                tool_positions.append((ri, mi))
+
+    # Decide which to clear: all but the N most recent
+    positions_to_clear: set[tuple[int, int]] = set()
+    if len(tool_positions) > _KEEP_RECENT_TOOL_RESULTS_IN_KEPT_ROUNDS:
+        positions_to_clear = set(
+            tool_positions[:-_KEEP_RECENT_TOOL_RESULTS_IN_KEPT_ROUNDS]
+        )
+
+    for ri, r in enumerate(rounds_to_keep):
         new_round = ApiRound(
             started_at=r.started_at,
             token_estimate=0,  # invalidated; recounted below
         )
-        for m in r.messages:
-            new_round.append(m)
+        for mi, m in enumerate(r.messages):
+            if (ri, mi) in positions_to_clear and m.tool_card.output != _COMPACTION_CLEARED:
+                new_round.append(m.replace_output(_COMPACTION_CLEARED))
+            else:
+                new_round.append(m)
         new_log.rounds.append(new_round)
 
     # Optional: append an attachment-hint round so the model knows

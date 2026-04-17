@@ -81,7 +81,7 @@ the profile parser uses everywhere.
 | `autocompact_floor` | int | 4000 | min autocompact buffer in tokens |
 | `blocking_floor` | int | 1000 | min blocking buffer in tokens |
 | `enabled` | bool | true | when false, NEVER autocompact proactively |
-| `keep_recent_rounds` | int | 6 | how many recent rounds to preserve verbatim |
+| `keep_recent_rounds` | int | 6 | how many recent rounds to preserve (tool outputs in older kept rounds are cleared to placeholders, keeping the 4 most recent tool results intact) |
 | `summary_max_tokens` | int | 16000 | max tokens the summary model may emit |
 
 ### Invariants

@@ -15,7 +15,7 @@ from typing import Any, Literal
 
 
 VerificationStatus = Literal["pending", "in_progress", "passed", "failed"]
-MAX_ASSERTIONS = 12
+MAX_ASSERTIONS = 64
 
 
 class VerificationContractError(ValueError):

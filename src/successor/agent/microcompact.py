@@ -36,7 +36,7 @@ from .log import ApiRound, MessageLog
 # Anything older becomes a placeholder. Numbers tuned for Successor:
 # 8 keeps recent context for the model to reference, beyond that the
 # model has usually moved on.
-DEFAULT_KEEP_TOOL_RESULTS: int = 8
+DEFAULT_KEEP_TOOL_RESULTS: int = 4
 
 # Default idle threshold — how long the most recent message must be
 # old before time-based clearing fires.

@@ -49,15 +49,33 @@ def cmd_chat(args: argparse.Namespace) -> int:
     profile = get_active_profile()
     first_launch = True
 
+    # Shared Terminal so the intro → chat transition doesn't flip
+    # alt-screen off and back on (which causes a visible blank flash).
+    # The intro gets owned=False so its App.run() exit doesn't tear
+    # down the TTY. The chat takes ownership so it cleans up on exit.
+    from .render.terminal import Terminal
+    shared_term = Terminal(bracketed_paste=True, owned=False)
+
     while True:
         initial_input = ""
         # Intro only on the very first launch in this session — re-entry
         # after the config menu skips it.
         if first_launch and profile.intro_animation:
-            initial_input = _play_intro_animation(profile.intro_animation)
+            initial_input = _play_intro_animation(
+                profile.intro_animation, terminal=shared_term,
+            )
         first_launch = False
 
-        chat = SuccessorChat(profile=profile, initial_input=initial_input)
+        chat = SuccessorChat(
+            profile=profile,
+            initial_input=initial_input,
+            terminal=shared_term,
+        )
+        # The chat owns the terminal lifecycle — it will restore TTY
+        # state on exit. The intro left owned=False so its exit was a
+        # no-op, keeping the alt-screen session alive across the
+        # transition.
+        shared_term.owned = True
         chat.run()
 
         if getattr(chat, "_pending_action", None) == "config":
@@ -138,7 +156,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return 0
 
 
-def _play_intro_animation(name: str) -> str:
+def _play_intro_animation(name: str, *, terminal=None) -> str:
     """Play a registered intro animation, blocking until it finishes.
 
     For v0, only "successor" is supported — it plays the bundled
@@ -148,6 +166,9 @@ def _play_intro_animation(name: str) -> str:
     `10-title.txt` remains the legacy filename for the final frame.
     Any keypress skips ahead. Unknown intro names are silently ignored
     so a profile that references a future intro doesn't break the chat.
+
+    Pass a shared Terminal so the intro→chat transition doesn't flip
+    alt-screen off and back on.
     """
     if name != "successor":
         # Future: walk ~/.config/successor/intros/<name>/ for user intros.
@@ -155,7 +176,7 @@ def _play_intro_animation(name: str) -> str:
     from .intros import run_successor_intro
 
     try:
-        return run_successor_intro()
+        return run_successor_intro(terminal=terminal)
     except RuntimeError:
         # Frames dir missing on this install — skip silently.
         return ""

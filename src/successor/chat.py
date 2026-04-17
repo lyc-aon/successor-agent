@@ -1246,7 +1246,7 @@ class SuccessorChat(App):
     ) -> None:
         super().__init__(
             target_fps=30.0,
-            quit_keys=b"\x03",  # Ctrl+C only — q must remain typeable
+            quit_keys=b"",  # double-press Ctrl+C handled by App base class
             terminal=terminal if terminal is not None else Terminal(bracketed_paste=True),
         )
         # Optional recorder — captures every input byte to a JSONL file.
@@ -1707,6 +1707,38 @@ class SuccessorChat(App):
                     self._recorder.finalize(trace_path=self.session_trace_path)
                 except Exception:
                     pass
+
+    def on_interrupt(self) -> None:
+        """Handle first Ctrl+C press — interrupt running work.
+
+        Mirrors the Ctrl+G handlers but triggered by Ctrl+C. The App
+        base class handles the double-press exit logic; this method
+        only runs on the FIRST press to cancel in-flight work.
+        """
+        # Priority 1: in-flight stream
+        if self._stream is not None:
+            self._stream.close()
+            self._cancel_running_tools()
+            self._pending_continuation = False
+            return
+        # Priority 2: in-flight tools (no stream)
+        if self._running_tools:
+            self._cancel_running_tools()
+            self._pending_continuation = False
+            return
+        # Priority 3: in-flight compaction
+        if self._compaction_worker is not None:
+            self._compaction_worker.close()
+            self._compaction_worker = None
+            self._compaction_anim = None
+            self._pending_agent_turn_after_compact = False
+            self.messages.append(_Message(
+                "successor",
+                "compaction cancelled.",
+                synthetic=True,
+            ))
+            return
+        # Nothing running — the double-press logic in App handles exit
 
     def _trace_event(self, event_type: str, **payload: Any) -> None:
         self._trace.emit(event_type, **payload)
@@ -3508,8 +3540,13 @@ class SuccessorChat(App):
 
         Walks messages in API order (summary first) so the log is
         chronologically correct for the model.
+
+        Uses the full assembled system prompt (with tool guidance,
+        primers, etc.) so that count_log() measures the actual prompt
+        size the model sees, not just the profile's short prompt.
         """
-        log = MessageLog(system_prompt=self.system_prompt)
+        effective_prompt = self._stable_prompt_cache_prompt or self.system_prompt
+        log = MessageLog(system_prompt=effective_prompt)
         for msg in self._api_ordered_messages():
             if msg.synthetic and not _message_has_tool_artifact(msg) and not msg.is_summary:
                 # Skip non-tool, non-summary synthetic messages

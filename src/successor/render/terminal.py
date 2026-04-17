@@ -90,11 +90,17 @@ class Terminal:
         alt_screen: bool = True,
         bracketed_paste: bool = True,
         mouse_reporting: bool = False,
+        owned: bool = True,
     ) -> None:
         self.raw = raw
         self.alt_screen = alt_screen
         self.bracketed_paste = bracketed_paste
         self.mouse_reporting = mouse_reporting
+        # When False, __exit__ is a no-op — the terminal session is
+        # managed externally (e.g. shared between intro animation and
+        # chat). The first App to enter it sets up the TTY state; the
+        # last App to exit it tears it down.
+        self.owned = owned
         # File descriptors are resolved LAZILY. Eager resolution would
         # crash under pytest (which replaces sys.stdin with a fileno-less
         # capture object) and under any other "construct without
@@ -253,7 +259,8 @@ class Terminal:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        self._restore()
+        if self.owned:
+            self._restore()
 
     # ─── internal ───
 

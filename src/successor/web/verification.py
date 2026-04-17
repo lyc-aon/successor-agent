@@ -168,6 +168,12 @@ class BrowserProgressTracker:
     last_failure_signature: tuple[str, str] | None = None
     repeat_failures: int = 0
     last_controls_summary: str = ""
+    screenshot_streak: int = 0
+    action_repeat_counts: dict[tuple[str, str], int] | None = None
+
+    def __post_init__(self) -> None:
+        if self.action_repeat_counts is None:
+            self.action_repeat_counts = {}
 
     def annotate(
         self,
@@ -250,10 +256,61 @@ class BrowserProgressTracker:
         self.last_action = action
         self.last_target = target
 
+        # ─── Action-repeat tracking (catches screenshot loops, etc.) ───
+        assert self.action_repeat_counts is not None
+        action_key = (action, target)
+        self.action_repeat_counts[action_key] = (
+            self.action_repeat_counts.get(action_key, 0) + 1
+        )
+        if action == "screenshot":
+            self.screenshot_streak += 1
+        else:
+            self.screenshot_streak = 0
+
+        # Screenshot streak nudge — 3+ consecutive screenshots without
+        # an intervening non-screenshot action
+        if self.screenshot_streak >= 3:
+            note = (
+                f"Progress note: you have taken {self.screenshot_streak} "
+                "consecutive screenshots without acting on them. Use "
+                "`vision` to analyze a screenshot, or proceed with your "
+                "next action."
+            )
+            output = _append_note(output, note)
+            if intervention is None:
+                intervention = {
+                    "kind": "screenshot_streak",
+                    "note": note,
+                    "screenshot_streak": self.screenshot_streak,
+                    "recommended_action": "vision",
+                }
+
+        # Action-repeat nudge — same (action, target) 3+ times
+        repeat_count = self.action_repeat_counts[action_key]
+        if repeat_count >= 3 and action != "screenshot":
+            note = (
+                f"Progress note: you have called `{action}` on the same "
+                f"target {repeat_count} times. Try a different approach "
+                "or verify the previous results before repeating."
+            )
+            output = _append_note(output, note)
+            if intervention is None:
+                intervention = {
+                    "kind": "action_repeat",
+                    "note": note,
+                    "action": action,
+                    "target": target,
+                    "repeat_count": repeat_count,
+                }
+
+        # ─── Non-interactive actions (screenshot, extract_text, etc.) ───
+        # These don't change page state, so they should NOT reset the
+        # stagnant counter. Only update the state hash.
         if action not in {"click", "type", "press", "select", "wait_for"} or not state_hash:
             if state_hash:
                 self.last_state_hash = state_hash
-            self.stagnant_repeats = 0
+            # Intentionally NOT resetting stagnant_repeats — read-only
+            # actions shouldn't clear evidence of interactive stagnation
             return self._finalize_result(
                 result,
                 metadata=metadata,
@@ -266,6 +323,7 @@ class BrowserProgressTracker:
                 intervention=intervention,
             )
 
+        # ─── Interactive actions — stagnant-state detection ───
         if state_hash == self.last_state_hash:
             self.stagnant_repeats += 1
         else:

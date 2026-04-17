@@ -11,6 +11,51 @@ unit on top of phase 0.
 
 ---
 
+## v0.1.38, Agent loop hardening + compaction overhaul (2026-04-17)
+
+- **Ctrl+C double-press**: `render/app.py` gains `_ctrl_c_pending` state
+  and `on_interrupt()` virtual method. First Ctrl+C calls `on_interrupt()`,
+  second within 800ms exits. `SuccessorChat.on_interrupt()` mirrors
+  existing Ctrl+G logic (close stream, cancel tools, clear continuation).
+  `quit_keys` is now empty — all exit goes through double-press.
+
+- **`js_eval` browser action**: `web/browser.py` gains `js_eval` action
+  that calls `page.evaluate(expression)` and returns JSON-formatted
+  results (4KB cap). Schema updated in `tools_registry.py` with
+  `expression` parameter.
+
+- **Screenshot loop prevention**: `web/verification.py`
+  `BrowserProgressTracker` no longer resets `stagnant_repeats` on
+  read-only actions. New `screenshot_streak` counter (nudge at 3+).
+  New `action_repeat_counts` dict (nudge at 3+ identical calls).
+
+- **edit_file partial read relaxation**: `file_tools.py` now allows
+  `edit_file` after partial reads. Guard changed from
+  `_require_full_read()` to checking `entry is None` only. Staleness
+  check skipped for partial reads (disk content used directly).
+  Two test assertions updated.
+
+- **Compaction overhaul**:
+  - `compact.py`: kept rounds now have stale tool outputs cleared
+    (keeps 4 most recent, clears rest to placeholder). Imports
+    `ToolCard` from `bash.cards`.
+  - `microcompact.py`: `DEFAULT_KEEP_TOOL_RESULTS` 8 → 4
+  - `chat.py` `_to_agent_log()`: uses `_stable_prompt_cache_prompt`
+    (full assembled prompt) instead of `self.system_prompt` (short
+    profile prompt) so `count_log()` measures accurately.
+
+- **Vision thinking-model fix**: `web/vision.py`
+  `_extract_chat_content()` falls back to `reasoning_content` when
+  `content` is empty. `web/config.py` default `max_tokens` 1024 →
+  16384, ceiling 8192 → 65536.
+
+- **Sandbox testing**: new `scripts/sandbox_runner.py` +
+  `scripts/sandbox_scenarios.py` — 4-tier E2E testing framework
+  (hello-file, bash-chain, edit-precision, task-ledger, iterative-
+  recovery, counter-app, form-validation, snake-game).
+
+---
+
 ## v0.1.37, Kimi Code OAuth + provider UX (2026-04-15)
 
 - **Kimi Code integration** — full OAuth device-flow support for

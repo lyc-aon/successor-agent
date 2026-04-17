@@ -1,6 +1,6 @@
 """Session-local task ledger for structured long-run autonomy.
 
-The ledger is intentionally small and explicit:
+The ledger is intentionally explicit:
 
 - session-local only; never persisted to profile/config
 - compact enough to fit comfortably in the system prompt
@@ -18,7 +18,7 @@ from typing import Any, Literal
 
 
 TaskStatus = Literal["pending", "in_progress", "completed"]
-MAX_TASKS = 12
+MAX_TASKS = 64
 
 
 class TaskLedgerError(ValueError):

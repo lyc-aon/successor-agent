@@ -555,9 +555,12 @@ class SuccessorSetup(App):
 
         # Construct the chat WITHOUT a real client (the preview never
         # talks to a model) and WITHOUT a profile (we set state directly).
-        # The terminal=Terminal() default is fine because we never enter
-        # the chat's terminal context — we only call on_tick on it.
-        chat = SuccessorChat()
+        # Pass a stub client to skip the health check + OAuth worker.
+        from ..providers.llama import LlamaCppClient
+
+        stub_client = LlamaCppClient(base_url="http://localhost:0")
+        chat = SuccessorChat(client=stub_client)
+        chat._server_health_ok = None
 
         # Replace the synthetic greeting with a stable preview script
         # so the preview pane doesn't say "the forge is cold" if
