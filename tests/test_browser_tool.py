@@ -479,6 +479,69 @@ def test_progress_tracker_warns_after_reopening_same_page_state() -> None:
     assert warned.metadata["browser_progress"]["repeated_open"] is True
 
 
+def test_progress_tracker_refuses_5th_identical_open_with_exit_code_1() -> None:
+    """After 5 consecutive identical-state opens of the same target,
+    the tracker refuses the call entirely (exit_code=1) rather than
+    appending another polite note. GLM 5.1 repro of this loop showed
+    the polite notes were treated as 'another thing to react to'
+    instead of a stop signal — refusal breaks the pattern.
+    """
+    tracker = _BrowserProgressTracker()
+    result = ToolExecutionResult(
+        output="Opened page.",
+        exit_code=0,
+        metadata={
+            "state_hash": "same-page",
+            "controls_summary": "Visible controls:",
+        },
+    )
+
+    # Opens 1-4: success with polite notes on 2-4
+    for i in range(4):
+        r = tracker.annotate({"action": "open", "url": "file:///tmp/app.html"}, result)
+        assert r.exit_code == 0, f"opens 1-4 should succeed, got {r.exit_code} on open {i+1}"
+
+    # 5th identical open: refused.
+    refused = tracker.annotate({"action": "open", "url": "file:///tmp/app.html"}, result)
+    assert refused.exit_code == 1
+    assert "Refused" in refused.stderr
+    assert "consecutive" in refused.stderr
+    assert "plain text" in refused.stderr
+    # Original output should be dropped — the call was refused, the
+    # model shouldn't see "success data" to react to.
+    assert refused.output == ""
+    # Metadata carries the structured refusal intervention for tracing.
+    assert refused.metadata is not None
+    assert refused.metadata["verification_intervention"]["kind"] == "repeated_open_refused"
+    assert refused.metadata["verification_intervention"]["same_state_open_streak"] >= 5
+
+
+def test_progress_tracker_streak_resets_when_state_changes() -> None:
+    """A different target or a changed state_hash resets the streak, so
+    legitimate repeat opens of DIFFERENT pages don't accidentally trip
+    the 5-open refusal."""
+    tracker = _BrowserProgressTracker()
+    # 4 opens with state A
+    result_a = ToolExecutionResult(
+        output="page A", exit_code=0, metadata={"state_hash": "A"},
+    )
+    for _ in range(4):
+        tracker.annotate({"action": "open", "url": "file:///a.html"}, result_a)
+    # Now open a DIFFERENT page — streak resets
+    result_b = ToolExecutionResult(
+        output="page B", exit_code=0, metadata={"state_hash": "B"},
+    )
+    r = tracker.annotate({"action": "open", "url": "file:///b.html"}, result_b)
+    assert r.exit_code == 0  # not refused — different target, streak = 1
+    # 4 more opens of B (total 5 of any target but streak only 5 for B
+    # if all same; actually streak for B = 5 after these 4 more).
+    for _ in range(4):
+        r = tracker.annotate({"action": "open", "url": "file:///b.html"}, result_b)
+    # 5th consecutive same-state open on B → refused
+    assert r.exit_code == 1
+    assert "Refused" in r.stderr
+
+
 def test_progress_tracker_warns_after_repeated_failures() -> None:
     tracker = _BrowserProgressTracker()
     success = ToolExecutionResult(

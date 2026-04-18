@@ -22,7 +22,7 @@ HOLO_DEFAULT_PROVIDER_OPTIONS = (
     "biomedical_research",
 )
 VISION_MODE_OPTIONS = ("inherit", "endpoint")
-VISION_PROVIDER_OPTIONS = ("llamacpp", "openai_compat")
+VISION_PROVIDER_OPTIONS = ("llamacpp", "openai_compat", "anthropic")
 
 
 def _read_secret_file(path: str | None) -> str:
@@ -117,7 +117,11 @@ class VisionConfig:
         return (
             self.api_key.strip()
             or _read_secret_file(self.api_key_file)
-            or _first_nonempty_env("SUCCESSOR_VISION_API_KEY", "OPENAI_API_KEY")
+            or _first_nonempty_env(
+                "SUCCESSOR_VISION_API_KEY",
+                "Z_AI_API_KEY",
+                "OPENAI_API_KEY",
+            )
         )
 
 

@@ -52,7 +52,8 @@ src/successor/tasks.py       session-local task ledger for structured autonomy
 
 src/successor/profiles/      Profile dataclass + JSON loader + active-profile resolver
 src/successor/providers/     ChatProvider protocol + factory + llamacpp/openai_compat/anthropic
-  presets.py            provider preset definitions (8 presets incl. Kimi Code)
+  presets.py            provider preset definitions (8 presets incl. Kimi Code,
+                        with optional `tool_defaults` per preset)
   factory.py            config dict → ChatProvider constructor
   anthropic.py          Anthropic API client (Messages API format)
 src/successor/skills/        Skill dataclass + frontmatter parser + registry
@@ -91,6 +92,9 @@ src/successor/builtin/       package-shipped data files loaded by the registries
   themes/steel.json                       cool blue instrument-panel oklch (default)
   profiles/default.json                   general-purpose profile
   profiles/successor-dev.json             harness-development profile
+  profiles/zai.json                       z.ai GLM 5.1 with vision pre-wired
+                                          to glm-4.6v on the same subscription
+                                          endpoint
   skills/successor-rendering-pattern.md   the One Rule + five-layer architecture
   tools/read_file.py                      example built-in tool
   intros/successor/00..10-*.txt + hero.txt  11 intro frames + dedicated empty-state hero art
@@ -302,6 +306,23 @@ reference implementation. Where we diverged:
   on every read so swapping profiles or changing percentages takes
   effect immediately. See `docs/compaction.md` for the full reference
   and the JSON schema.
+- Per-turn prompt re-injection → **ALIGNED** with free-code as of
+  v0.1.39. Free-code's `getSystemContext()` memoizes static context
+  for the session; we now treat `browser_runtime` guidance as
+  one-shot per user turn (fires on first applicable tick, flag resets
+  when the next user message arrives). Prior behavior re-injected
+  the browser verification recipe every agent tick which kept capable
+  models (GLM 5.1, Claude) in compulsive re-verify loops. See
+  `chat_agent_loop.py:_build_prompt_sections` + the host-level
+  `_browser_runtime_emitted_this_turn` flag.
+- Tool_result wire format → **ALIGNED** as of v0.1.39. Free-code
+  batches N tool_results from one assistant turn into ONE user
+  message per Anthropic spec (`query.ts:471-482`); Successor's
+  `AnthropicClient._convert_messages` now coalesces consecutive
+  role=tool log entries the same way. `LogMessage.to_api_dict()`
+  emits `role="tool"` with `tool_call_id` for non-bash native tool
+  cards; bash still flattens to `role="assistant"` text for
+  llama.cpp chat-template compatibility.
 
 ## Things deliberately deferred
 

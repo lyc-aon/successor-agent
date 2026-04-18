@@ -368,8 +368,20 @@ class _WizardState:
         return CompactionConfig()
 
     def _build_tool_config(self) -> dict:
-        """Build the tool_config dict from wizard state."""
+        """Build the tool_config dict from wizard state.
+
+        Starts from the selected preset's ``tool_defaults`` (filtered to
+        enabled tools) so service-specific knowledge like z.ai's paired
+        vision sibling flows into new profiles without a second setup
+        step. Wizard-surfaced knobs (e.g. bash yolo) overlay afterwards
+        so an explicit UI choice always wins over a preset default.
+        """
         tc: dict = {}
+        preset = get_preset_by_id(self.provider_preset)
+        if preset is not None:
+            for tool_name, defaults in preset.tool_defaults.items():
+                if tool_name in self.enabled_tools:
+                    tc[tool_name] = dict(defaults)
         if "bash" in self.enabled_tools:
             tc["bash"] = {"allow_dangerous": self.bash_yolo}
         return tc

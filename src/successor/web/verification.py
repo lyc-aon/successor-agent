@@ -129,9 +129,10 @@ def build_browser_verification_guidance(
     lines.append(
         "- After steps that may trigger runtime issues, check `console_errors` before concluding the flow is healthy."
     )
-    lines.append(
-        "- Run at least one edge or failure-path check that matches the feature under test instead of verifying only the happy path."
-    )
+    # The "run at least one edge or failure-path check" nudge used to live
+    # here; removed 2026-04-17 because it was re-injected every turn and
+    # kept capable models in verification loops past the point of
+    # sufficient evidence. See verification_contract.py for the same note.
     if stateful_runtime:
         lines.append(
             "- This task looks stateful or realtime. If manual browser play is weak, add a tiny deterministic driver, autoplay harness, or player script, then use the browser to observe the driven run instead of relying on hand-play alone."
@@ -170,6 +171,12 @@ class BrowserProgressTracker:
     last_controls_summary: str = ""
     screenshot_streak: int = 0
     action_repeat_counts: dict[tuple[str, str], int] | None = None
+    # Consecutive identical-state opens of the same target. Gated at 5 —
+    # past that the tool refuses the call with exit_code=1 because
+    # re-opening an unchanged page cannot produce new evidence and the
+    # model is clearly stuck. See GLM repro in the swiper verification
+    # loop that prompted this fix.
+    same_state_open_streak: int = 0
 
     def __post_init__(self) -> None:
         if self.action_repeat_counts is None:
@@ -237,6 +244,49 @@ class BrowserProgressTracker:
             and target == self.last_target
             and state_hash == self.last_state_hash
         )
+
+        # Track the same-state open streak and hard-refuse past 5.
+        if repeated_open:
+            self.same_state_open_streak += 1
+        elif action == "open":
+            # New open (different target or state changed) — reset streak
+            # to 1 because this IS an open, it's just not a repeat.
+            self.same_state_open_streak = 1
+        # Non-open actions don't touch the streak; intervening `inspect`
+        # or `click` between two repeats doesn't reset the loop signal.
+
+        if action == "open" and self.same_state_open_streak >= 5:
+            refused_stderr = (
+                f"Refused: {self.same_state_open_streak}th consecutive `open` "
+                f"of this target with no state change. The page is unchanged "
+                f"from the previous open — reopening cannot produce new "
+                f"evidence. Reply with plain text now; the task is done or "
+                f"blocked, not one more open call away."
+            )
+            intervention = {
+                "kind": "repeated_open_refused",
+                "note": refused_stderr,
+                "recommended_action": "reply_plain_text",
+                "same_state_open_streak": self.same_state_open_streak,
+            }
+            # Still record last_action/target so a subsequent DIFFERENT
+            # open properly resets; but return refused result immediately,
+            # bypassing the polite-note and streak nudges below.
+            self.last_action = action
+            self.last_target = target
+            self.last_state_hash = state_hash
+            return self._finalize_result(
+                replace(result, exit_code=1),
+                metadata=metadata,
+                action=action,
+                target=target,
+                state_hash=state_hash,
+                repeated_open=True,
+                output="",  # drop success output — the call was refused
+                stderr=refused_stderr,
+                intervention=intervention,
+            )
+
         if repeated_open:
             note = (
                 "Progress note: you reopened the same page and got the same "

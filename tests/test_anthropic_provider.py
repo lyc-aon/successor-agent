@@ -215,6 +215,78 @@ def test_tool_result_converted() -> None:
     assert content[0]["content"] == "Sunny, 72F"
 
 
+def test_consecutive_tool_results_batched_into_one_user_message() -> None:
+    """Multiple tool_results from one assistant turn must be coalesced
+    into a single user message with N tool_result blocks, per Anthropic
+    spec. Previously each tool_result became its own user message, which
+    capable models (GLM 5.1, Claude) handle poorly — it looks like the
+    harness is issuing three separate user turns."""
+    messages = [
+        {"role": "user", "content": "do three things"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "call_a", "type": "function",
+                 "function": {"name": "browser", "arguments": '{"action":"open"}'}},
+                {"id": "call_b", "type": "function",
+                 "function": {"name": "vision", "arguments": '{"path":"/tmp/x.png"}'}},
+                {"id": "call_c", "type": "function",
+                 "function": {"name": "read_file", "arguments": '{"file_path":"/tmp/y"}'}},
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_a", "content": "page opened"},
+        {"role": "tool", "tool_call_id": "call_b", "content": "image described"},
+        {"role": "tool", "tool_call_id": "call_c", "content": "file contents"},
+        {"role": "user", "content": "next"},
+    ]
+    _, anthropic_msgs = AnthropicClient._convert_messages(messages)
+    # Expect: user(text), assistant(3 tool_use), user(3 tool_result), user(text)
+    assert len(anthropic_msgs) == 4
+    assert anthropic_msgs[0] == {"role": "user", "content": "do three things"}
+    assert anthropic_msgs[1]["role"] == "assistant"
+    assert len(anthropic_msgs[1]["content"]) == 3
+    # The batched tool_result message:
+    batched = anthropic_msgs[2]
+    assert batched["role"] == "user"
+    assert isinstance(batched["content"], list)
+    assert len(batched["content"]) == 3
+    assert [b["type"] for b in batched["content"]] == [
+        "tool_result", "tool_result", "tool_result"
+    ]
+    assert [b["tool_use_id"] for b in batched["content"]] == [
+        "call_a", "call_b", "call_c"
+    ]
+    assert [b["content"] for b in batched["content"]] == [
+        "page opened", "image described", "file contents"
+    ]
+    # Trailing user message preserved, not merged with the batch
+    assert anthropic_msgs[3] == {"role": "user", "content": "next"}
+
+
+def test_trailing_tool_results_flushed() -> None:
+    """Messages ending with tool_results (no subsequent non-tool message)
+    still get flushed as a single user message — covers the snapshot
+    case where we serialize mid-turn."""
+    messages = [
+        {"role": "user", "content": "ping"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "call_x", "type": "function",
+                 "function": {"name": "read_file", "arguments": "{}"}},
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_x", "content": "contents"},
+    ]
+    _, anthropic_msgs = AnthropicClient._convert_messages(messages)
+    assert len(anthropic_msgs) == 3
+    assert anthropic_msgs[2]["role"] == "user"
+    assert len(anthropic_msgs[2]["content"]) == 1
+    assert anthropic_msgs[2]["content"][0]["tool_use_id"] == "call_x"
+
+
 # ─── Context window detection ───
 
 

@@ -85,9 +85,13 @@ class LogMessage:
     def to_api_dict(self) -> dict[str, str]:
         """Serialize to the OpenAI-compat shape llama.cpp expects.
 
-        Tool cards become assistant messages with the raw command and
-        the captured output appended (because llama.cpp doesn't know
-        about our structured cards — it just sees text).
+        For cards with a populated ``tool_call_id`` (i.e. dispatched via
+        the native function-calling path), emit a proper ``role="tool"``
+        message so provider converters can build real tool_result blocks
+        on the wire. For cards without one (bash fences into llama.cpp's
+        text-tool-use mode), fall back to the legacy "flatten to
+        assistant text" shape — llama.cpp models that don't handle
+        role=tool rely on this.
 
         Boundary markers and summary messages are emitted as USER
         messages with a clear `[compaction]` / `[summary]` prefix.
@@ -131,7 +135,23 @@ class LogMessage:
                 body_lines.append(f"[stderr] {card.stderr.rstrip()}")
             if card.exit_code is not None and card.exit_code != 0:
                 body_lines.append(f"[exit {card.exit_code}]")
-            return {"role": "assistant", "content": "\n".join(body_lines)}
+            body = "\n".join(body_lines)
+            # Discriminator: bash is (almost) always text-fence-mode for
+            # llama.cpp compatibility — models that can't handle role=tool
+            # in their chat template rely on the flattened-to-assistant
+            # shape. All OTHER native tools (browser, vision, holonet,
+            # file tools, subagent, task, verify, skill, runbook) always
+            # come from structured tool_calls, so they emit role=tool
+            # with tool_call_id so provider converters can build real
+            # tool_result content blocks on the wire, batched per
+            # assistant turn per Anthropic's spec.
+            if card.tool_name and card.tool_name != "bash" and card.tool_call_id:
+                return {
+                    "role": "tool",
+                    "tool_call_id": card.tool_call_id,
+                    "content": body,
+                }
+            return {"role": "assistant", "content": body}
         return {"role": self.role, "content": self.content}
 
     def replace_output(self, placeholder: str) -> "LogMessage":

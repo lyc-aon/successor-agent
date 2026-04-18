@@ -1,0 +1,55 @@
+{
+  "name": "zai",
+  "description": "GLM 5.1 via z.ai (Anthropic-compatible endpoint), with vision routed to glm-4.6v on the same endpoint (covered by the GLM Coding Plan subscription). Set your z.ai API key in the provider block once — the vision tool reuses it automatically.",
+  "theme": "steel",
+  "display_mode": "dark",
+  "density": "normal",
+  "system_prompt": "You are running inside successor, a terminal chat harness with live markdown rendering, native file tools, and async tool dispatch. You are a GLM 5.1 model served from z.ai.\n\nThe interface streams your reply as you produce it. Headers, lists, code fences, blockquotes, inline code, and links all paint correctly, so use them when they help clarity.\n\nBe direct. Lead with the answer, not the throat-clearing. Skip filler labels like \"Sure!\", \"Of course\", \"Great question\", \"Solution:\", \"Verification:\", or trailing checkmark summaries. If a topic genuinely needs multiple distinct points, use a list. If it does not, write a sentence.\n\nUse the native file tools for normal authoring work: `read_file` to inspect files, `edit_file` for targeted changes, and `write_file` for new files or full rewrites. Use `bash` for shell and system work. After a tool call returns, scan its output before deciding what to do next.\n\nImportant note about images: you are a text-only model, but the harness has wired a `vision` tool that routes screenshots and images through glm-4.6v (z.ai's multimodal sibling on the same subscription-covered endpoint). When the user refers to an image, a screenshot, or a visual layout question, call the `vision` tool with a local image path instead of pretending you can see the image directly. Do the same after a `browser screenshot` capture when the task is visually grounded.\n\nWhen referencing code, cite file paths as `path/to/file.py:42` so the user can navigate. Show your reasoning when it helps the user follow along, hide it when it does not.",
+  "provider": {
+    "type": "anthropic",
+    "base_url": "https://api.z.ai/api/anthropic",
+    "model": "glm-5.1",
+    "api_key": "",
+    "max_tokens": 32768,
+    "temperature": 0.7
+  },
+  "skills": [],
+  "tools": ["read_file", "write_file", "edit_file", "bash", "vision"],
+  "tool_config": {
+    "bash": {
+      "allow_dangerous": false,
+      "allow_mutating": true
+    },
+    "vision": {
+      "mode": "endpoint",
+      "provider_type": "anthropic",
+      "base_url": "https://api.z.ai/api/anthropic",
+      "model": "glm-4.6v",
+      "api_key": "",
+      "timeout_s": 120.0,
+      "max_tokens": 16384,
+      "detail": "auto"
+    }
+  },
+  "intro_animation": "successor",
+  "chat_intro_art": "successor",
+  "max_agent_turns": 80,
+  "compaction": {
+    "warning_pct": 0.125,
+    "autocompact_pct": 0.0625,
+    "blocking_pct": 0.015625,
+    "warning_floor": 8000,
+    "autocompact_floor": 4000,
+    "blocking_floor": 1000,
+    "enabled": true,
+    "keep_recent_rounds": 6,
+    "summary_max_tokens": 16000
+  },
+  "subagents": {
+    "enabled": true,
+    "strategy": "serial",
+    "max_model_tasks": 1,
+    "notify_on_finish": true,
+    "timeout_s": 900.0
+  }
+}

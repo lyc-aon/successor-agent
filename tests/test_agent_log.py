@@ -31,14 +31,54 @@ def test_log_message_to_api_dict_plain() -> None:
 
 
 def test_log_message_to_api_dict_with_tool_card() -> None:
-    """Tool messages serialize as assistant messages with the raw
-    command + output joined into a single content string."""
+    """Bash tool cards flatten to role=assistant text for llama.cpp
+    text-tool-use compatibility. Other native tools emit role=tool
+    with tool_call_id (see test_log_message_to_api_dict_native_tool
+    below)."""
     card = dispatch_bash("echo hello")
     m = LogMessage(role="tool", content="", tool_card=card)
     d = m.to_api_dict()
     assert d["role"] == "assistant"
     assert "$ echo hello" in d["content"]
     assert "hello" in d["content"]
+
+
+def test_log_message_to_api_dict_native_tool_emits_role_tool() -> None:
+    """A non-bash tool card with a populated tool_call_id serializes as
+    role=tool with tool_call_id, so the Anthropic provider converter can
+    build proper tool_result content blocks on the wire. This is what
+    enables correct batching of N tool_results from one assistant turn
+    into ONE user message."""
+    from dataclasses import replace
+    card = dispatch_bash("echo browser-result-stub")
+    # Simulate a non-bash native tool card — e.g. the browser tool's
+    # ToolCard, which always has a populated tool_call_id from the
+    # model's emitted tool_calls array.
+    browser_card = replace(
+        card,
+        tool_name="browser",
+        tool_call_id="call_browser_xyz",
+    )
+    m = LogMessage(role="tool", content="", tool_card=browser_card)
+    d = m.to_api_dict()
+    assert d["role"] == "tool"
+    assert d["tool_call_id"] == "call_browser_xyz"
+    assert "echo browser-result-stub" in d["content"]
+
+
+def test_log_message_to_api_dict_bash_with_tool_call_id_still_flattens() -> None:
+    """Even when bash has a tool_call_id (fence detection always
+    generates a synthetic one), the card still flattens to role=assistant.
+    Bash is the llama.cpp text-tool-use path — its chat templates don't
+    universally handle role=tool, and the flatten preserves existing
+    agent behavior."""
+    card = dispatch_bash("echo hi")
+    # dispatch_bash always sets tool_call_id (synthetic if not provided)
+    assert card.tool_call_id  # sanity check
+    assert card.tool_name == "bash"
+    m = LogMessage(role="tool", content="", tool_card=card)
+    d = m.to_api_dict()
+    assert d["role"] == "assistant"  # flattened, NOT role=tool
 
 
 def test_log_message_replace_output() -> None:

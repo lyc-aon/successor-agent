@@ -614,6 +614,217 @@ def test_yolo_absent_when_bash_not_enabled(temp_config_dir: Path) -> None:
     assert payload["tool_config"] == {}
 
 
+def test_preset_tool_defaults_flow_into_new_profile(temp_config_dir: Path) -> None:
+    """Picking the zai preset + enabling vision wires the sibling endpoint.
+
+    The preset declares a vision sibling at the Anthropic endpoint with
+    glm-4.6v (subscription-covered, not the pay-as-you-go /paas/v4 route).
+    The wizard should merge that into tool_config for new profiles without
+    any extra setup step.
+    """
+    state = _WizardState(
+        name="zai-vision-on",
+        provider_preset="zai",
+        enabled_tools=("read_file", "vision"),
+    )
+    payload = state.to_json_dict()
+    assert payload["tool_config"]["vision"]["mode"] == "endpoint"
+    assert payload["tool_config"]["vision"]["provider_type"] == "anthropic"
+    assert payload["tool_config"]["vision"]["base_url"] == "https://api.z.ai/api/anthropic"
+    assert payload["tool_config"]["vision"]["model"] == "glm-4.6v"
+    # Preset defaults must not leak the api_key — the vision tool falls
+    # back to the primary client's key at resolution time.
+    assert "api_key" not in payload["tool_config"]["vision"]
+
+
+def test_preset_tool_defaults_skipped_when_tool_disabled(temp_config_dir: Path) -> None:
+    """Preset defaults are only injected for tools the user actually enabled."""
+    state = _WizardState(
+        name="zai-vision-off",
+        provider_preset="zai",
+        enabled_tools=("read_file",),  # vision NOT enabled
+    )
+    payload = state.to_json_dict()
+    assert "vision" not in payload["tool_config"]
+
+
+def test_preset_without_tool_defaults_produces_empty_tool_config(temp_config_dir: Path) -> None:
+    """Presets without tool_defaults leave tool_config empty for non-bash tools."""
+    state = _WizardState(
+        name="openai-vision",
+        provider_preset="openai",
+        enabled_tools=("read_file", "vision"),
+    )
+    payload = state.to_json_dict()
+    # openai preset has no vision sibling declared, so vision config stays empty.
+    # The user gets the clear inherit-mode error at runtime and configures by hand.
+    assert payload["tool_config"] == {}
+
+
+def test_full_keystroke_e2e_zai_vision_writes_json_file(temp_config_dir: Path) -> None:
+    """E2E: drive every wizard step via real keystrokes, pick zai + enable vision,
+    and confirm the saved profile JSON on disk has the preset's vision defaults.
+
+    This test bypasses no layers — it exercises the same _handle_* methods the
+    TTY app calls on every keypress. Matches test_full_save_flow_writes_json_file
+    line 326 in structure, but traces the zai+vision path end to end.
+    """
+    from successor.providers.presets import PROVIDER_PRESETS, get_preset_by_id
+    from successor.tools_registry import selectable_tool_names
+
+    THEME_REGISTRY.reload()
+    PROFILE_REGISTRY.reload()
+
+    wizard = SuccessorSetup()
+
+    # Welcome → name
+    wizard._handle_welcome(KeyEvent(key=Key.RIGHT))
+    assert wizard.current_step == Step.NAME
+
+    # Type a name
+    for ch in "zaitest":
+        wizard._handle_name(KeyEvent(char=ch))
+    wizard._handle_name(KeyEvent(key=Key.ENTER))
+    assert wizard.current_step == Step.THEME
+
+    # Theme, mode, density, intro — accept defaults
+    wizard._handle_theme(KeyEvent(key=Key.ENTER))
+    assert wizard.current_step == Step.MODE
+    wizard._handle_mode(KeyEvent(key=Key.ENTER))
+    assert wizard.current_step == Step.DENSITY
+    wizard._handle_density(KeyEvent(key=Key.ENTER))
+    assert wizard.current_step == Step.INTRO
+    wizard._handle_intro(KeyEvent(key=Key.ENTER))
+    assert wizard.current_step == Step.PROVIDER
+
+    # Provider step: scroll cursor down to the zai preset, press space to select.
+    preset_ids = [p.id for p in PROVIDER_PRESETS]
+    zai_index = preset_ids.index("zai")
+    for _ in range(zai_index):
+        wizard._handle_provider(KeyEvent(key=Key.DOWN))
+    assert wizard._cursors[Step.PROVIDER] == zai_index
+    wizard._handle_provider(KeyEvent(char=" "))
+    assert wizard.state.provider_preset == "zai"
+
+    # After selecting zai, cursor layout gains api_key + model rows.
+    # Navigate to the api_key field (cursor = preset_count).
+    preset_count = len(PROVIDER_PRESETS)
+    while wizard._cursors[Step.PROVIDER] != preset_count:
+        wizard._handle_provider(KeyEvent(key=Key.DOWN))
+
+    # Type a fake API key. Real one not needed — we're testing wiring, not billing.
+    for ch in "fake-zai-key-for-e2e-test":
+        wizard._handle_provider(KeyEvent(char=ch))
+    assert wizard.state.provider_api_key == "fake-zai-key-for-e2e-test"
+
+    # Advance — model field defaults to glm-5.1 via the preset, no need to edit.
+    wizard._handle_provider(KeyEvent(key=Key.RIGHT))
+    assert wizard.current_step == Step.TOOLS
+
+    # Tools step: navigate to the `vision` checkbox and enable it.
+    tool_names = selectable_tool_names()
+    vision_index = tool_names.index("vision")
+    # Cursor starts at 0 (read_file). Walk down to vision.
+    while wizard._cursors[Step.TOOLS] != vision_index:
+        wizard._handle_tools(KeyEvent(key=Key.DOWN))
+    assert "vision" not in wizard.state.enabled_tools
+    wizard._handle_tools(KeyEvent(char=" "))
+    assert "vision" in wizard.state.enabled_tools
+
+    # Advance through compaction + review.
+    wizard._handle_tools(KeyEvent(key=Key.ENTER))
+    assert wizard.current_step == Step.COMPACTION
+    wizard._handle_compaction(KeyEvent(key=Key.ENTER))
+    assert wizard.current_step == Step.REVIEW
+    wizard._handle_review(KeyEvent(key=Key.ENTER))
+    assert wizard.current_step == Step.SAVED
+    assert wizard.saved_profile is not None
+    assert wizard.saved_profile.name == "zaitest"
+
+    # The saved JSON must carry the zai preset's vision defaults.
+    target = temp_config_dir / "profiles" / "zaitest.json"
+    assert target.exists()
+    payload = json.loads(target.read_text())
+
+    # Provider block — from the preset.
+    assert payload["provider"]["type"] == "anthropic"
+    assert payload["provider"]["base_url"] == "https://api.z.ai/api/anthropic"
+    assert payload["provider"]["model"] == "glm-5.1"
+    assert payload["provider"]["api_key"] == "fake-zai-key-for-e2e-test"
+
+    # The foundational fix in action: preset.tool_defaults flowed into tool_config.
+    vision_cfg = payload["tool_config"]["vision"]
+    assert vision_cfg["mode"] == "endpoint"
+    assert vision_cfg["provider_type"] == "anthropic"
+    assert vision_cfg["base_url"] == "https://api.z.ai/api/anthropic"
+    assert vision_cfg["model"] == "glm-4.6v"
+    # api_key deliberately absent — the vision tool reuses the primary's
+    # key via the fallback in web/vision.py._resolve_vision_endpoint.
+    assert "api_key" not in vision_cfg
+
+    # Sanity: tools list includes vision.
+    assert "vision" in payload["tools"]
+
+    # Sanity: the preset we used still advertises the same defaults
+    # (guards against future preset drift silently breaking this test).
+    zai_preset = get_preset_by_id("zai")
+    assert zai_preset is not None
+    assert zai_preset.tool_defaults["vision"]["model"] == "glm-4.6v"
+
+
+def test_config_menu_renders_preset_vision_defaults(temp_config_dir: Path) -> None:
+    """After a wizard save, opening the config menu shows the preset's vision
+    defaults in the settings pane — so the user can see/edit them without
+    manually opening the JSON file.
+
+    Verifies: the preset → tool_config pipeline produces a profile whose
+    rendered settings tree contains the correct vision values (not just
+    that the JSON has them — that the UI surfaces them).
+    """
+    from successor.render.cells import Grid
+    from successor.snapshot import render_grid_to_plain
+    from successor.wizard.config import Focus, SuccessorConfig
+    from successor.wizard.setup import SuccessorSetup
+
+    THEME_REGISTRY.reload()
+    PROFILE_REGISTRY.reload()
+
+    # Build a zai + vision profile directly via _WizardState → save.
+    wizard = SuccessorSetup()
+    wizard.state = _WizardState(
+        name="config-render-test",
+        provider_preset="zai",
+        provider_api_key="fake-zai-key",
+        enabled_tools=("read_file", "vision"),
+    )
+    wizard._save_and_finish()
+
+    # Now open the config menu against that profile.
+    PROFILE_REGISTRY.reload()
+    menu = SuccessorConfig()
+    profile_names = [p.name for p in menu._working_profiles]
+    menu._profile_cursor = profile_names.index("config-render-test")
+    menu._focus = Focus.SETTINGS
+    menu._sync_preview()
+
+    # Render on a tall grid so the vision section is on screen (not clipped).
+    g = Grid(60, 120)
+    menu.on_tick(g)
+    plain = render_grid_to_plain(g)
+
+    # The vision section must be visible and show the preset's defaults.
+    assert "vision" in plain.lower()
+    assert "endpoint" in plain  # mode
+    assert "anthropic" in plain  # provider_type
+    # base_url may be truncated for the column width; assert on a prefix
+    # that will definitely fit.
+    assert "https://api.z.ai/api/" in plain
+    assert "glm-4.6v" in plain  # model
+    # api key should display as (not set) — the vision tool reuses the
+    # primary client's key instead of the vision block carrying its own.
+    assert "(not set)" in plain
+
+
 def test_yolo_row_not_reachable_without_bash(temp_config_dir: Path) -> None:
     """Without bash, cursor wraps only within tool checkboxes."""
     from successor.tools_registry import selectable_tool_names

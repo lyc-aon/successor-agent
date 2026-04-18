@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import platform
+import re
 import uuid
 import urllib.error
 import urllib.request
@@ -34,6 +35,12 @@ from pathlib import Path
 from typing import Iterable
 
 from .llama import ChatStream
+
+
+# Matches any already-versioned path segment like /v1, /v2, /v4, /v42. Lets
+# non-v1 bases such as z.ai's /api/paas/v4 pass through without being
+# double-rooted to /v4/v1/chat/completions.
+_VERSION_ROOTED = re.compile(r"/v\d+(?:/|$)")
 
 
 # ─── Kimi Code identification headers ───
@@ -194,13 +201,17 @@ class OpenAICompatClient:
             self._extra_headers = _kimi_code_headers()
 
     def _api_root(self) -> str:
-        """Return the base URL with `/v1` ensured exactly once.
+        """Return the base URL with a versioned root ensured exactly once.
 
-        Handles both `https://openrouter.ai/api/v1` (already includes
-        /v1) and `http://localhost:1234` (does not). Avoids producing
-        the dreaded `…/v1/v1/chat/completions` 404.
+        Handles:
+          - `https://openrouter.ai/api/v1` — already /v1 rooted, pass through
+          - `http://localhost:1234` — bare, append /v1
+          - `https://api.z.ai/api/paas/v4` — already /v4 rooted, pass through
+
+        Avoids producing either `…/v1/v1/chat/completions` or
+        `…/v4/v1/chat/completions` 404s.
         """
-        if self.base_url.endswith("/v1") or "/v1/" in self.base_url:
+        if _VERSION_ROOTED.search(self.base_url):
             return self.base_url
         return f"{self.base_url}/v1"
 

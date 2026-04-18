@@ -12,6 +12,7 @@ from successor.verification_contract import (
     build_verification_continue_nudge,
     build_verification_execution_guidance,
     build_verification_prompt_section,
+    build_verification_settled_nudge,
     build_verification_tool_result,
     parse_verification_items,
 )
@@ -103,7 +104,10 @@ def test_verification_helpers_render_contract_and_summary() -> None:
     assert "debug logs" in guidance
     assert "before/after state delta" in guidance
     assert "adversarial or failure-path probe" in guidance
-    assert 'role="verification"' in guidance
+    # The 'role="verification"' subagent nudge used to be asserted here;
+    # it was removed from the guidance 2026-04-17 to stop re-injecting
+    # "launch a verifier subagent" on every turn in long verification
+    # loops. Stateful-runtime guidance is still present below.
     assert "deterministic driver" in guidance
     assert "HUD value" in guidance
 
@@ -126,3 +130,61 @@ def test_verification_continue_nudge_is_empty_without_active_item() -> None:
         ])
     )
     assert build_verification_continue_nudge(passed_only) == ""
+
+
+def test_ledger_is_all_passed_predicate() -> None:
+    """Empty ledger is NOT all_passed (nothing to pass); all-passed
+    items return True; mixed statuses return False."""
+    assert VerificationLedger().is_all_passed() is False
+
+    mixed = VerificationLedger(items=parse_verification_items([
+        {"claim": "one", "evidence": "e1", "status": "passed"},
+        {"claim": "two", "evidence": "e2", "status": "pending"},
+    ]))
+    assert mixed.is_all_passed() is False
+
+    with_failed = VerificationLedger(items=parse_verification_items([
+        {"claim": "one", "evidence": "e1", "status": "passed"},
+        {"claim": "two", "evidence": "e2", "status": "failed"},
+    ]))
+    assert with_failed.is_all_passed() is False
+
+    all_passed = VerificationLedger(items=parse_verification_items([
+        {"claim": "one", "evidence": "e1", "status": "passed"},
+        {"claim": "two", "evidence": "e2", "status": "passed"},
+    ]))
+    assert all_passed.is_all_passed() is True
+
+
+def test_settled_nudge_fires_only_when_all_passed() -> None:
+    """The contract-settled nudge is the harness's 'you're done' stop
+    signal for capable models. It must only fire when every item is
+    passed — not when pending/in-progress/failed items remain."""
+    # Empty ledger → no nudge (nothing to be done about)
+    assert build_verification_settled_nudge(VerificationLedger()) == ""
+
+    # Has an in-progress item → still working, no nudge
+    working = VerificationLedger(items=parse_verification_items([
+        {"claim": "one", "evidence": "e1", "status": "in_progress"},
+    ]))
+    assert build_verification_settled_nudge(working) == ""
+
+    # Has a failed item → stop signal is wrong, don't fire
+    failed = VerificationLedger(items=parse_verification_items([
+        {"claim": "one", "evidence": "e1", "status": "passed"},
+        {"claim": "two", "evidence": "e2", "status": "failed"},
+    ]))
+    assert build_verification_settled_nudge(failed) == ""
+
+    # All passed → fire the stop signal with a clear message
+    all_passed = VerificationLedger(items=parse_verification_items([
+        {"claim": "one", "evidence": "e1", "status": "passed"},
+        {"claim": "two", "evidence": "e2", "status": "passed"},
+    ]))
+    nudge = build_verification_settled_nudge(all_passed)
+    assert nudge != ""
+    # The nudge must include the "reply with plain text" directive or
+    # its intent won't land.
+    assert "plain text" in nudge
+    # And it must specifically tell the model NOT to keep tool-calling.
+    assert "Do not run additional" in nudge

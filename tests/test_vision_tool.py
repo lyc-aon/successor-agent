@@ -145,3 +145,98 @@ def test_run_vision_analysis_requires_existing_path(tmp_path: Path) -> None:
     )
     assert result.exit_code == 1
     assert "does not exist" in result.stderr
+
+
+class _FakeAnthropicClient:
+    """Minimal stand-in for AnthropicClient used in vision resolution tests."""
+
+    provider_type = "anthropic"
+
+    def __init__(self, api_key: str = "") -> None:
+        self.base_url = "https://api.z.ai/api/anthropic"
+        self.model = "glm-5.1"
+        self.api_key = api_key
+
+
+def test_vision_runtime_status_explains_why_inherit_fails_on_anthropic() -> None:
+    status = vision_runtime_status(
+        VisionConfig(mode="inherit", provider_type="llamacpp"),
+        client=_FakeAnthropicClient(),
+    )
+    assert status.tool_available is False
+    assert "Anthropic-protocol primary" in status.reason
+    # Error message should now point at the subscription-covered path.
+    assert "glm-4.6v" in status.reason
+    assert "https://api.z.ai/api/anthropic" in status.reason
+
+
+def test_vision_endpoint_anthropic_dispatch_format(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Endpoint mode with provider_type=anthropic builds Anthropic Messages
+    API requests (image content block with source{type,media_type,data},
+    POSTs to /v1/messages, uses x-api-key header) and inherits the primary
+    client's api_key when the vision block leaves it empty.
+
+    This is the subscription-covered path for z.ai GLM Coding Plan users.
+    """
+    image = tmp_path / "shot.png"
+    image.write_bytes(_PNG_1X1)
+
+    captured: dict[str, object] = {}
+
+    def _fake_post_anthropic(*, url, body, timeout_s, api_key):  # noqa: ANN001
+        captured["url"] = url
+        captured["api_key"] = api_key
+        captured["body"] = body
+        return {
+            "id": "msg_test",
+            "type": "message",
+            "role": "assistant",
+            "model": "glm-4.6v",
+            "content": [{"type": "text", "text": "A small PNG, mostly black."}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 42, "output_tokens": 10},
+        }
+
+    monkeypatch.setattr(
+        "successor.web.vision._post_anthropic_messages", _fake_post_anthropic
+    )
+
+    config = VisionConfig(
+        mode="endpoint",
+        provider_type="anthropic",
+        base_url="https://api.z.ai/api/anthropic",
+        model="glm-4.6v",
+        # NO api_key/api_key_file — should fall through to primary client.
+    )
+    client = _FakeAnthropicClient(api_key="zai-secret-key")
+
+    result = run_vision_analysis(
+        {"path": str(image), "prompt": "Describe."},
+        config,
+        client=client,
+    )
+
+    assert result.exit_code == 0, result.stderr
+    assert "A small PNG, mostly black." in result.output
+
+    # Wire format — these are the guarantees that must hold for a real z.ai
+    # subscription request to succeed.
+    assert captured["url"] == "https://api.z.ai/api/anthropic/v1/messages"
+    assert captured["api_key"] == "zai-secret-key"
+
+    body = captured["body"]
+    assert isinstance(body, dict)
+    assert body["model"] == "glm-4.6v"
+    # system prompt lives at the top level on Anthropic, not as a role=system msg
+    assert "system" in body
+    assert body["messages"][0]["role"] == "user"
+    content = body["messages"][0]["content"]
+    assert isinstance(content, list)
+    assert content[0] == {"type": "text", "text": "Describe."}
+    img_block = content[1]
+    assert img_block["type"] == "image"
+    assert img_block["source"]["type"] == "base64"
+    assert img_block["source"]["media_type"] == "image/png"
+    assert img_block["source"]["data"]  # non-empty base64 payload

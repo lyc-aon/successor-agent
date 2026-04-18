@@ -209,24 +209,52 @@ class AnthropicClient:
         Returns (system_text, anthropic_messages) where system_text is
         the concatenation of all system messages (Anthropic puts system
         at the top level, not in the messages array).
+
+        Tool results get batched: a run of consecutive role=tool messages
+        (all produced in response to one assistant turn's tool_use blocks)
+        becomes ONE user message with N tool_result content blocks, per
+        Anthropic's Messages API spec. This matches free-code's wire shape
+        (query.ts:471-482) and keeps capable models (Claude, GLM) from
+        getting confused by a sequence of single-result user messages.
         """
         system_parts: list[str] = []
         anthropic_msgs: list[dict] = []
+        pending_tool_results: list[dict] = []
+
+        def flush_tool_results() -> None:
+            if pending_tool_results:
+                anthropic_msgs.append({
+                    "role": "user",
+                    "content": list(pending_tool_results),
+                })
+                pending_tool_results.clear()
 
         for m in messages:
             role = m.get("role", "")
             content = m.get("content", "") or ""
+
+            if role == "tool":
+                # Accumulate — don't flush until we see a non-tool message.
+                pending_tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": m.get("tool_call_id", ""),
+                    "content": content,
+                })
+                continue
+
+            # Any non-tool message flushes the pending tool_results first
+            # so the Anthropic wire sees one user{tool_results} message
+            # followed by the next turn.
+            flush_tool_results()
 
             if role == "system":
                 system_parts.append(content)
                 continue
 
             if role == "assistant":
-                # Check for tool_calls in OpenAI format
                 tool_calls = m.get("tool_calls")
                 if tool_calls:
                     blocks: list[dict] = []
-                    # If there's text content alongside tool calls
                     if content:
                         blocks.append({"type": "text", "text": content})
                     for tc in tool_calls:
@@ -250,21 +278,12 @@ class AnthropicClient:
                 anthropic_msgs.append({"role": "assistant", "content": content})
                 continue
 
-            if role == "tool":
-                # Tool result — convert to Anthropic tool_result content block
-                tool_call_id = m.get("tool_call_id", "")
-                anthropic_msgs.append({
-                    "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": tool_call_id,
-                        "content": content,
-                    }],
-                })
-                continue
-
             # user messages — pass through as-is (string content)
             anthropic_msgs.append({"role": role, "content": content})
+
+        # Flush any trailing tool results (edge case: message stream ends
+        # with tool results, e.g. pre-assistant-reply snapshot).
+        flush_tool_results()
 
         return "\n\n".join(system_parts), anthropic_msgs
 

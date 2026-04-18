@@ -3,6 +3,103 @@
 User-facing release notes. The internal per-phase development log
 lives in [`docs/changelog.md`](docs/changelog.md).
 
+## v0.1.39 — 2026-04-17
+
+GLM / z.ai subscription vision wiring, browser verification loop fix,
+and Anthropic tool_result wire format correction. Driven by a real
+GLM 5.1 repro where the model got stuck reopening the same page 4-5
+times in a row during a verification run.
+
+### What changed
+
+- **z.ai vision auto-wiring.** The `z.ai` preset now carries a
+  `tool_defaults.vision` block pointing at `glm-4.6v` on the same
+  Anthropic-compatible endpoint that covers the GLM Coding Plan
+  subscription. Picking that preset in `successor setup` and enabling
+  the `vision` tool wires it end-to-end with zero manual config. Model
+  choice is deliberate: `glm-5v-turbo` + `/paas/v4` is pay-as-you-go
+  and not covered by the subscription; `glm-4.6v` + `/api/anthropic`
+  is.
+
+- **New `VISION_PROVIDER_OPTIONS` value: `anthropic`.** The vision
+  tool now supports an Anthropic-compatible dispatch path that posts
+  to `{base_url}/v1/messages` with Anthropic-style image content
+  blocks (`source.{type:"base64", media_type, data}`) and `x-api-key`
+  auth. Alongside the existing `llamacpp` and `openai_compat` paths.
+
+- **Primary-client API key fallback for vision.** If the vision
+  block's `api_key` is empty, the harness now reuses the active chat
+  provider's key. Users drop their z.ai key in the provider block
+  once; the vision tool picks it up automatically.
+
+- **New bundled profile: `zai.json`.** Ships with GLM 5.1 as the
+  text brain on the Anthropic endpoint and vision routed to
+  `glm-4.6v` on the same endpoint. Zero-config starting point for
+  z.ai users.
+
+- **`ProviderPreset.tool_defaults` field.** New optional
+  `dict[str, dict]` mirroring `Profile.tool_config`. Lets any preset
+  carry paired tool defaults that flow into new wizard-created
+  profiles automatically for whichever tools the user enables.
+  Extensible to browser/holonet/etc. in one-line preset edits.
+
+- **Browser verification loop fix.** The `browser_runtime` guidance
+  is now one-shot per user turn instead of re-injected every agent
+  tick — free-code's memoized-per-session approach, applied to the
+  turn scope. Repeated re-injection of the verification recipe was
+  actively keeping capable models (GLM 5.1, Claude) from
+  self-terminating when their contract was already satisfied.
+
+- **Hard refusal on 5th identical browser `open`.** Previously the
+  tracker appended the same polite "you reopened the same page"
+  progress note on every repeat, which the model could ignore
+  indefinitely. Now the 5th consecutive `open` of the same target
+  with unchanged state returns `exit_code=1` with a clear "Refused:
+  Nth consecutive open, reply with plain text" stderr. Different
+  target or state-changed open resets the streak.
+
+- **Contract-settled one-shot nudge.** When the verification ledger
+  transitions from has-open-items → all-passed within a user turn,
+  the harness queues a single "You're done. Reply with plain text
+  now. Do not run additional browser, screenshot, or vision calls
+  unless the user asks." Consumed on emit. Gives capable models a
+  clear stop signal that never existed before.
+
+- **Removed "consider more edge cases" and "launch verifier
+  subagent" nudges.** Three lines in `verification_contract.py` and
+  `web/verification.py` kept re-appearing every turn even after the
+  contract was all-passed, training the model to always do more.
+  Free-code has no equivalent; the contract's existence is
+  sufficient signal.
+
+- **Anthropic tool_result wire format fix.** Previously each
+  `role="tool"` log message became its own `{"role": "user"}` with a
+  single `tool_result` block, producing a malformed sequence when
+  one assistant turn emitted multiple tool_use blocks. Now
+  consecutive tool results coalesce into one user message with N
+  `tool_result` blocks per Anthropic spec, matching free-code. Also
+  added a native-tool discriminator in `LogMessage.to_api_dict()`:
+  non-bash cards with a `tool_call_id` emit `role="tool"` for
+  proper structured wire format; bash keeps its text-fence flatten
+  for llama.cpp chat-template compatibility.
+
+- **Version-aware `_api_root` regex.** Both `providers/openai_compat.py`
+  and `web/vision.py` now recognize any `/vN` path segment (not just
+  `/v1`) when normalizing a base URL. Latent bug that produced
+  `…/paas/v4/v1/models` 404s for non-v1 versioned endpoints like
+  z.ai's `/paas/v4`.
+
+### Verification
+
+- `pytest -q` — 1377 passed
+- End-to-end probe against z.ai with a real subscription key confirms
+  the Anthropic vision dispatch returns 200 on the first call
+  (billing passthrough, no 429s).
+- New tests cover: preset `tool_defaults` propagation via the wizard,
+  settled-nudge emission, 5th-identical-open refusal, anthropic
+  tool_result batching, and the native-tool vs bash-text
+  discriminator in `to_api_dict`.
+
 ## v0.1.38 — 2026-04-17
 
 Agent loop hardening, browser tool improvements, and compaction

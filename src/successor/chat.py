@@ -1523,6 +1523,17 @@ class SuccessorChat(App):
         self._file_tool_continue_nudge: str | None = None
         self._subagent_continue_nudged_this_turn: bool = False
         self._subagent_continue_nudge: str | None = None
+        # browser_runtime guidance is re-evaluated per turn, but once
+        # emitted within a user submission the model has it — no need to
+        # re-inject on every agent tick. Flipped True after first emit in
+        # a user turn, reset False when the next user turn begins.
+        self._browser_runtime_emitted_this_turn: bool = False
+        # Contract-settled one-shot: fires once when the verification
+        # ledger transitions from "has open items" to "all passed"
+        # within a user turn. Gives capable models a clear "you're done"
+        # signal instead of letting them drift into compulsive re-verify.
+        self._verification_settled_nudged_this_turn: bool = False
+        self._verification_settled_nudge: str | None = None
         self._recent_progress_summaries: list[tuple[float, str]] = []
         self._last_progress_summary: str = ""
         # In-flight BashRunner instances. Each entry is a _Message

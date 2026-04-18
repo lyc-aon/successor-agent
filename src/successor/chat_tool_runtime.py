@@ -77,6 +77,7 @@ from .verification_contract import (
     VerificationContractError,
     build_assertions_artifact,
     build_verification_card_output,
+    build_verification_settled_nudge,
     build_verification_tool_result,
     parse_verification_items,
     verification_items_to_payload,
@@ -791,7 +792,23 @@ class ChatToolRuntime:
             self._append_tool_card(card)
             return False
 
+        was_all_passed = self._host._verification_ledger.is_all_passed()
         self._host._verification_ledger.replace(items)
+        # Has-open → all-passed transition: the contract just got fully
+        # satisfied in this `verify` call. Queue a one-shot "you're done"
+        # nudge so the model gets a clear stop signal on the next tick
+        # instead of spinning on compulsive re-verification.
+        if (
+            not was_all_passed
+            and self._host._verification_ledger.is_all_passed()
+            and not self._host._verification_settled_nudged_this_turn
+        ):
+            settled_text = build_verification_settled_nudge(
+                self._host._verification_ledger
+            )
+            if settled_text:
+                self._host._verification_settled_nudged_this_turn = True
+                self._host._verification_settled_nudge = settled_text
         active = self._host._verification_ledger.in_progress_item()
         params: list[tuple[str, str]] = [("assertions", str(len(items)))]
         if active is not None:

@@ -194,7 +194,7 @@ Configuration lives under `tool_config.vision`. The config menu
 exposes:
 
 - `mode`: `inherit` or `endpoint`
-- `provider_type`: `llamacpp` or `openai_compat`
+- `provider_type`: `llamacpp`, `openai_compat`, or `anthropic`
 - `base_url`
 - `model`
 - optional inline API key / API key file
@@ -202,18 +202,34 @@ exposes:
 - `max_tokens`
 - `detail`
 
-Vision API keys use the same resolution order as holonet:
+Vision API keys use a four-step resolution order:
 
 1. inline profile value
 2. configured key file
-3. `SUCCESSOR_VISION_API_KEY` or `OPENAI_API_KEY`
+3. `SUCCESSOR_VISION_API_KEY`, `Z_AI_API_KEY`, or `OPENAI_API_KEY` env vars
+4. primary-client fallback — if the vision block's key is empty, the
+   harness reuses the key from the active chat provider. This lets
+   z.ai profiles ship a vision block with `"api_key": ""` and have it
+   "just work" using the same key already in the provider block.
 
 Mode semantics:
 
-- `inherit`: reuse the active chat provider if it is multimodal
-- `endpoint`: call a separate multimodal endpoint, which is the normal
-  local setup when the main chat model is text-only but a sidecar
-  vision model is available
+- `inherit`: reuse the active chat provider if it is multimodal.
+  Works for local `llama.cpp` with a vision-capable model. Does NOT
+  work when the primary is Anthropic-protocol (Claude, z.ai GLM)
+  because text-only primaries can't serve vision inline — in that
+  case the harness returns a clear error pointing you at endpoint
+  mode instead of silently failing.
+- `endpoint`: call a separate multimodal endpoint. Three flavors:
+  - **OpenAI-compat** (`llama.cpp` sidecar, z.ai `/paas/v4`, OpenAI,
+    etc.) — posts to `{base_url}/chat/completions` with `image_url`
+    content blocks.
+  - **Anthropic-compat** (z.ai's `/api/anthropic` endpoint with a
+    VLM model like `glm-4.6v` or `glm-4.5v`) — posts to
+    `{base_url}/v1/messages` with Anthropic-style image content
+    blocks and `x-api-key` auth. This is the subscription-covered
+    path for GLM Coding Plan users.
+  - **llamacpp** — for dedicated local vision servers.
 
 For local `llama.cpp`, the common pattern is a dedicated multimodal
 server launched with a VL model plus `--mmproj`, for example:
@@ -221,6 +237,20 @@ server launched with a VL model plus `--mmproj`, for example:
 ```bash
 llama-server -m /path/to/Qwen3-VL.gguf --mmproj /path/to/mmproj.gguf --port 8090
 ```
+
+### Preset auto-wiring (z.ai)
+
+Picking the `z.ai` preset in `successor setup` now auto-populates
+`tool_config.vision` with the subscription-covered path:
+`provider_type=anthropic`, `base_url=https://api.z.ai/api/anthropic`,
+`model=glm-4.6v`. If you enable the `vision` tool with any other
+preset, you configure the vision block by hand in `/config` or the
+profile JSON.
+
+Preset-level tool defaults live on `ProviderPreset.tool_defaults`
+in `src/successor/providers/presets.py`. Adding paired defaults for
+any future tool (browser, holonet, etc.) is a one-line preset edit —
+the wizard merges them for any tool that's actually enabled.
 
 ## Wizard And Config
 

@@ -451,7 +451,10 @@ def test_browser_verification_mode_injects_visual_guidance(
     assert "externally managed" in runtime_tail["content"]
     assert "`verify` tool" in runtime_tail["content"]
     assert "before/after state delta" in runtime_tail["content"]
-    assert "failure-path check" in runtime_tail["content"]
+    # Note: the "failure-path check" edge-case nudge was removed 2026-04-17
+    # because its per-turn re-injection kept capable models in verification
+    # loops past the point of sufficient evidence. Guidance still covers
+    # the core verification approach.
 
 
 def test_browser_verification_mode_injects_stateful_runtime_guidance(

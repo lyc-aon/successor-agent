@@ -786,6 +786,9 @@ class ChatAgentLoop:
         self._host._file_tool_continue_nudge = None
         self._host._subagent_continue_nudged_this_turn = False
         self._host._subagent_continue_nudge = None
+        self._host._browser_runtime_emitted_this_turn = False
+        self._host._verification_settled_nudged_this_turn = False
+        self._host._verification_settled_nudge = None
         self._host._autocompact_attempted_this_turn = False
         self._host._begin_agent_turn()
 
@@ -1105,7 +1108,17 @@ class ChatAgentLoop:
                 )
             )
 
-        if self._host._browser_verification_active and "browser" in enabled_tools:
+        # browser_runtime is one-shot per user turn. Re-injecting it on
+        # every agent tick teaches capable models to keep verifying past
+        # the point of sufficient evidence (GLM 5.1 repro'd this by
+        # reopening the same URL 4-5 times in a row). Fire once, consume,
+        # and trust the model to remember the guidance for the rest of
+        # the turn. Flag resets on the next user submission.
+        if (
+            self._host._browser_verification_active
+            and "browser" in enabled_tools
+            and not self._host._browser_runtime_emitted_this_turn
+        ):
             browser_verification_guidance = build_browser_verification_guidance(
                 latest_user_text=latest_user_text,
                 active_task_text=active_task_text,
@@ -1123,9 +1136,11 @@ class ChatAgentLoop:
                         label="Browser Runtime Context",
                         content=browser_verification_guidance,
                         cache_break=True,
-                        reason="browser-verification mode follows the current task state",
+                        reason="one-shot browser-verification primer per user turn",
                     )
                 )
+                if consume_one_shot_nudges:
+                    self._host._browser_runtime_emitted_this_turn = True
 
         if task_adoption_decision.should_nudge and any(
             name in enabled_tools for name in ("task", "runbook", "verify")
@@ -1223,6 +1238,22 @@ class ChatAgentLoop:
             )
             if consume_one_shot_nudges:
                 self._host._subagent_continue_nudge = None
+        verification_settled_nudge = self._host._verification_settled_nudge
+        if verification_settled_nudge:
+            sections.append(
+                PromptSection(
+                    key="verification_settled_reminder",
+                    label="Verification Settled",
+                    content=(
+                        "## You're done\n\n"
+                        f"{verification_settled_nudge}"
+                    ),
+                    cache_break=True,
+                    reason="contract-settled nudge is a one-shot stop signal",
+                )
+            )
+            if consume_one_shot_nudges:
+                self._host._verification_settled_nudge = None
         return sections
 
     def _prepare_turn_request(

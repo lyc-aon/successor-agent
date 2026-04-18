@@ -71,7 +71,7 @@ box:
 | **ollama** | none | local models via `ollama serve` |
 | **openai** | API key | pay-per-use against your OpenAI credits |
 | **anthropic** | API key | anthropic.com or z.ai endpoints |
-| **z.ai** | API key | GLM models via Anthropic-compatible endpoint |
+| **z.ai** | API key | GLM models via Anthropic-compatible endpoint; picking this preset auto-wires `vision` to `glm-4.6v` on the same subscription |
 | **openrouter** | API key | free models available, no card needed |
 | **generic** | optional | any `/v1/chat/completions` endpoint |
 | **Kimi Code** | OAuth | run `successor login` first |

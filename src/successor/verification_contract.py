@@ -135,6 +135,16 @@ class VerificationLedger:
     def open_count(self) -> int:
         return sum(1 for item in self.items if not item.done)
 
+    def is_all_passed(self) -> bool:
+        """True iff the contract has at least one item AND every item is passed.
+
+        An empty ledger is not "all passed" — there's nothing to pass. An
+        all-passed contract is the signal that the work is provably done.
+        """
+        if not self.items:
+            return False
+        return all(item.status == "passed" for item in self.items)
+
 
 def verification_items_to_payload(
     items: tuple[VerificationItem, ...],
@@ -229,10 +239,15 @@ def build_verification_execution_primer(
             "- Prefer a tiny deterministic driver, autoplay harness, or player script over casual manual play when the runtime is fast, noisy, or timing-sensitive.",
             "- Name that driver explicitly in the verification contract, and pair it with an observable debug surface such as a HUD value, runtime log, or state accessor.",
         ])
-    if subagent_available:
-        lines.append(
-            '- Before declaring complex browser-heavy or multi-file work done, consider launching a fresh read-only `subagent` with `role="verification"` so a separate pass can try to break it without editing project files.'
-        )
+    # NOTE: the "launch a fresh read-only subagent" nudge was removed
+    # 2026-04-17. It was re-injected every turn alongside the rest of this
+    # guidance and actively kept capable models (GLM 5.1, Claude) in
+    # verification loops — they read "consider more verification" and
+    # kept calling browser tools instead of self-terminating. The
+    # contract's existence is sufficient signal. If subagent-based
+    # verification is valuable for a specific workflow, surface it via
+    # a skill the model loads on demand, not per-turn injection.
+    _ = subagent_available  # intentionally unused; kept for API stability
     return "\n".join(lines)
 
 
@@ -273,10 +288,15 @@ def build_verification_execution_guidance(
             "- Prefer a tiny deterministic driver, autoplay harness, or player script over casual manual play when the runtime is fast, noisy, or timing-sensitive.",
             "- Name that driver explicitly in the verification contract, and pair it with an observable debug surface such as a HUD value, runtime log, or state accessor.",
         ])
-    if subagent_available:
-        lines.append(
-            '- Before declaring complex browser-heavy or multi-file work done, consider launching a fresh read-only `subagent` with `role="verification"` so a separate pass can try to break it without editing project files.'
-        )
+    # NOTE: the "launch a fresh read-only subagent" nudge was removed
+    # 2026-04-17. It was re-injected every turn alongside the rest of this
+    # guidance and actively kept capable models (GLM 5.1, Claude) in
+    # verification loops — they read "consider more verification" and
+    # kept calling browser tools instead of self-terminating. The
+    # contract's existence is sufficient signal. If subagent-based
+    # verification is valuable for a specific workflow, surface it via
+    # a skill the model loads on demand, not per-turn injection.
+    _ = subagent_available  # intentionally unused; kept for API stability
     return "\n".join(lines)
 
 
@@ -290,6 +310,25 @@ def build_verification_continue_nudge(ledger: VerificationLedger) -> str:
         "the named evidence now instead of handing control back. If the check is "
         "actually complete or disproven, call the `verify` tool first so the "
         "contract reflects that before you stop."
+    )
+
+
+def build_verification_settled_nudge(ledger: VerificationLedger) -> str:
+    """Short terminal nudge when the contract transitions to all-passed.
+
+    Injected ONCE via a one-shot at the moment the ledger settles so a
+    capable model (Claude, GLM 5.1, etc.) gets a clear "you're done" signal
+    and doesn't keep tool-calling past the point of sufficient evidence.
+    """
+    if not ledger.is_all_passed():
+        return ""
+    passed = len(ledger.items)
+    plural = "item" if passed == 1 else "items"
+    return (
+        f"All {passed} verification {plural} are passed. The contract is "
+        "fully satisfied. Reply with plain text to return control to the "
+        "user. Do not run additional browser, screenshot, or vision calls "
+        "unless the user explicitly asks for more."
     )
 
 
